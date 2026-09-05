@@ -1,0 +1,44 @@
+# Build & Cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Checkpoints & Models
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Logs
+logs/
+*.log
+
+# Tokenizer (large binary files)
+wb/russian_tokenizer/*.json
+
+# Archive
+archive/
+docs/archive/
+core/archive/
+scripts/archive/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Personal data
+eva_ai/
+*.7z
+session_backup.json
+
+# Temp files
+generation_output.txt
+*_report.html
+eva_monitor*.txt
+gen_*.txt
+
+# Scratch analysis outputs (локальные, не коммитить)
+analyze_*.txt
+scripts/mini_result_*.txt
