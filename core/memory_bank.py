@@ -652,3 +652,141 @@ class StreamingMemoryBank(nn.Module):
             'l3_val_scale': l3s['val_scale'],
             'mem_scale': torch.tanh(self.log_scale).item(),
         }
+
+    # ─── tau-adaptive state compression ────────────────────────────
+
+    def compress_state(self) -> None:
+        """Compress internal state for memory-efficient storage.
+
+        Called between generation steps to reduce memory footprint.
+        Uses tau-adaptive compression: L1 (volatile) gets uniform8,
+        L2/L3 (stable) get sparse top-k.
+        """
+        from .tau_compression import compress_uniform8, compress_sparse_topk
+
+        # L1: volatile → uniform8 (4x compression)
+        if not hasattr(self, '_l1_compressed'):
+            self._l1_compressed = None
+        buf = self.l1.buf.data
+        idx, t_min, scale = compress_uniform8(buf)
+        self._l1_compressed = {'idx': idx, 'min': t_min, 'scale': scale,
+                               'shape': buf.shape, 'dtype': buf.dtype}
+
+        # L2 keys: medium → sparse_topk-128
+        if not hasattr(self, '_l2_keys_compressed'):
+            self._l2_keys_compressed = None
+        keys = self.l2.keys.data
+        idx_pos, idx_vals, meta = compress_sparse_topk(keys.unsqueeze(0), k=min(128, keys.shape[-1]))
+        self._l2_keys_compressed = {'pos': idx_pos, 'vals': idx_vals, 'meta': meta,
+                                    'shape': keys.shape, 'dtype': keys.dtype}
+
+        # L2 vals: medium → sparse_topk-128
+        if not hasattr(self, '_l2_vals_compressed'):
+            self._l2_vals_compressed = None
+        vals = self.l2.vals.data
+        idx_pos, idx_vals, meta = compress_sparse_topk(vals.unsqueeze(0), k=min(128, vals.shape[-1]))
+        self._l2_vals_compressed = {'pos': idx_pos, 'vals': idx_vals, 'meta': meta,
+                                    'shape': vals.shape, 'dtype': vals.dtype}
+
+        # L3 concept_keys: stable → sparse_topk-64
+        if not hasattr(self, '_l3_keys_compressed'):
+            self._l3_keys_compressed = None
+        ck = self.l3.concept_keys.data
+        idx_pos, idx_vals, meta = compress_sparse_topk(ck.unsqueeze(0), k=min(64, ck.shape[-1]))
+        self._l3_keys_compressed = {'pos': idx_pos, 'vals': idx_vals, 'meta': meta,
+                                    'shape': ck.shape, 'dtype': ck.dtype}
+
+        # L3 concept_vals: stable → sparse_topk-64
+        if not hasattr(self, '_l3_vals_compressed'):
+            self._l3_vals_compressed = None
+        cv = self.l3.concept_vals.data
+        idx_pos, idx_vals, meta = compress_sparse_topk(cv.unsqueeze(0), k=min(64, cv.shape[-1]))
+        self._l3_vals_compressed = {'pos': idx_pos, 'vals': idx_vals, 'meta': meta,
+                                    'shape': cv.shape, 'dtype': cv.dtype}
+
+    def decompress_state(self) -> None:
+        """Decompress internal state after compression.
+
+        Called before reading to restore full precision.
+        """
+        from .tau_compression import decompress_uniform8, decompress_sparse_topk
+
+        # L1
+        if hasattr(self, '_l1_compressed') and self._l1_compressed is not None:
+            c = self._l1_compressed
+            self.l1.buf.data.copy_(
+                decompress_uniform8(c['idx'], c['min'], c['scale'],
+                                    c['shape'], c['dtype']))
+
+        # L2 keys
+        if hasattr(self, '_l2_keys_compressed') and self._l2_keys_compressed is not None:
+            c = self._l2_keys_compressed
+            decompressed = decompress_sparse_topk(c['pos'], c['vals'], c['meta'],
+                                                   (1,) + c['shape'], c['dtype'])
+            self.l2.keys.data.copy_(decompressed.squeeze(0))
+
+        # L2 vals
+        if hasattr(self, '_l2_vals_compressed') and self._l2_vals_compressed is not None:
+            c = self._l2_vals_compressed
+            decompressed = decompress_sparse_topk(c['pos'], c['vals'], c['meta'],
+                                                   (1,) + c['shape'], c['dtype'])
+            self.l2.vals.data.copy_(decompressed.squeeze(0))
+
+        # L3 concept_keys
+        if hasattr(self, '_l3_keys_compressed') and self._l3_keys_compressed is not None:
+            c = self._l3_keys_compressed
+            decompressed = decompress_sparse_topk(c['pos'], c['vals'], c['meta'],
+                                                   (1,) + c['shape'], c['dtype'])
+            self.l3.concept_keys.data.copy_(decompressed.squeeze(0))
+
+        # L3 concept_vals
+        if hasattr(self, '_l3_vals_compressed') and self._l3_vals_compressed is not None:
+            c = self._l3_vals_compressed
+            decompressed = decompress_sparse_topk(c['pos'], c['vals'], c['meta'],
+                                                   (1,) + c['shape'], c['dtype'])
+            self.l3.concept_vals.data.copy_(decompressed.squeeze(0))
+
+    def compression_stats(self) -> dict:
+        """Get compression statistics."""
+        import sys
+        orig_bytes = 0
+        comp_bytes = 0
+
+        # L1
+        orig_bytes += self.l1.buf.numel() * 4
+        if hasattr(self, '_l1_compressed') and self._l1_compressed is not None:
+            c = self._l1_compressed
+            comp_bytes += c['idx'].numel() + 8 if c['idx'] is not None else 8
+
+        # L2 keys
+        orig_bytes += self.l2.keys.numel() * 4
+        if hasattr(self, '_l2_keys_compressed') and self._l2_keys_compressed is not None:
+            c = self._l2_keys_compressed
+            comp_bytes += c['pos'].numel() * 2 + c['vals'].numel() + 8
+
+        # L2 vals
+        orig_bytes += self.l2.vals.numel() * 4
+        if hasattr(self, '_l2_vals_compressed') and self._l2_vals_compressed is not None:
+            c = self._l2_vals_compressed
+            comp_bytes += c['pos'].numel() * 2 + c['vals'].numel() + 8
+
+        # L3 concept_keys
+        orig_bytes += self.l3.concept_keys.numel() * 4
+        if hasattr(self, '_l3_keys_compressed') and self._l3_keys_compressed is not None:
+            c = self._l3_keys_compressed
+            comp_bytes += c['pos'].numel() * 2 + c['vals'].numel() + 8
+
+        # L3 concept_vals
+        orig_bytes += self.l3.concept_vals.numel() * 4
+        if hasattr(self, '_l3_vals_compressed') and self._l3_vals_compressed is not None:
+            c = self._l3_vals_compressed
+            comp_bytes += c['pos'].numel() * 2 + c['vals'].numel() + 8
+
+        ratio = orig_bytes / max(comp_bytes, 1)
+        return {
+            'original_bytes': orig_bytes,
+            'compressed_bytes': comp_bytes,
+            'ratio': ratio,
+            'original_kb': orig_bytes / 1024,
+            'compressed_kb': comp_bytes / 1024,
+        }

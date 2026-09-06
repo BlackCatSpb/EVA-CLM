@@ -18,6 +18,8 @@ from .tau_config import TauConfig
 from .adaptive_controller import AdaptiveController
 from .lr_scheduler import MirrorLRScheduler
 from .losses import compute_losses as _compute_losses_fn
+from .logit_cache import LogitCacheAttention
+from .logit_cache_v2 import PerScaleCacheAttention
 
 class EVAStack(nn.Module):
     """Stack of EVABlock layers with embedding and lm_head."""
@@ -175,6 +177,17 @@ class EVAStack(nn.Module):
         self._layer_diagnostics = {}  # filled during forward
         # U2: τ-norm for reasoning budget (mean across layers)
         self._tau_norm_reasoning = self.tau_config.tau_norm.mean().item()
+        # ─── Logit Cache with Attention (long-context memory) ───
+        # Per-scale compression driven by VSA scales.
+        # Stores compressed logits for 1M+ tokens with ~216x compression.
+        # The model LEARNS vsa_scales to control compression per scale.
+        self.logit_cache = PerScaleCacheAttention(
+            D=cfg.D,
+            V=cfg.vocab,
+            n_layers=cfg.n_layers,
+            max_tokens=getattr(cfg, 'logit_cache_max_tokens', 1_000_000),
+            n_heads=getattr(cfg, 'logit_cache_n_heads', 8),
+        ) if getattr(cfg, 'logit_cache_enabled', False) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,
                 context_mem=None, allow_write=None, step=None,
@@ -878,6 +891,43 @@ class EVAStack(nn.Module):
         # Store salience of THIS step's output for use as the next step's
         # intent signal (1-step delay). Keeps the loop stable and geometry clean.
         self._last_salience = self.compute_salience(logits).detach()
+
+    def process_with_cache(self, h: torch.Tensor, logits: torch.Tensor,
+                           use_cache: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Process logits through cache and augment hidden state.
+
+        Call this after lm_head to:
+        1. Store logits in cache (compressed, per-scale)
+        2. Attend to cached logits (long-context memory)
+        3. Return augmented hidden state
+
+        Args:
+            h: (B, L, D) hidden state from forward pass
+            logits: (B, L, V) logits from lm_head
+            use_cache: if True, use cache; if False, return h and logits unchanged
+
+        Returns:
+            h_augmented: (B, L, D) hidden state augmented with cache info
+            logits_out: (B, L, V) logits (unchanged)
+        """
+        if self.logit_cache is None or not use_cache:
+            return h, logits
+
+        # Process through cache (stores + attends)
+        h_augmented, logits_out = self.logit_cache(h, logits, use_cache=True)
+
+        return h_augmented, logits_out
+
+    def reset_cache(self):
+        """Clear the logit cache (for new sequence)."""
+        if self.logit_cache is not None:
+            self.logit_cache.cache.clear()
+
+    def cache_size_mb(self) -> float:
+        """Get current cache size in MB."""
+        if self.logit_cache is not None:
+            return self.logit_cache.cache.size_mb()
+        return 0.0
 
     def compute_losses(self, h, targets, pred_weight=None, h_emb=None):
         """Compute CE and auxiliary losses separately. Returns raw (unweighted) values.
