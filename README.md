@@ -11,7 +11,7 @@ D=2560, ~191M параметров, 24 слоя. Без attention, без softma
 
 ```
   ┌───────────────────────────────────────────────────────────────┐
-  │              EVA-CLM · Единая Вычислительная Архитектура       │
+  │              EVA-CLM · Единая Вычислительная Архитектура      │
   │   VSA-память · Bind-скрещивание · Cognitive Mirror            │
   │   Unified τ-field · SemanticBridge · MemoryBank L1/L2/L3      │
   │   D=2560 · ~191M params · 24 layers                           │
