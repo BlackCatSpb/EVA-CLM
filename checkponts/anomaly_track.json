@@ -38,5 +38,195 @@
   "gate_min": 0.33983808755874634,
   "gate_min_layer": 4,
   "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.306736946105957,
+  "hp_layer": 0,
+  "predmse_max": 2.840055227279663,
+  "predmse_layer": 0,
+  "gate_min": 0.3335980474948883,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.315535068511963,
+  "hp_layer": 0,
+  "predmse_max": 2.880333185195923,
+  "predmse_layer": 0,
+  "gate_min": 0.3171783685684204,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.328373670578003,
+  "hp_layer": 0,
+  "predmse_max": 2.88002872467041,
+  "predmse_layer": 0,
+  "gate_min": 0.3200875222682953,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.306628704071045,
+  "hp_layer": 0,
+  "predmse_max": 2.8813278675079346,
+  "predmse_layer": 0,
+  "gate_min": 0.3418314754962921,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.3234052658081055,
+  "hp_layer": 0,
+  "predmse_max": 2.8798627853393555,
+  "predmse_layer": 0,
+  "gate_min": 0.34189939498901367,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.3019051551818848,
+  "hp_layer": 0,
+  "predmse_max": 2.8257687091827393,
+  "predmse_layer": 0,
+  "gate_min": 0.3245294392108917,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.3182291984558105,
+  "hp_layer": 0,
+  "predmse_max": 2.895092248916626,
+  "predmse_layer": 0,
+  "gate_min": 0.34456977248191833,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5126,
+  "hp_max": 3.30440092086792,
+  "hp_layer": 0,
+  "predmse_max": 2.854375123977661,
+  "predmse_layer": 0,
+  "gate_min": 0.34221071004867554,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5825,
+  "hp_max": 3.409444808959961,
+  "hp_layer": 0,
+  "predmse_max": 3.0090417861938477,
+  "predmse_layer": 0,
+  "gate_min": 0.35566020011901855,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5825,
+  "hp_max": 3.407439947128296,
+  "hp_layer": 0,
+  "predmse_max": 3.005350351333618,
+  "predmse_layer": 0,
+  "gate_min": 0.3368370532989502,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 5825,
+  "hp_max": 3.3973121643066406,
+  "hp_layer": 0,
+  "predmse_max": 2.9936885833740234,
+  "predmse_layer": 0,
+  "gate_min": 0.34158530831336975,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 6291,
+  "hp_max": 3.4518303871154785,
+  "hp_layer": 0,
+  "predmse_max": 3.084237813949585,
+  "predmse_layer": 0,
+  "gate_min": 0.32631775736808777,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 6524,
+  "hp_max": 3.4821958541870117,
+  "hp_layer": 0,
+  "predmse_max": 3.1310808658599854,
+  "predmse_layer": 0,
+  "gate_min": 0.32754385471343994,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 6990,
+  "hp_max": 3.5687789916992188,
+  "hp_layer": 0,
+  "predmse_max": 3.2911674976348877,
+  "predmse_layer": 0,
+  "gate_min": 0.3430093824863434,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 6990,
+  "hp_max": 3.5723893642425537,
+  "hp_layer": 0,
+  "predmse_max": 3.3105244636535645,
+  "predmse_layer": 0,
+  "gate_min": 0.34265434741973877,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 7456,
+  "hp_max": 3.377700090408325,
+  "hp_layer": 0,
+  "predmse_max": 2.939983367919922,
+  "predmse_layer": 0,
+  "gate_min": 0.34726232290267944,
+  "gate_min_layer": 20,
+  "births": []
+ },
+ {
+  "step": 7456,
+  "hp_max": 3.4018044471740723,
+  "hp_layer": 0,
+  "predmse_max": 2.9993345737457275,
+  "predmse_layer": 0,
+  "gate_min": 0.34319478273391724,
+  "gate_min_layer": 20,
+  "births": []
+ },
+ {
+  "step": 7223,
+  "hp_max": 3.3406081199645996,
+  "hp_layer": 0,
+  "predmse_max": 2.8762712478637695,
+  "predmse_layer": 0,
+  "gate_min": 0.2998168170452118,
+  "gate_min_layer": 20,
+  "births": []
+ },
+ {
+  "step": 8155,
+  "hp_max": 3.510653257369995,
+  "hp_layer": 0,
+  "predmse_max": 3.1732852458953857,
+  "predmse_layer": 0,
+  "gate_min": 0.3356480002403259,
+  "gate_min_layer": 7,
+  "births": []
  }
 ]

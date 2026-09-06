@@ -1467,11 +1467,6 @@ L1=258 L2=258 L3=1(1b) scale=-0.964
 ```
 EVA-CLM/
 ├── core/                       # архитектура: весь код модели
-│   ├── config.py               # EVAConfig + λ-иерархия
-│   ├── tau_config.py           # TauConfig: единое τ-поле (все τ-зависимые величины)
-│   ├── adaptation.py           # LossBalancer, DepthController, FailureDetector, AGC
-│   ├── compression.py          # FCF-CPR: сжатие/декомпрессия чекпоинтов (~8–16×)
-│   ├── lambda_utils.py         # LambdaConfig, λ_d, fib, производные
 │   ├── config.py               # WideBindConfig (canonical) + EVAConfig alias
 │   ├── tau_config.py           # TauConfig: единое τ-поле (все τ-зависимые величины)
 │   ├── adaptation.py           # LossBalancer, DepthController, FailureDetector, AGC
@@ -1496,13 +1491,10 @@ EVA-CLM/
 │   ├── migrate.py              # migrate_state_dict: старые чекпоинты →
 │   │                           #   когерентность (W_out +K, gate=0, freq_scale=1)
 │   ├── vsa_utils.py            # DCT, Zeckendorf, sparse_codes, prefix-scan
-│   ├── curriculum.py           # CurriculumTracker (эксперимент)
 │   ├── live_inference.py       # LiveInference + MirrorMonitor
-│   ├── amp_optim.py            # AmpAdam (для старых кодек-голов)
 │   ├── reasoning.py            # ReasoningMemory + ReasoningGate +
 │   │                           #   ThinkingTokenHead (адаптивная глубина)
-│   ├── memory_bank.py          # StreamingMemoryBank: L1 buffer + L2 bank + L3 concepts
-│   └── model.py                # deprecated shim
+│   └── memory_bank.py          # StreamingMemoryBank: L1 buffer + L2 bank + L3 concepts
 │
 ├── data/                       # подготовка данных для обучения
 │   ├── __init__.py             # пакет: sentence_builder + build_streams_eos
@@ -1512,25 +1504,25 @@ EVA-CLM/
 ├── scripts/
 │   ├── train.py                # учебный цикл (streams, градиенты, eval, миграция)
 │   ├── analyze.py              # единый анализатор: статика + wake + live + head + cmp
+│   ├── generate.py             # генерация: FCF-CPR, --skip-compression, --smart
 │   ├── proj_read.py            # прогон Прожектора на чекпоинте (чтение слов)
 │   ├── checkpoint_inspector.py # быстрое дерево ключей чекпоинта
-│   ├── generate.py             # генерация: FCF-CPR, --skip-compression, --smart
 │   ├── smart_controller.py     # SmartController: τ-адаптивный самонастраивающийся инференс
 │   ├── smart_infer.py          # CLI: baseline vs smart (--no-top, --compare)
 │   ├── eval_compare.py         # количественное сравнение режимов генерации
-│   ├── generate_russian.py     # генерация с разбором метрик
-│   ├── test_reasoning_synth.py # синтетический тест reasoning (адаптивная глубина)
-│   └── test_reasoning_grad.py  # проверка живых градиентов гейтов
+│   └── smoke_notebook.py       # smoke-тест для Colab-ноутбука
 │
 ├── notebooks/
 │   └── eva_colab.ipynb         # канонический ноутбук (D2560/24L, T4)
 │
-├── docs/                       # документы (ARCHITECTURE_REPORT.md, AGENT_BRIEF.md)
-├── checkponts/                # чекпоинты (best 1.pt — best 10.pt)
-├── wb/                         # BPE-токенизатор (russian_tokenizer/) + обучающие потоки (token_stream_*_eos.bin)
 ├── tests/                      # тесты (214/214 passing, full type hints)
+├── docs/                       # документы (ARCHITECTURE_REPORT.md, AGENT_BRIEF.md)
+├── checkponts/                 # чекпоинты (best 1.pt — best 20.pt)
+├── wb/                         # BPE-токенизатор + обучающие потоки
+├── archive/                    # архив: неиспользуемые модули и эксперименты
+│   ├── core/                   #   amp_optim.py, curriculum.py, training_guard.py, model.py
+│   └── scripts/                #   19 diagnostic/experimental scripts
 ├── logs/                       # логи тренировки (gitignored)
-├── archive/                    # старый код/эксперименты — локально, вне репозитория (.gitignore)
 └── README.md                   # этот файл
 ```
 

@@ -9,11 +9,12 @@ import torch.nn.functional as F
 
 from core.config import EVAConfig
 from core.lambda_utils import LambdaConfig
-from core.model import (
-    EVAStack, EVABlock, GroupedCognitiveMirror, GroupedMLP,
-    PartitionedEmbedding, PartitionedHead, LmHead,
-    sparse_block_codes, dct_basis, vsa_prefix_scan,
-)
+from core.stack import EVAStack
+from core.block import EVABlock
+from core.mirror import GroupedCognitiveMirror
+from core.mlp import GroupedMLP
+from core.embedding import PartitionedEmbedding, PartitionedHead, LmHead
+from core.vsa_utils import sparse_block_codes, dct_basis, vsa_prefix_scan
 from core.live_inference import LiveInference, MirrorMonitor
 
 
@@ -383,7 +384,7 @@ def test_dct_basis_first_row():
 def test_adaptive_controller_ranges():
     cfg = EVAConfig(**SMALL)
     model = EVAStack(cfg)
-    from core.model import AdaptiveController
+    from core.adaptive_controller import AdaptiveController
     expl, diff = AdaptiveController.stats(model.layers)
     assert 0 <= expl <= 1
     assert 0 <= diff <= 1
@@ -405,7 +406,7 @@ def test_config_adaptive_controller_thresholds():
     model = EVAStack(cfg)
     h = torch.randn(1, 4, cfg.D)
     model(h)
-    from core.model import AdaptiveController
+    from core.adaptive_controller import AdaptiveController
     expl, diff = AdaptiveController.stats(model.layers,
         expl_thresh=cfg.exploration_threshold, diff_thresh=cfg.differentiation_threshold)
     assert 0 <= expl <= 1
