@@ -59,9 +59,12 @@ All stochastic quantities use EMA decays derived from a known cadence
 (e.g. ``1 - 1/eval_interval``) rather than hand-picked constants.
 """
 
+from __future__ import annotations
+
 import gc
 import math
 import os
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
@@ -70,7 +73,7 @@ import torch
 # Progressive unfreezing — depth control
 # ─────────────────────────────────────────────────────────────────────────────
 
-def set_active_depth(model, k):
+def set_active_depth(model: torch.nn.Module, k: int) -> int:
     """Freeze every block with index >= k (0-based); keep [0, k) trainable."""
     k = max(0, min(int(k), len(model.layers)))
     for i, layer in enumerate(model.layers):
@@ -92,30 +95,32 @@ class DepthController:
     proxy.
     """
 
-    def __init__(self, model, n_layers=None, init_k=8, unfreeze_inc=4,
-                 warmup_steps=2000, k_sigma=1.0, eval_interval=1000,
-                 max_depth=None):
-        self.model = model
-        self.n = int(n_layers if n_layers is not None else len(model.layers))
-        self.init_k = min(int(init_k), self.n)
-        self.inc = int(unfreeze_inc)
-        self.warmup = int(warmup_steps)
-        self.k = float(k_sigma)
-        self.eval_interval = int(eval_interval)
-        self.max_depth = self.n if max_depth is None else min(int(max_depth), self.n)
-        self.active = self.init_k
-        self._val_ema = None
-        self._val_var = None
-        self._prev_val = None
-        self._last_depth_step = -10 ** 9
+    def __init__(self, model: torch.nn.Module, n_layers: Optional[int] = None,
+                 init_k: int = 8, unfreeze_inc: int = 4,
+                 warmup_steps: int = 2000, k_sigma: float = 1.0,
+                 eval_interval: int = 1000,
+                 max_depth: Optional[int] = None) -> None:
+        self.model: torch.nn.Module = model
+        self.n: int = int(n_layers if n_layers is not None else len(model.layers))
+        self.init_k: int = min(int(init_k), self.n)
+        self.inc: int = int(unfreeze_inc)
+        self.warmup: int = int(warmup_steps)
+        self.k: float = float(k_sigma)
+        self.eval_interval: int = int(eval_interval)
+        self.max_depth: int = self.n if max_depth is None else min(int(max_depth), self.n)
+        self.active: int = self.init_k
+        self._val_ema: Optional[float] = None
+        self._val_var: Optional[float] = None
+        self._prev_val: Optional[float] = None
+        self._last_depth_step: int = -10 ** 9
         set_active_depth(model, self.active)
 
-    def set_depth(self, k):
+    def set_depth(self, k: int) -> int:
         """Force the active depth (used when resuming from a checkpoint)."""
         self.active = set_active_depth(self.model, k)
         return self.active
 
-    def update(self, step, val_loss=None):
+    def update(self, step: int, val_loss: Optional[float] = None) -> int:
         """Call every step.  Depth progression only happens at eval boundaries
         (when ``val_loss`` is provided)."""
         if val_loss is None or step < self.warmup:
@@ -149,7 +154,7 @@ class DepthController:
 # Optimizer (LLRD) — single source
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _layer_index_of(name):
+def _layer_index_of(name: str) -> int:
     if name.startswith('layers.'):
         try:
             return int(name.split('.')[1])
@@ -158,7 +163,7 @@ def _layer_index_of(name):
     return -1
 
 
-def _role_lr_mult(name, lam):
+def _role_lr_mult(name: str, lam: Any) -> float:
     if '.b_d' in name or '.b_i' in name or '.scale_w' in name:
         return lam ** (-2)            # vsa scales
     if name.startswith('embed.') or name.startswith('lm_head.readout') \
@@ -184,8 +189,10 @@ def _role_lr_mult(name, lam):
     return 1.0
 
 
-def build_optimizer(model, base_lr, llrd_decay=0.9, weight_decay=0.01,
-                    betas=(0.9, 0.95), lam=None):
+def build_optimizer(model: torch.nn.Module, base_lr: float,
+                    llrd_decay: float = 0.9, weight_decay: float = 0.01,
+                    betas: Tuple[float, float] = (0.9, 0.95),
+                    lam: Any = None) -> torch.optim.AdamW:
     """AdamW with Layer-wise LR Decay (LLRD): lr = base_lr · role_mult · (llrd**depth).
 
     LLRD (Devlin et al., 2019) damps the residual-stream growth of deep blocks,
@@ -226,47 +233,49 @@ class LRController:
     ``rewind()`` used on recovery instead of an arbitrary 0.5 halving.
     """
 
-    def __init__(self, model, optimizer, cfg, warmup=None, base_lr=None):
+    def __init__(self, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
+                 cfg: Any, warmup: Optional[int] = None,
+                 base_lr: Optional[float] = None) -> None:
         from .stack import MirrorLRScheduler
         warmup = warmup if warmup is not None else getattr(cfg, 'warmup_steps', 1000)
         base_lr = base_lr if base_lr is not None else cfg.lr
-        self._inner = MirrorLRScheduler(model, optimizer, base_lr=base_lr,
-                                        warmup=warmup, cfg=cfg)
-        self.model = model
-        self.optimizer = optimizer
-        self.cfg = cfg
+        self._inner: Any = MirrorLRScheduler(model, optimizer, base_lr=base_lr,
+                                             warmup=warmup, cfg=cfg)
+        self.model: torch.nn.Module = model
+        self.optimizer: torch.optim.Optimizer = optimizer
+        self.cfg: Any = cfg
 
-    def step(self):
+    def step(self) -> None:
         self._inner.step()
 
-    def get_last_lr(self):
+    def get_last_lr(self) -> List[float]:
         return self._inner.get_last_lr()
 
-    def report_val_loss(self, val_loss):
+    def report_val_loss(self, val_loss: float) -> None:
         self._inner.report_val_loss(val_loss)
 
-    def set_step(self, n):
+    def set_step(self, n: int) -> None:
         self._inner._step = int(n)
 
     @property
-    def _step(self):
+    def _step(self) -> int:
         return self._inner._step
 
     @_step.setter
-    def _step(self, v):
+    def _step(self, v: int) -> None:
         self._inner._step = v
 
     @property
-    def _ls_mult(self):
+    def _ls_mult(self) -> Optional[float]:
         return getattr(self._inner, '_ls_mult', None)
 
-    def state_dict(self):
+    def state_dict(self) -> Dict[str, Any]:
         return self._inner.state_dict()
 
-    def load_state_dict(self, sd):
+    def load_state_dict(self, sd: Dict[str, Any]) -> None:
         self._inner.load_state_dict(sd)
 
-    def rewind(self, warmup=None):
+    def rewind(self, warmup: Optional[int] = None) -> None:
         """Recovery: restart from a small LR (re-warmup) rather than halving.
 
         Re-warmup is a known stabilisation technique (warm restarts / SGDR
@@ -294,28 +303,31 @@ class FailureDetector:
     """Roll back to ``best.pt`` + fresh Adam + LR rewind on a *statistical*
     CE explosion (SPC 3σ rule)."""
 
-    def __init__(self, model, lr_controller, make_optimizer_fn, best_path,
-                 base_lr, k_sigma=3.0, warmup=2000, recover_max=20, cooldown=50,
-                 min_consecutive=3):
-        self.model = model
-        self.lr_controller = lr_controller
-        self.make_optimizer_fn = make_optimizer_fn
-        self.best_path = best_path
-        self.base_lr = float(base_lr)
-        self.k_sigma = float(k_sigma)
-        self.warmup = int(warmup)
-        self.recover_max = int(recover_max)
-        self.cooldown = int(cooldown)
-        self.min_consecutive = int(min_consecutive)
-        self._cooldown = 0
-        self._ce_ema = None
-        self._ce_var = None
-        self._prev_ce = None
-        self._viol = 0
-        self.recover_count = 0
-        self.optimizer = None
+    def __init__(self, model: torch.nn.Module, lr_controller: LRController,
+                 make_optimizer_fn: Callable[[float], torch.optim.Optimizer],
+                 best_path: str,
+                 base_lr: float, k_sigma: float = 3.0, warmup: int = 2000,
+                 recover_max: int = 20, cooldown: int = 50,
+                 min_consecutive: int = 3) -> None:
+        self.model: torch.nn.Module = model
+        self.lr_controller: LRController = lr_controller
+        self.make_optimizer_fn: Callable[[float], torch.optim.Optimizer] = make_optimizer_fn
+        self.best_path: str = best_path
+        self.base_lr: float = float(base_lr)
+        self.k_sigma: float = float(k_sigma)
+        self.warmup: int = int(warmup)
+        self.recover_max: int = int(recover_max)
+        self.cooldown: int = int(cooldown)
+        self.min_consecutive: int = int(min_consecutive)
+        self._cooldown: int = 0
+        self._ce_ema: Optional[float] = None
+        self._ce_var: Optional[float] = None
+        self._prev_ce: Optional[float] = None
+        self._viol: int = 0
+        self.recover_count: int = 0
+        self.optimizer: Optional[torch.optim.Optimizer] = None
 
-    def check(self, ce, step):
+    def check(self, ce: float, step: int) -> bool:
         ce = float(ce)
         if self._ce_ema is None:
             self._ce_ema = ce
@@ -394,14 +406,15 @@ class GradientClipper:
     U9: τ-aware clipping: clip_threshold = base_c · (τ_ref / τ_l)^γ
     """
 
-    def __init__(self, c=0.01, eps=1e-3, tau_ref=64.0, gamma=0.65):
-        self.c = float(c)
-        self.eps = float(eps)
-        self.tau_ref = float(tau_ref)
-        self.gamma = float(gamma)
-        self._tau_scale = 1.0  # default: no modulation
+    def __init__(self, c: float = 0.01, eps: float = 1e-3,
+                 tau_ref: float = 64.0, gamma: float = 0.65) -> None:
+        self.c: float = float(c)
+        self.eps: float = float(eps)
+        self.tau_ref: float = float(tau_ref)
+        self.gamma: float = float(gamma)
+        self._tau_scale: float = 1.0  # default: no modulation
 
-    def set_tau_scale(self, tau_norm: float):
+    def set_tau_scale(self, tau_norm: float) -> None:
         """U9: set τ-modulation for clipping: (τ_ref / τ_l)^γ."""
         import math
         # tau_norm ∈ [0,1]; reconstruct τ_l from τ-field
@@ -409,7 +422,7 @@ class GradientClipper:
         # scale = (1 + tau_norm)^(-gamma) — shallow (τ_norm≈0) clips more loosely
         self._tau_scale = (1.0 + tau_norm) ** (-self.gamma)
 
-    def clip(self, parameters):
+    def clip(self, parameters: Iterable[torch.nn.Parameter]) -> None:
         # U9: τ-aware effective clip ratio
         c_eff = self.c * self._tau_scale
         for p in parameters:
@@ -451,23 +464,24 @@ class LossBalancer:
       loss for a normal ``loss.backward()``.
     """
 
-    def __init__(self, align=True, align_cap=10.0, eval_interval=1000):
-        self.align = bool(align)
-        self.align_cap = float(align_cap)
-        self.eval_interval = int(eval_interval)
+    def __init__(self, align: bool = True, align_cap: float = 10.0,
+                 eval_interval: int = 1000) -> None:
+        self.align: bool = bool(align)
+        self.align_cap: float = float(align_cap)
+        self.eval_interval: int = int(eval_interval)
         # magnitude-balance state
-        self.ema_ce = None
-        self.ema_aux = {}
-        self.ema_A = None
+        self.ema_ce: Optional[float] = None
+        self.ema_aux: Dict[str, float] = {}
+        self.ema_A: Optional[float] = None
 
-    def set_stats(self, eval_interval=1000):
+    def set_stats(self, eval_interval: int = 1000) -> None:
         self.eval_interval = int(eval_interval)
 
     # ---- magnitude-balance helpers ---------------------------------------
-    def _ema_decay(self):
+    def _ema_decay(self) -> float:
         return 1.0 - 1.0 / max(self.eval_interval, 100)
 
-    def _update_balance(self, ce_loss, aux_dict):
+    def _update_balance(self, ce_loss: Any, aux_dict: Dict[str, Any]) -> None:
         d = self._ema_decay()
         ce = float(ce_loss.detach().item()) if isinstance(ce_loss, torch.Tensor) else float(ce_loss)
         if self.ema_ce is None:
@@ -489,7 +503,7 @@ class LossBalancer:
         else:
             self.ema_A = d * self.ema_A + (1 - d) * A
 
-    def loss(self, ce_loss, aux_dict):
+    def loss(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any]) -> torch.Tensor:
         """Scalar loss for logging / ``mode='balance'`` backward."""
         self._update_balance(ce_loss, aux_dict)
         total = ce_loss
@@ -504,7 +518,9 @@ class LossBalancer:
         return total
 
     # ---- spectral-alignment backward -------------------------------------
-    def backward(self, ce_loss, aux_dict, parameters, retain_graph=False):
+    def backward(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any],
+                 parameters: Iterable[torch.nn.Parameter],
+                 retain_graph: bool = False) -> None:
         """Set ``p.grad`` = g_CE + scale·g_aux (PCGrad-style projection).
 
         ``parameters``: iterable of model parameters.  Caller must NOT also call

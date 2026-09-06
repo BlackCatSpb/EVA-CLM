@@ -11,7 +11,13 @@ MirrorMonitor:  Non-invasive tracer. After each forward, reads per-expert gates,
                 rolling traces for analysis / visualization.
 """
 
+from __future__ import annotations
+
+from typing import Any, Optional
+
 import torch
+
+from .config import EVAConfig
 from .stack import EVAStack, AdaptiveController
 
 
@@ -22,13 +28,13 @@ class MirrorMonitor:
     metrics.  History is stored as lists of tensors for later analysis.
     """
 
-    def __init__(self, model: EVAStack, max_history: int = 5000):
-        self.model = model
-        self.max_history = max_history
+    def __init__(self, model: EVAStack, max_history: int = 5000) -> None:
+        self.model: EVAStack = model
+        self.max_history: int = max_history
         self.clear()
 
-    def clear(self):
-        self.history = {
+    def clear(self) -> None:
+        self.history: dict[str, list[Any]] = {
             'step': [],
             'expert_gates': [],        # (n_layers, G) — per-expert meta-gate
             'mirror_mag': [],          # (n_layers,) — average |mirror|
@@ -40,7 +46,7 @@ class MirrorMonitor:
             'global_state_norm': [],   # scalar — ||global_state||
         }
 
-    def capture(self, global_state=None):
+    def capture(self, global_state: Optional[torch.Tensor] = None) -> None:
         """Read internal metrics from all layers.
         Must be called AFTER model.forward().
         """
@@ -90,7 +96,7 @@ class MirrorMonitor:
             for k in self.history:
                 self.history[k] = self.history[k][-self.max_history:]
 
-    def summary(self, window=100):
+    def summary(self, window: int = 100) -> dict[str, Any]:
         """Return a dict of mean/std over the last `window` steps."""
         n = len(self.history['step'])
         if n == 0:
@@ -138,21 +144,21 @@ class LiveInference:
         summary = live.monitor.summary(window=50)
     """
 
-    def __init__(self, model: EVAStack, cfg,
-                 monitor: bool = True, max_history: int = 5000):
-        self.model = model
-        self.cfg = cfg
-        self.layer_states = None
-        self.global_state = None
-        self.intent_state = None
-        self.step = 0
+    def __init__(self, model: EVAStack, cfg: EVAConfig,
+                 monitor: bool = True, max_history: int = 5000) -> None:
+        self.model: EVAStack = model
+        self.cfg: EVAConfig = cfg
+        self.layer_states: Optional[list[Any]] = None
+        self.global_state: Optional[torch.Tensor] = None
+        self.intent_state: Optional[torch.Tensor] = None
+        self.step: int = 0
 
         if monitor:
-            self.monitor = MirrorMonitor(model, max_history=max_history)
+            self.monitor: Optional[MirrorMonitor] = MirrorMonitor(model, max_history=max_history)
         else:
             self.monitor = None
 
-    def think(self, n_steps: int = 1, h: torch.Tensor = None) -> torch.Tensor:
+    def think(self, n_steps: int = 1, h: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Run internal self-dialogue steps.
 
         If h is None, feeds a zero activation (minimal "think" token).
@@ -161,7 +167,7 @@ class LiveInference:
 
         Returns the final hidden state after n_steps.
         """
-        out = None
+        out: Optional[torch.Tensor] = None
         for _ in range(n_steps):
             if h is None:
                 h = torch.zeros(1, 1, self.cfg.D,
@@ -203,7 +209,7 @@ class LiveInference:
 
         return out
 
-    def reset_state(self):
+    def reset_state(self) -> None:
         """Reset all internal states (layer states + global_state)."""
         self.layer_states = None
         self.global_state = None
@@ -212,14 +218,14 @@ class LiveInference:
         if self.monitor is not None:
             self.monitor.clear()
 
-    def generate(self, prompt_ids, gen_len=100, think_steps=0):
+    def generate(self, prompt_ids: torch.Tensor, gen_len: int = 100, think_steps: int = 0) -> list[int]:
         """Convenience: think (optional) -> prefill -> generate tokens."""
         self.respond(self.model.embed_tokens(prompt_ids))
 
         for _ in range(think_steps):
             self.think()
 
-        tokens = []
+        tokens: list[int] = []
         h = None  # will use last output from respond
         for _ in range(gen_len):
             out = self.think(n_steps=1, h=h)

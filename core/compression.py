@@ -3,17 +3,26 @@ FCF-CPR: Fractal Cognitive Field CheckPoint Reduction.
 Compresses EVA .pt files: removes deterministic buffers, 
 quantizes real weights with uniform 8-bit per tensor.
 """
-import math, os, sys
+from __future__ import annotations
+
+import math
+import os
+import sys
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import WideBindConfig
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
 
 
 REMOVABLE_PATTERNS = {'V_dct', 'codes'}
 
-def is_removable(k):
+def is_removable(k: str) -> bool:
     return any(p in k for p in REMOVABLE_PATTERNS)
 
-def is_scalar_gate(k, v=None):
+def is_scalar_gate(k: str, v: Optional[torch.Tensor] = None) -> bool:
     """True for b_i/b_d ONLY if tensor is still uniform (safe to scalar-fold)."""
     if not ('b_i' in k or 'b_d' in k):
         return False
@@ -22,7 +31,7 @@ def is_scalar_gate(k, v=None):
     return True
 
 
-def quantize_tensor(t, n_bits=8):
+def quantize_tensor(t: torch.Tensor, n_bits: int = 8) -> tuple[Optional[torch.Tensor], float, float]:
     """Uniform quantization: store tensor as uint8 + min + scale.
     Returns (indices, min_val, scale)."""
     n_levels = 2 ** n_bits
@@ -40,7 +49,7 @@ def quantize_tensor(t, n_bits=8):
     return indices, t_min, scale
 
 
-def dequantize_tensor(indices, t_min, scale, dtype=torch.float32):
+def dequantize_tensor(indices: Optional[torch.Tensor], t_min: float, scale: float, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """Restore fp32 from uint8 + min + scale."""
     if indices is None:
         return torch.tensor(t_min, dtype=dtype)
@@ -48,7 +57,7 @@ def dequantize_tensor(indices, t_min, scale, dtype=torch.float32):
     return restored.to(dtype)
 
 
-def quantize_tensor_channel(t, dim=0, n_bits=8):
+def quantize_tensor_channel(t: torch.Tensor, dim: int = 0, n_bits: int = 8) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Per-channel uniform quantization: each slice along dim gets own min/scale.
     For 2D weight (M, N): each row gets 256 levels instead of sharing across all M×N.
     Returns (indices, mins, scales)."""
@@ -77,7 +86,7 @@ def quantize_tensor_channel(t, dim=0, n_bits=8):
     return indices, torch.tensor(mins), torch.tensor(scales)
 
 
-def dequantize_tensor_channel(indices, mins, scales, orig_shape, dtype=torch.float32):
+def dequantize_tensor_channel(indices: torch.Tensor, mins: torch.Tensor, scales: torch.Tensor, orig_shape: list[int], dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """Restore fp32 from per-channel uint8 + mins + scales."""
     restored = torch.zeros(orig_shape, dtype=dtype)
     n_ch = mins.shape[0]
@@ -91,7 +100,7 @@ def dequantize_tensor_channel(indices, mins, scales, orig_shape, dtype=torch.flo
     return restored
 
 
-def analyze_sd(sd):
+def analyze_sd(sd: dict[str, torch.Tensor]) -> dict[str, list[tuple[str, torch.Tensor]]]:
     """Print detailed analysis of state dict with size breakdown."""
     total_elems = sum(p.numel() for p in sd.values())
     total_bytes = sum(p.numel() * p.element_size() for p in sd.values())
@@ -153,7 +162,7 @@ class FCF_CPR:
     """FCF checkpoint compressor — removes deterministic buffers, 
     quantizes real weights with uniform 8-bit per tensor."""
     
-    def compress_sd(self, sd):
+    def compress_sd(self, sd: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
         """Compress model state_dict. Returns (compressed_dict, meta_dict)."""
         result = {}
         meta = {}
@@ -203,7 +212,7 @@ class FCF_CPR:
         
         return result, meta
     
-    def decompress_sd(self, compressed, meta, cfg):
+    def decompress_sd(self, compressed: dict[str, torch.Tensor], meta: dict[str, Any], cfg: WideBindConfig) -> dict[str, torch.Tensor]:
         """Restore full state dict from compressed format."""
         from core import dct_basis, sparse_block_codes
         
@@ -239,7 +248,7 @@ class FCF_CPR:
         
         return sd
     
-    def save_compressed(self, ckpt, save_path):
+    def save_compressed(self, ckpt: dict[str, Any], save_path: str) -> int:
         """Save compressed checkpoint as an inference-only artifact.
 
         Strips all training-only state (optimizer, scheduler, param_names,
@@ -266,7 +275,7 @@ class FCF_CPR:
         print(f'Compressed size: {size/1e9:.2f} GB ({size/1e6:.0f} MB)')
         return size
     
-    def load_compressed(self, load_path, cfg=None):
+    def load_compressed(self, load_path: str, cfg: Optional[WideBindConfig] = None) -> dict[str, Any]:
         """Load and decompress checkpoint."""
         ckpt = torch.load(load_path, map_location='cpu', weights_only=False)
         
@@ -287,6 +296,19 @@ class FCF_CPR:
         del ckpt['meta']
         
         return ckpt
+
+
+FCF_CPR_Compressor = FCF_CPR
+
+
+def compress_checkpoint(ckpt: dict[str, Any], save_path: str) -> int:
+    cpr = FCF_CPR()
+    return cpr.save_compressed(ckpt, save_path)
+
+
+def decompress_checkpoint(load_path: str, cfg: Optional[WideBindConfig] = None) -> dict[str, Any]:
+    cpr = FCF_CPR()
+    return cpr.load_compressed(load_path, cfg=cfg)
 
 
 # ─── Test ───

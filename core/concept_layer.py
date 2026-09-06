@@ -17,6 +17,7 @@ Architecture:
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -37,9 +38,9 @@ class UnifiedConceptLayer(nn.Module):
         bridge_dim: int = 256,
         S: int = 8,
         seed: int = 42,
-        cfg=None,
+        cfg: Any = None,
         softmax_free: bool = True,
-    ):
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         self.softmax_free = softmax_free
@@ -105,7 +106,7 @@ class UnifiedConceptLayer(nn.Module):
 
     # ─────────────────── Maturity ───────────────────
 
-    def _update_maturity(self, resvar: torch.Tensor | float):
+    def _update_maturity(self, resvar: torch.Tensor | float) -> None:
         """Continuous maturity from residual variance coefficient of variation.
 
         mat = sigmoid((1/cv - λ) · τ_mat)
@@ -133,7 +134,7 @@ class UnifiedConceptLayer(nn.Module):
 
     # ─────────────────── Write ───────────────────
 
-    def _maybe_write(self, hp: torch.Tensor, pen: torch.Tensor, mat_gate: float):
+    def _maybe_write(self, hp: torch.Tensor, pen: torch.Tensor, mat_gate: float) -> tuple[torch.Tensor, torch.Tensor]:
         """τ-gated concept write (birth/update).
 
         hp: (B, L, G, k) — expert K-space states
@@ -257,7 +258,7 @@ class UnifiedConceptLayer(nn.Module):
         mat_gate: float = 1.0,
         allow_write: bool = True,
         gate: torch.Tensor | None = None,
-        tau_norm: float = None,
+        tau_norm: float | None = None,
     ) -> torch.Tensor:
         """Unified concept layer forward.
 
@@ -346,7 +347,7 @@ class UnifiedConceptLayer(nn.Module):
 
     # ─────────────────── Diagnostics ───────────────────
 
-    def get_diagnostics(self) -> dict:
+    def get_diagnostics(self) -> dict[str, float | int]:
         active = int((self.concept_count > 0).sum().item())
         return {
             'concept_maturity': self._mature.item(),
@@ -361,5 +362,5 @@ class UnifiedConceptLayer(nn.Module):
         }
 
     @torch.no_grad()
-    def birth_gate_mean(self):
+    def birth_gate_mean(self) -> torch.Tensor:
         return self._cached_birth_gate

@@ -1472,14 +1472,21 @@ EVA-CLM/
 │   ├── adaptation.py           # LossBalancer, DepthController, FailureDetector, AGC
 │   ├── compression.py          # FCF-CPR: сжатие/декомпрессия чекпоинтов (~8–16×)
 │   ├── lambda_utils.py         # LambdaConfig, λ_d, fib, производные
+│   ├── config.py               # WideBindConfig (canonical) + EVAConfig alias
+│   ├── tau_config.py           # TauConfig: единое τ-поле (все τ-зависимые величины)
+│   ├── adaptation.py           # LossBalancer, DepthController, FailureDetector, AGC
+│   ├── compression.py          # FCF-CPR: сжатие/декомпрессия чекпоинтов (~8–16×)
+│   ├── lambda_utils.py         # LambdaConfig, λ_d, fib, производные
 │   ├── block.py                # EVABlock (пре-kernel)
-│   ├── stack.py                # EVAStack, compute_losses, param_groups
-│   ├── bind.py                 # Bottleneck/Spiral/Trajectory(-Manifold)Bind,
-│   │                           #   когерентность спиралей (|Z|, freq_scale)
+│   ├── stack.py                # EVAStack: __init__, forward, helpers (~1108 строк)
+│   ├── losses.py               # compute_losses: auxiliary losses (extracted из stack.py)
+│   ├── adaptive_controller.py  # AdaptiveController: все адаптивные гиперпараметры
+│   ├── lr_scheduler.py         # MirrorLRScheduler: LR модулирован cognitive mirror
+│   ├── bind.py                 # Bottleneck/Spiral/Trajectory(-Manifold)Bind
 │   ├── mirror.py               # GroupedCognitiveMirror (32 эксперта), BridgeGLU
 │   ├── bridge.py               # SemanticBridge: per-layer, depth+time, self-supervised
 │   ├── maturation.py           # MaturationController: единый time/τ-рамп созревания
-│   ├── concept_layer.py        # UnifiedConceptLayer: τ-driven концепты (замена CollectiveConceptLayer)
+│   ├── concept_layer.py        # UnifiedConceptLayer: τ-driven концепты
 │   ├── embedding.py            # PartitionedEmbedding, SigmoidCodedHead,
 │   │                           #   CognitiveCodedHead, LmHead…
 │   ├── projector.py            # Projector — чтение слов из скрытого состояния
@@ -1521,7 +1528,7 @@ EVA-CLM/
 ├── docs/                       # документы (ARCHITECTURE_REPORT.md, AGENT_BRIEF.md)
 ├── checkponts/                # чекпоинты (best 1.pt — best 10.pt)
 ├── wb/                         # BPE-токенизатор (russian_tokenizer/) + обучающие потоки (token_stream_*_eos.bin)
-├── tests/                      # тесты (214/214 passing)
+├── tests/                      # тесты (214/214 passing, full type hints)
 ├── logs/                       # логи тренировки (gitignored)
 ├── archive/                    # старый код/эксперименты — локально, вне репозитория (.gitignore)
 └── README.md                   # этот файл

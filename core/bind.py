@@ -1,5 +1,8 @@
 ﻿"""EVA: bind module."""
 
+from __future__ import annotations
+from typing import Optional, Tuple, List
+
 import math, os
 import torch
 import torch.nn as nn
@@ -11,20 +14,20 @@ from .vsa_utils import dct_basis, fib_sigmoid_init
 class _ExpRMSNorm(nn.Module):
     """RMSNorm via explicit formula (ONNX-exportable, equiv to nn.RMSNorm)."""
 
-    def __init__(self, K):
+    def __init__(self, K: int) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(K))
+        self.weight: nn.Parameter = nn.Parameter(torch.ones(K))
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weight * x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-7)
 
-def migrate_bind_state_dict(sd, n_layers, mode="off", S=1):
+def migrate_bind_state_dict(sd: dict, n_layers: int, mode: str = "off", S: int = 1) -> dict:
     """Convert old (pre-BottleneckBind) state dict keys to new format.
     Old: layers.N.W_proj (D,K)  layers.N.W_out (K,D)  layers.N.w_u (K,)  layers.N.w_v (K,)
     New: layers.N.bind.W_proj.weight (K,D)  layers.N.bind.W_out (K,D|S,K,D)  layers.N.bind.w_u (S,K)  layers.N.bind.w_v (S,K)
     """
     import re
-    map_sd = {}
+    map_sd: dict = {}
     for key, val in sd.items():
         m = re.match(r'layers\.(\d+)\.(W_proj|W_out|w_u|w_v|w_bind_bias)$', key)
         if not m:
@@ -63,48 +66,49 @@ class BottleneckBind(nn.Module):
     """Bilinear cross-mixing with Fibonacci/golden-angle shifts.
 
     Modes (cfg.bind_twist_mode):
-      "off"     вЂ” legacy diagonal bind (uвЉ™v), no shifts. Exact regression.
-      "shift"   вЂ” simple sum of S shifted bilinear products.
-      "cascade" вЂ” Fibonacci-nested cascade, monomials up to order F_S.
+      "off"     — legacy diagonal bind (u⊙v), no shifts. Exact regression.
+      "shift"   — simple sum of S shifted bilinear products.
+      "cascade" — Fibonacci-nested cascade, monomials up to order F_S.
 
     Ocular (cfg.bind_twist_ocular):
-      "tied"   вЂ” shared W_out = W_proj^T for all shifts. rank(M) в‰¤ K.
-      "multi"  вЂ” per-shift W_outЛў (S, K, D). rank(M) в‰¤ min(SВ·K, D).
+      "tied"   — shared W_out = W_proj^T for all shifts. rank(M) ≤ K.
+      "multi"  — per-shift W_out′ (S, K, D). rank(M) ≤ min(S·K, D).
 
-    Critical: w_u, w_v init std=1.0. Bilinear gradient scales as stdВі;
+    Critical: w_u, w_v init std=1.0. Bilinear gradient scales as std²;
     default 0.02 kills it (8e-6 vs 1.0).
     """
 
-    def __init__(self, D: int, K: int, cfg):
+    def __init__(self, D: int, K: int, cfg: object) -> None:
         super().__init__()
-        self.D, self.K = D, K
-        self.mode = getattr(cfg, "bind_twist_mode", "off")
-        self.S = int(getattr(cfg, "bind_twist_S", 4))
-        self.softmax_free = getattr(cfg, "softmax_free", True)
+        self.D: int = D
+        self.K: int = K
+        self.mode: str = getattr(cfg, "bind_twist_mode", "off")
+        self.S: int = int(getattr(cfg, "bind_twist_S", 4))
+        self.softmax_free: bool = getattr(cfg, "softmax_free", True)
         if self.mode == "off":
             self.S = 1
-        self.ocular = getattr(cfg, "bind_twist_ocular", "tied")
-        self.gated = bool(getattr(cfg, "bind_twist_gate", False)) and self.mode != "off"
-        scheme = getattr(cfg, "bind_twist_scheme", "golden")
-        tie_bind = bool(getattr(cfg, "tie_bind", True))
+        self.ocular: str = getattr(cfg, "bind_twist_ocular", "tied")
+        self.gated: bool = bool(getattr(cfg, "bind_twist_gate", False)) and self.mode != "off"
+        scheme: str = getattr(cfg, "bind_twist_scheme", "golden")
+        tie_bind: bool = bool(getattr(cfg, "tie_bind", True))
 
         # Bias for projection
-        self.w_bind_bias = nn.Parameter(torch.zeros(K))
+        self.w_bind_bias: nn.Parameter = nn.Parameter(torch.zeros(K))
 
         # --- objective lens ---
-        self.W_proj = nn.Linear(D, K, bias=False)
+        self.W_proj: nn.Linear = nn.Linear(D, K, bias=False)
         if getattr(cfg, "bind_qk_norm", False):
             self.hp_norm = _ExpRMSNorm(K)
         else:
             self.hp_norm = nn.Identity()
 
         # --- deterministic shifts ---
-        shifts = _golden_shifts(K, self.S) if scheme == "golden" else _fibonacci_shifts(K, self.S)
+        shifts: list = _golden_shifts(K, self.S) if scheme == "golden" else _fibonacci_shifts(K, self.S)
         self.register_buffer("shifts", torch.tensor(shifts, dtype=torch.long), persistent=False)
 
         # --- bilinear weights: init std=1.0 is CRITICAL ---
-        self.w_u = nn.Parameter(torch.empty(self.S, K))
-        self.w_v = nn.Parameter(torch.empty(self.S, K))
+        self.w_u: nn.Parameter = nn.Parameter(torch.empty(self.S, K))
+        self.w_v: nn.Parameter = nn.Parameter(torch.empty(self.S, K))
         nn.init.normal_(self.w_u, 0.0, 1.0)
         nn.init.normal_(self.w_v, 0.0, 1.0)
 
@@ -114,9 +118,9 @@ class BottleneckBind(nn.Module):
 
         # --- ocular(s) ---
         if self.mode != "off" and self.ocular == "multi" and self.S > 1:
-            self.W_out = nn.Parameter(torch.empty(self.S, K, D))
+            self.W_out: nn.Parameter = nn.Parameter(torch.empty(self.S, K, D))
             nn.init.xavier_uniform_(self.W_out, gain=0.5)
-            self._tied = False
+            self._tied: bool = False
         else:
             self.W_out = nn.Parameter(torch.empty(K, D))
             nn.init.xavier_uniform_(self.W_out, gain=0.5)
@@ -126,20 +130,20 @@ class BottleneckBind(nn.Module):
 
         # --- gated aperture ---
         if self.gated:
-            self.w_gate_proj = nn.Linear(K, self.S, bias=True)
+            self.w_gate_proj: nn.Linear = nn.Linear(K, self.S, bias=True)
             nn.init.xavier_uniform_(self.w_gate_proj.weight, gain=0.5)
             nn.init.zeros_(self.w_gate_proj.bias)
 
         # --- cascade mix ---
         if self.mode == "cascade":
-            self.mix_logit = nn.Parameter(fib_sigmoid_init(self.S).log() - (1 - fib_sigmoid_init(self.S)).log())
-            self.log_tau = nn.Parameter(torch.tensor(1.0))  # shared tau for hybrid mixing
+            self.mix_logit: nn.Parameter = nn.Parameter(fib_sigmoid_init(self.S).log() - (1 - fib_sigmoid_init(self.S)).log())
+            self.log_tau: nn.Parameter = nn.Parameter(torch.tensor(1.0))  # shared tau for hybrid mixing
 
-    def _tie_hook(self, module, inp):
+    def _tie_hook(self, module: nn.Linear, inp: tuple) -> None:
         with torch.no_grad():
             self.W_out.data.copy_(self.W_proj.weight.data)
 
-    def _cross(self, left, right, shift):
+    def _cross(self, left: torch.Tensor, right: torch.Tensor, shift: int) -> torch.Tensor:
         return left * torch.roll(right, shifts=int(shift), dims=-1)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
@@ -233,31 +237,32 @@ def _fibonacci_shifts(K: int, S: int) -> list:
 
 
 class SpiralBind(nn.Module):
-    def __init__(self, D, K, cfg):
+    def __init__(self, D: int, K: int, cfg: object) -> None:
         super().__init__()
-        self.D, self.K = D, K
-        self.S = int(getattr(cfg, "bind_twist_S", 4))
-        self.W_proj = nn.Linear(D, K, bias=True)
-        self.w_bind_bias = nn.Parameter(torch.zeros(K))
+        self.D: int = D
+        self.K: int = K
+        self.S: int = int(getattr(cfg, "bind_twist_S", 4))
+        self.W_proj: nn.Linear = nn.Linear(D, K, bias=True)
+        self.w_bind_bias: nn.Parameter = nn.Parameter(torch.zeros(K))
         if getattr(cfg, "bind_qk_norm", False):
             self.hp_norm = _ExpRMSNorm(K)
         else:
             self.hp_norm = nn.Identity()
-        self.w_u_re = nn.Parameter(torch.randn(self.S, K) * 0.3)
-        self.w_u_im = nn.Parameter(torch.zeros(self.S, K))
-        self.w_v_re = nn.Parameter(torch.randn(self.S, K) * 0.3)
-        self.w_v_im = nn.Parameter(torch.zeros(self.S, K))
-        tau_init = torch.log(torch.arange(1, K + 1, dtype=torch.float32) / K).unsqueeze(0).expand(self.S, -1).clone()
-        self.W_freq = nn.Parameter(tau_init)
-        self.W_phase = nn.Parameter(torch.randn(self.S, K) * 0.1)
-        self.W_out = nn.Parameter(torch.empty(2 * K, D))
+        self.w_u_re: nn.Parameter = nn.Parameter(torch.randn(self.S, K) * 0.3)
+        self.w_u_im: nn.Parameter = nn.Parameter(torch.zeros(self.S, K))
+        self.w_v_re: nn.Parameter = nn.Parameter(torch.randn(self.S, K) * 0.3)
+        self.w_v_im: nn.Parameter = nn.Parameter(torch.zeros(self.S, K))
+        tau_init: torch.Tensor = torch.log(torch.arange(1, K + 1, dtype=torch.float32) / K).unsqueeze(0).expand(self.S, -1).clone()
+        self.W_freq: nn.Parameter = nn.Parameter(tau_init)
+        self.W_phase: nn.Parameter = nn.Parameter(torch.randn(self.S, K) * 0.1)
+        self.W_out: nn.Parameter = nn.Parameter(torch.empty(2 * K, D))
         nn.init.xavier_uniform_(self.W_out, gain=0.5)
-        self._tied = False
+        self._tied: bool = False
 
-    def forward(self, h):
-        hp = self.hp_norm(self.W_proj(h) + self.w_bind_bias)
-        K = self.K
-        out_acc = None
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        hp: torch.Tensor = self.hp_norm(self.W_proj(h) + self.w_bind_bias)
+        K: int = self.K
+        out_acc: Optional[torch.Tensor] = None
         for s in range(self.S):
             freq = torch.exp(self.W_freq[s]).unsqueeze(0).unsqueeze(0)
             phase = self.W_phase[s].unsqueeze(0).unsqueeze(0)
@@ -277,18 +282,18 @@ class SpiralBind(nn.Module):
         return out_acc @ self.W_out
 
 
-def _fib_sequence(n_max):
-    fibs = [1, 2]
+def _fib_sequence(n_max: int) -> list:
+    fibs: list = [1, 2]
     while fibs[-1] + fibs[-2] < n_max:
         fibs.append(fibs[-1] + fibs[-2])
     return fibs
 
 
-def _zeckendorf_levels(t, max_levels=6):
-    fibs = _fib_sequence(100)[:max_levels]
-    weights = []
-    prev = -2
-    remaining = t
+def _zeckendorf_levels(t: int, max_levels: int = 6) -> torch.Tensor:
+    fibs: list = _fib_sequence(100)[:max_levels]
+    weights: list = []
+    prev: int = -2
+    remaining: int = t
     for f in fibs:
         if f <= remaining and f > prev + 1:
             weights.append(1.0 / f)
@@ -301,75 +306,79 @@ def _zeckendorf_levels(t, max_levels=6):
 
 
 class TrajectorySpiralBind(nn.Module):
-    def __init__(self, D, K, cfg):
+    def __init__(self, D: int, K: int, cfg: object) -> None:
         super().__init__()
-        self.D, self.K = D, K
-        self.S = int(getattr(cfg, "bind_twist_S", 4))
-        self.n_dims = int(getattr(cfg, "bind_traj_dims", 3))
-        self.W_proj = nn.Linear(D, K, bias=True)
-        self.w_bind_bias = nn.Parameter(torch.zeros(K))
+        self.D: int = D
+        self.K: int = K
+        self.S: int = int(getattr(cfg, "bind_twist_S", 4))
+        self.n_dims: int = int(getattr(cfg, "bind_traj_dims", 3))
+        self.W_proj: nn.Linear = nn.Linear(D, K, bias=True)
+        self.w_bind_bias: nn.Parameter = nn.Parameter(torch.zeros(K))
         if getattr(cfg, "bind_qk_norm", False):
             self.hp_norm = _ExpRMSNorm(K)
         else:
             self.hp_norm = nn.Identity()
-        self.w_u_re = nn.Parameter(torch.randn(self.S, self.n_dims, K) * 0.3)
-        self.w_u_im = nn.Parameter(torch.zeros(self.S, self.n_dims, K))
-        self.w_v_re = nn.Parameter(torch.randn(self.S, self.n_dims, K) * 0.3)
-        self.w_v_im = nn.Parameter(torch.zeros(self.S, self.n_dims, K))
-        tau_init = torch.log(torch.arange(1, K + 1, dtype=torch.float32) / K).unsqueeze(0).unsqueeze(0).expand(self.S, self.n_dims, -1).clone()
+        self.w_u_re: nn.Parameter = nn.Parameter(torch.randn(self.S, self.n_dims, K) * 0.3)
+        self.w_u_im: nn.Parameter = nn.Parameter(torch.zeros(self.S, self.n_dims, K))
+        self.w_v_re: nn.Parameter = nn.Parameter(torch.randn(self.S, self.n_dims, K) * 0.3)
+        self.w_v_im: nn.Parameter = nn.Parameter(torch.zeros(self.S, self.n_dims, K))
+        tau_init: torch.Tensor = torch.log(torch.arange(1, K + 1, dtype=torch.float32) / K).unsqueeze(0).unsqueeze(0).expand(self.S, self.n_dims, -1).clone()
         # ONNX-совместимая лог-сетка частот со сдвигом на каждую (s,d): шаг ≈ 1 октава
-        tau_base = torch.log(torch.arange(1, K + 1, dtype=torch.float32) / K)
-        span = math.log(K)
-        wf = []
+        tau_base: torch.Tensor = torch.log(torch.arange(1, K + 1, dtype=torch.float32) / K)
+        span: float = math.log(K)
+        wf: list = []
         for s in range(self.S):
             for d in range(self.n_dims):
                 frac = (s * self.n_dims + d + 0.5) / (self.S * self.n_dims)
                 wf.append(tau_base + (frac - 0.5) * 2.0 * span)
-        self.W_freq = nn.Parameter(torch.stack(wf).view(self.S, self.n_dims, K))
+        self.W_freq: nn.Parameter = nn.Parameter(torch.stack(wf).view(self.S, self.n_dims, K))
         # Масштаб частот: θ = ω·hp·freq_scale. init 2π — фазы пробегают циклы при
         # типичных hp (скрещивания в hp-пространстве); старые чекпоинты через
         # миграцию получают 1.0 (численно эквивалентно прежнему поведению).
-        self.freq_scale = nn.Parameter(torch.tensor(2 * math.pi))
+        self.freq_scale: nn.Parameter = nn.Parameter(torch.tensor(2 * math.pi))
         # U10: τ-coherent frequency schedule
-        self._eta = nn.Parameter(torch.tensor(0.5))  # learnable exponent (init 0.5)
-        self._tau_min = 8.0  # from config (default)
-        self._tau_norm = None  # set by stack during init
-        self.W_phase = nn.Parameter(torch.randn(self.S, self.n_dims, K) * 0.1)
+        self._eta: nn.Parameter = nn.Parameter(torch.tensor(0.5))  # learnable exponent (init 0.5)
+        self._tau_min: float = 8.0  # from config (default)
+        self._tau_norm: Optional[float] = None  # set by stack during init
+        self.W_phase: nn.Parameter = nn.Parameter(torch.randn(self.S, self.n_dims, K) * 0.1)
         self.register_buffer('_step_count', torch.zeros(1, dtype=torch.long))
-        self.hybrid_alpha_max = getattr(cfg, 'hybrid_alpha_max', 0.7)
-        self.hybrid_alpha_min = getattr(cfg, 'hybrid_alpha_min', 0.3)
+        self.hybrid_alpha_max: float = getattr(cfg, 'hybrid_alpha_max', 0.7)
+        self.hybrid_alpha_min: float = getattr(cfg, 'hybrid_alpha_min', 0.3)
         # +K каналов когерентности спиралей (точки скрещивания) — в выход bind
-        self.W_out = nn.Parameter(torch.empty(self.n_dims * 2 * K + K, D))
+        self.W_out: nn.Parameter = nn.Parameter(torch.empty(self.n_dims * 2 * K + K, D))
         nn.init.xavier_uniform_(self.W_out, gain=0.5)
-        self._tied = False
-        circ_conv = torch.tensor(
+        self._tied: bool = False
+        circ_conv: torch.Tensor = torch.tensor(
             [[(n - t) % K for n in range(K)] for t in range(K)], dtype=torch.long)
-        circ_corr = torch.tensor(
+        circ_corr: torch.Tensor = torch.tensor(
             [[(t - n) % K for n in range(K)] for t in range(K)], dtype=torch.long)
         self.register_buffer('_circ_conv_idx', circ_conv, persistent=False)
         self.register_buffer('_circ_corr_idx', circ_corr, persistent=False)
 
-    def _hybrid_alpha(self):
+    def _hybrid_alpha(self) -> float:
         if not self.training:
             return self.hybrid_alpha_min + (
                 self.hybrid_alpha_max - self.hybrid_alpha_min) * math.exp(-2.0)
         t = min(1.0, self._step_count.item() / 5000.0)
         return self.hybrid_alpha_min + (self.hybrid_alpha_max - self.hybrid_alpha_min) * math.exp(-2.0 * t)
 
-    def _hrr_bind(self, a, b):
-        bg = b[..., self._circ_conv_idx]  # (B, L, K, K) circular shifts
+    def _hrr_bind(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        bg: torch.Tensor = b[..., self._circ_conv_idx]  # (B, L, K, K) circular shifts
         return torch.einsum('blt,bltn->bln', a, bg)
 
-    def _hybrid_bind(self, a, b):
-        alpha = self._hybrid_alpha()
+    def _hybrid_bind(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        alpha: float = self._hybrid_alpha()
         hrr = self._hrr_bind(a, b)
         ewise = a * b
         return alpha * hrr + (1 - alpha) * ewise
 
-    def forward(self, h, traj_state=None):
+    def forward(self, h: torch.Tensor, traj_state: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if h.dim() == 2:
             h = h.unsqueeze(0)
-        hp = self.hp_norm(self.W_proj(h) + self.w_bind_bias)
+        hp: torch.Tensor = self.hp_norm(self.W_proj(h) + self.w_bind_bias)
+        B: int
+        L: int
+        K: int
         B, L, K = hp.shape
         self._step_count += 1
 
@@ -484,18 +493,18 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
     РјР°С‚СЂРёС†С‹ РїРѕРїР°СЂРЅС‹С… РІРЅРёРјР°РЅРёР№ (РЅРµС‚ softmax-РєРѕРЅРєСѓСЂРµРЅС†РёРё).
     """
 
-    def __init__(self, D, K, cfg):
+    def __init__(self, D: int, K: int, cfg: object) -> None:
         super().__init__(D, K, cfg)
-        self.buffer_size = int(getattr(cfg, "traj_buffer_size", 1024))
+        self.buffer_size: int = int(getattr(cfg, "traj_buffer_size", 1024))
         # Р§РёСЃР»Рѕ Р»СѓС‡РµР№ вЂ” РїСЂРѕРёР·РІРѕРґРЅРѕРµ РѕС‚ Р±СѓС„РµСЂР° (ceil(в€љbuffer)); СЃРІРѕР±РѕРґРЅС‹С… П„ РЅРµС‚:
         # РІ П†-С‚СЂР°РµРєС‚РѕСЂРёРё С‡РёСЃР»Рѕ СЂР°Р·Р»РёС‡РёРјС‹С… РєР»Р°СЃС‚РµСЂРѕРІ вЂ” РіРµРѕРјРµС‚СЂРёС‡РµСЃРєР°СЏ СЃРµСЂРµРґРёРЅР°
         # С€РєР°Р»С‹ Р±СѓС„РµСЂР°. Р‘РѕР»СЊС€Р°СЏ: Р±СѓС„РµСЂ 1024 в†’ 32 Р»СѓС‡Р° (Mini: 512 в†’ 23).
-        beams_explicit = int(getattr(cfg, "traj_beams", 0) or 0)
-        self.n_beams = beams_explicit if beams_explicit > 0 else int(math.ceil(
+        beams_explicit: int = int(getattr(cfg, "traj_beams", 0) or 0)
+        self.n_beams: int = beams_explicit if beams_explicit > 0 else int(math.ceil(
             self.buffer_size ** 0.5))
-        self.cos_threshold = float(getattr(cfg, "traj_cos_threshold", 0.5))
-        self.rebuild_interval = int(getattr(cfg, "traj_rebuild_interval", 128))
-        self.gain = float(getattr(cfg, "traj_gain", 0.05))
+        self.cos_threshold: float = float(getattr(cfg, "traj_cos_threshold", 0.5))
+        self.rebuild_interval: int = int(getattr(cfg, "traj_rebuild_interval", 128))
+        self.gain: float = float(getattr(cfg, "traj_gain", 0.05))
 
         # РќРµРїРµСЂСЃРёСЃС‚РµРЅС‚РЅС‹Рµ (СЃР±СЂР°СЃС‹РІР°СЋС‚СЃСЏ РЅР° Р·Р°РіСЂСѓР·РєРµ С‡РµРєРїРѕРёРЅС‚Р°) Р±СѓС„РµСЂС‹ РјР°РЅРёС„РѕР»РґР°
         self.register_buffer("beam_centers", torch.zeros(self.n_beams, self.K),
@@ -510,26 +519,27 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
         self.register_buffer("_total", torch.zeros(1, dtype=torch.long), persistent=False)
         self.register_buffer("_warmz", torch.zeros(1, dtype=torch.float32), persistent=False)
 
-        self.W_man = nn.Parameter(torch.empty(self.K, D))
+        self.W_man: nn.Parameter = nn.Parameter(torch.empty(self.K, D))
         nn.init.xavier_uniform_(self.W_man, gain=0.25)
-        self._fib_cache = self._fib_list(self.buffer_size + 1)
+        self._fib_cache: list = self._fib_list(self.buffer_size + 1)
 
-        # РЅР°РєР»РѕРЅ sigmoid-РіРµР№С‚РѕРІ С‡С‚РµРЅРёСЏ (РѕР±СѓС‡Р°РµРјС‹Р№, VSA вЂ” Р±РµР· softmax/T)
-        self.logit_gain = nn.Parameter(torch.tensor(3.0))
-        self.log_tau = nn.Parameter(torch.tensor(1.0))  # shared tau for hybrid attention
+        # наклон sigmoid-гейтов чтения (обучаемый, VSA — без softmax/T)
+        self.logit_gain: nn.Parameter = nn.Parameter(torch.tensor(3.0))
+        self.log_tau: nn.Parameter = nn.Parameter(torch.tensor(1.0))  # shared tau for hybrid attention
 
     @staticmethod
-    def _fib_list(max_n):
-        fibs = [1, 2]
+    def _fib_list(max_n: int) -> list:
+        fibs: list = [1, 2]
         while fibs[-1] <= max_n:
             fibs.append(fibs[-1] + fibs[-2])
         return fibs
 
     @staticmethod
-    def _zlen(fibs, n):
+    def _zlen(fibs: list, n: int) -> int:
         if n <= 0:
             return 0
-        cnt, i = 0, len(fibs) - 1
+        cnt: int = 0
+        i: int = len(fibs) - 1
         while n > 0 and i >= 0:
             if fibs[i] <= n:
                 n -= fibs[i]
@@ -537,24 +547,24 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
             i -= 1
         return cnt
 
-    def _hrr_unbind(self, a, b):
-        bg = b[..., self._circ_corr_idx]  # (B, L, K, K) circular shifts
+    def _hrr_unbind(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        bg: torch.Tensor = b[..., self._circ_corr_idx]  # (B, L, K, K) circular shifts
         return torch.einsum('blt,bltn->bln', a, bg)
 
-    def _hybrid_unbind(self, a, b):
-        alpha = self._hybrid_alpha()
+    def _hybrid_unbind(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        alpha: float = self._hybrid_alpha()
         return alpha * self._hrr_unbind(a, b) + (1.0 - alpha) * (a * b)
 
     # в”Ђв”Ђ РїРµСЂСЃРёСЃС‚-РѕР±РЅРѕРІР»РµРЅРёРµ Р»СѓС‡РµР№ (no_grad) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
-    def _push_transitions(self, hp):
-        """Р—Р°РїРёСЃР°С‚СЊ РїРµСЂРµС…РѕРґС‹ unbind(hp_t, hp_{t-1}) РІ РєРѕР»СЊС†РµРІРѕР№ Р±СѓС„РµСЂ."""
+    def _push_transitions(self, hp: torch.Tensor) -> None:
+        """Записать переходы unbind(hp_t, hp_{t-1}) в кольцевой буфер."""
         if hp.shape[1] < 2:
             return
-        hp = hp.float()  # РјР°РЅРёС„РѕР»Рґ РІСЃРµРіРґР° РІ fp32 (Р±СѓС„РµСЂС‹ fp32, FFT СЃС‚Р°Р±РёР»СЊРЅР°)
-        T = self._hybrid_unbind(hp[:, 1:], hp[:, :-1])  # (B, L-1, K)
-        flat = T.reshape(-1, self.K)
-        n = flat.shape[0]
+        hp = hp.float()  # мандолд всегда в fp32 (буферы fp32, FFT стабильна)
+        T: torch.Tensor = self._hybrid_unbind(hp[:, 1:], hp[:, :-1])  # (B, L-1, K)
+        flat: torch.Tensor = T.reshape(-1, self.K)
+        n: int = flat.shape[0]
         if n == 0:
             return
         with torch.no_grad():
@@ -570,28 +580,31 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
             if int(self._total.item()) % self.rebuild_interval == 0:
                 self._rebuild_beams()
 
-    def _rebuild_beams(self):
-        """Р–Р°РґРЅР°СЏ VSA-РєР»Р°СЃС‚РµСЂРёР·Р°С†РёСЏ РїРµСЂРµС…РѕРґРѕРІ РІ Р»СѓС‡Рё (РєР°Рє FCF)."""
-        n_valid = min(int(self._total.item()), self.buffer_size)
+    def _rebuild_beams(self) -> None:
+        """Задняя VSA-кластеризация переходов в лучи (как FCF)."""
+        n_valid: int = min(int(self._total.item()), self.buffer_size)
         if n_valid < 2:
             return
-        samples = self.trans_buf[:n_valid].clone().float()
-        norms = samples.norm(dim=-1, keepdim=True).clamp(min=1e-10)
+        samples: torch.Tensor = self.trans_buf[:n_valid].clone().float()
+        norms: torch.Tensor = samples.norm(dim=-1, keepdim=True).clamp(min=1e-10)
         samples = samples / norms
-        perm = torch.randperm(n_valid, device=samples.device)
-        centers, counts, ages = [], [], []
+        perm: torch.Tensor = torch.randperm(n_valid, device=samples.device)
+        centers: list = []
+        counts: list = []
+        ages: list = []
         for idx in perm.tolist():
-            v = samples[idx]
+            v: torch.Tensor = samples[idx]
             if v.abs().sum() < 1e-10:
                 continue
-            best, best_sim = -1, -1.0
+            best: int = -1
+            best_sim: float = -1.0
             for i, c in enumerate(centers):
                 sim = (v * c).sum().item()
                 if sim > best_sim:
                     best, best_sim = i, sim
             if best_sim > self.cos_threshold and best >= 0:
-                cnt = counts[best]
-                nv = centers[best] * cnt + v
+                cnt: float = counts[best]
+                nv: torch.Tensor = centers[best] * cnt + v
                 centers[best] = nv / nv.norm().clamp(min=1e-10)
                 counts[best] = cnt + 1
             elif len(centers) < self.n_beams:
@@ -599,7 +612,7 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
                 counts.append(1.0)
                 ages.append(int(self._trans_idx.item()))
         if centers:
-            n_beams = len(centers)
+            n_beams: int = len(centers)
             self.beam_centers = torch.zeros(self.n_beams, self.K, device=samples.device)
             self.beam_centers.data[:n_beams] = torch.stack(centers)
             self.beam_counts.zero_()
@@ -616,49 +629,52 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
 
     # в”Ђв”Ђ Zeck-СЂР°СЃРїР°Рґ РІРѕР·СЂР°СЃС‚Р° Р»СѓС‡Р° в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
-    def _zeck_weight(self, age):
-        """theta = 1 / (1 + len(zeckendorf(age))) вЂ” РЅРµС‚ СЃРІРѕР±РѕРґРЅРѕРіРѕ П„."""
+    def _zeck_weight(self, age: int) -> float:
+        """theta = 1 / (1 + len(zeckendorf(age))) — нет свободного φ."""
         if age <= 0:
             return 1.0
         return 1.0 / (1.0 + self._zlen(self._fib_cache, int(age)))
 
-    def _manifold_read(self, hp):
+    def _manifold_read(self, hp: torch.Tensor) -> torch.Tensor:
         """Бандл-чтение: hybrid attention (sigmoid * (1 + softmax/tau)) по сходству q↔beam · Zeck-затухание.
 
         Hybrid: sigmoid (independent) * (1 + softmax (competitive)) — synchronized gradients.
         """
+        B: int
+        L: int
+        K: int
         B, L, K = hp.shape
-        beam = self.beam_centers  # (n_beams, K)
-        n_eff = int(self.beam_counts.clamp(min=0).gt(0).sum().item())
+        beam: torch.Tensor = self.beam_centers  # (n_beams, K)
+        n_eff: int = int(self.beam_counts.clamp(min=0).gt(0).sum().item())
         if n_eff == 0:
             return torch.zeros(B, L, K, device=hp.device, dtype=hp.dtype)
         hp = hp.float()  # fp32-прецизия для стабильных sigmoid-гейтов
         beam = beam[:n_eff] / beam[:n_eff].norm(dim=-1, keepdim=True).clamp(min=1e-10)
-        qnorm = hp.norm(dim=-1, keepdim=True).clamp(min=1e-10)
-        sims = (hp / qnorm) @ beam.T  # (B, L, n_beams)
+        qnorm: torch.Tensor = hp.norm(dim=-1, keepdim=True).clamp(min=1e-10)
+        sims: torch.Tensor = (hp / qnorm) @ beam.T  # (B, L, n_beams)
         
         # Hybrid attention: sigmoid (independent) * (1 + softmax (competitive))
-        logit_gain = self.logit_gain.clamp(min=0.1)
-        tau = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
-        independent = torch.sigmoid(sims * logit_gain)  # independent per beam
-        relative = F.softmax(sims * logit_gain / tau, dim=-1)  # competitive relative ranking
-        w = independent * (1.0 + relative)  # combined effect
+        logit_gain: torch.Tensor = self.logit_gain.clamp(min=0.1)
+        tau: torch.Tensor = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
+        independent: torch.Tensor = torch.sigmoid(sims * logit_gain)  # independent per beam
+        relative: torch.Tensor = F.softmax(sims * logit_gain / tau, dim=-1)  # competitive relative ranking
+        w: torch.Tensor = independent * (1.0 + relative)  # combined effect
         
-        now = int(self._trans_idx.item())
-        ages = [max(0, now - int(a)) for a in self.beam_age[:n_eff].tolist()]
-        decay = torch.tensor([self._zeck_weight(a) for a in ages],
+        now: int = int(self._trans_idx.item())
+        ages: list = [max(0, now - int(a)) for a in self.beam_age[:n_eff].tolist()]
+        decay: torch.Tensor = torch.tensor([self._zeck_weight(a) for a in ages],
                              device=hp.device, dtype=hp.dtype).view(1, 1, -1)
         w = w * decay
         w = w / w.sum(dim=-1, keepdim=True).clamp(min=1e-10)
         return w @ beam  # (B, L, K)
 
-    def forward(self, h, traj_state=None):
+    def forward(self, h: torch.Tensor, traj_state: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if h.dim() == 2:
             h = h.unsqueeze(0)
         result, new_traj, coherence = super().forward(h, traj_state)
-        hp = self.hp_norm(self.W_proj(h) + self.w_bind_bias)
+        hp: torch.Tensor = self.hp_norm(self.W_proj(h) + self.w_bind_bias)
         self._push_transitions(hp)
-        man = self._manifold_read(hp).float()
+        man: torch.Tensor = self._manifold_read(hp).float()
         return result + self.gain * (man @ self.W_man).clamp(-8.0, 8.0), new_traj, coherence
 
 

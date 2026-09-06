@@ -1,5 +1,8 @@
 """EVA: block module."""
 
+from __future__ import annotations
+from typing import Optional, Tuple, List
+
 import math, os
 import torch
 import torch.nn as nn
@@ -15,7 +18,7 @@ from .vsa_utils import dct_basis, fib_sigmoid_init
 
 _EPS_SCAN = 1e-6
 
-def _scan_chunk(b_chunk, d_chunk):
+def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Parallel chunk scan from zero state.
     Returns intra-chunk VSA (B, chunk_len, S*D), final state (B, 1, S*D),
     cumulative decay (B, chunk_len, S*D).
@@ -30,7 +33,7 @@ def _scan_chunk(b_chunk, d_chunk):
     final = intra[:, -1:]
     return intra, final, cum_decay
 
-def _combine_chunks(chunk_data, initial_state):
+def _combine_chunks(chunk_data: list, initial_state: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """2nd-level: cross-chunk prefix scan over K chunk states.
     Returns combined (B, L, S*D), final_state (B, S*D), leaf (B, L, S*D).
     """
@@ -54,25 +57,25 @@ def _combine_chunks(chunk_data, initial_state):
 
 
 class PrecisionGate(nn.Module):
-    def __init__(self, D):
+    def __init__(self, D: int) -> None:
         super().__init__()
-        self.gate = nn.Linear(D, 1)
+        self.gate: nn.Linear = nn.Linear(D, 1)
 
-    def forward(self, h):
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(self.gate(h))
 
 
 class ExactSequenceMemory(nn.Module):
-    def __init__(self, D, k, softmax_free=True):
+    def __init__(self, D: int, k: int, softmax_free: bool = True) -> None:
         super().__init__()
-        self.query = nn.Linear(D, k)
-        self.key = nn.Linear(D, k)
-        self.value = nn.Linear(D, k)
-        self.proj = nn.Linear(k, D)
-        self.k = k
-        self.softmax_free = softmax_free
+        self.query: nn.Linear = nn.Linear(D, k)
+        self.key: nn.Linear = nn.Linear(D, k)
+        self.value: nn.Linear = nn.Linear(D, k)
+        self.proj: nn.Linear = nn.Linear(k, D)
+        self.k: int = k
+        self.softmax_free: bool = softmax_free
 
-    def forward(self, h):
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
         q = self.query(h)
         k = self.key(h)
         v = self.value(h)
@@ -100,14 +103,14 @@ class EVABlock(nn.Module):
     - MLP: D -> bottleneck -> D with residual
     """
     
-    def __init__(self, cfg: EVAConfig, layer_idx: int, tau_config=None):
+    def __init__(self, cfg: EVAConfig, layer_idx: int, tau_config: Optional[object] = None) -> None:
         super().__init__()
-        self.D = cfg.D
-        self.K = cfg.bind_K
-        self.layer_idx = layer_idx
-        self.tie_bind = cfg.tie_bind
+        self.D: int = cfg.D
+        self.K: int = cfg.bind_K
+        self.layer_idx: int = layer_idx
+        self.tie_bind: bool = cfg.tie_bind
         # Store τ_norm for this layer (U1, U3)
-        self._tau_norm = None
+        self._tau_norm: Optional[float] = None
         if tau_config is not None and hasattr(tau_config, 'tau_norm'):
             with torch.no_grad():
                 self._tau_norm = tau_config.tau_norm[layer_idx].item()
@@ -237,11 +240,11 @@ class EVABlock(nn.Module):
         # Collective concept layer moved to stack.py (UnifiedConceptLayer — global)
         self.collective = None
     
-    def forward(self, h, state=None, global_state=None,
-                mem2v_scale=1.0, diff=None, noise_scale=0.0,
-                tanh_bias_mod=1.0, pred_scale_mod=None, spectral_mod=1.0,
-                context_mem=None, allow_write=None, tau_s=None, step=None, intent=None,
-                salience=None, maturity=None):
+    def forward(self, h: torch.Tensor, state: Optional[Tuple] = None, global_state: Optional[torch.Tensor] = None,
+                mem2v_scale: float = 1.0, diff: Optional[torch.Tensor] = None, noise_scale: float = 0.0,
+                tanh_bias_mod: float = 1.0, pred_scale_mod: Optional[torch.Tensor] = None, spectral_mod: float = 1.0,
+                context_mem: Optional[torch.Tensor] = None, allow_write: Optional[bool] = None, tau_s: Optional[torch.Tensor] = None, step: Optional[int] = None, intent: Optional[torch.Tensor] = None,
+                salience: Optional[torch.Tensor] = None, maturity: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple]:
         mem_state = mu_state = conv_state = traj_state = pen = None
         if state is not None:
             mem_state, mu_state, conv_state = state[:3]
@@ -486,12 +489,12 @@ class EVABlock(nn.Module):
         return h, (mem_state_out, mu_state_out, conv_state_out, traj_state_out, pen)
     
     @property
-    def base_parameters(self):
+    def base_parameters(self) -> List[nn.Parameter]:
         """All params except mirror: pre_ln, conv, bind, VSA, spectral, MLP."""
         return [p for n, p in self.named_parameters() if not n.startswith('mirror.')]
     
     @property
-    def mirror_parameters(self):
+    def mirror_parameters(self) -> List[nn.Parameter]:
         """All params inside GroupedCognitiveMirror."""
         return [p for n, p in self.named_parameters() if n.startswith('mirror.')]
 

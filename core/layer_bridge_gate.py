@@ -11,12 +11,14 @@ maturation gating без сложного SpectrumGate).
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from core.adaptive_gate import hybrid_gate
+from .adaptive_gate import hybrid_gate
 
 
 class SpectrumGate(nn.Module):
@@ -33,10 +35,10 @@ class SpectrumGate(nn.Module):
     - External (from maturation) — self-regulation through system tau
     """
 
-    def __init__(self, n_features: int, tau_init: float = 1.0):
+    def __init__(self, n_features: int, tau_init: float = 1.0) -> None:
         super().__init__()
-        self.n_features = n_features
-        self.log_tau = nn.Parameter(torch.tensor(math.log(tau_init)))
+        self.n_features: int = n_features
+        self.log_tau: nn.Parameter = nn.Parameter(torch.tensor(math.log(tau_init)))
 
     def forward(self, logits: torch.Tensor, tau_external: torch.Tensor | None = None) -> torch.Tensor:
         _DEV_CLAMP = 2.0  # unified deviation multiplier clamp (0.5..2.0)
@@ -71,22 +73,22 @@ class LayerBridgeGate(nn.Module):
     """
     
     def __init__(self, n_layers: int, health_features: int = 6,
-                 tau_min: float = 0.3, tau_max: float = 5.0):
+                 tau_min: float = 0.3, tau_max: float = 5.0) -> None:
         super().__init__()
-        self.n_layers = n_layers
-        self.health_features = health_features
-        self.tau_min = tau_min
-        self.tau_max = tau_max
+        self.n_layers: int = n_layers
+        self.health_features: int = health_features
+        self.tau_min: float = tau_min
+        self.tau_max: float = tau_max
         
         # Per-layer SpectrumGate: each layer decides its own sigmoid/softmax blend
-        self.gates = nn.ModuleList([
+        self.gates: nn.ModuleList = nn.ModuleList([
             SpectrumGate(health_features, tau_init=1.0)
             for _ in range(n_layers)
         ])
         
         # NaN/explosion control
-        self._nan_count = 0
-        self._max_nan = 10
+        self._nan_count: int = 0
+        self._max_nan: int = 10
     
     def _effective_tau(self, maturation: torch.Tensor) -> torch.Tensor:
         """Compute effective tau from maturation.
@@ -105,7 +107,7 @@ class LayerBridgeGate(nn.Module):
         diagnostics: torch.Tensor,    # (n_layers, health_features)
         tau_maturation: torch.Tensor, # (n_layers,) — maturation gate values
         global_ready: bool = False,   # True when ALL layers are mature enough
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Compute weighted bridge input from layer outputs.
         
         When global_ready=False: return uniform weights (simple maturation gating).

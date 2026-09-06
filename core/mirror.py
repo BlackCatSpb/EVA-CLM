@@ -1,6 +1,9 @@
 """EVA: mirror module."""
 
+from __future__ import annotations
+
 import math, os
+from typing import Optional, Tuple, List, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,16 +19,16 @@ class BridgeGLU(nn.Module):
     Replaces the frozen mod_scale_mlp scale, so the MLP gate becomes a live
     function of the bridge's semantic state instead of a stuck parameter.
     """
-    def __init__(self, G, k):
+    def __init__(self, G: int, k: int) -> None:
         super().__init__()
-        self.Wg = nn.Linear(G * k, G)
-        self.Wv = nn.Linear(G * k, G)
+        self.Wg: nn.Linear = nn.Linear(G * k, G)
+        self.Wv: nn.Linear = nn.Linear(G * k, G)
         # Learnable gain: init ~2.7 so initial gate ≈ sigmoid(log2)=0.667
         # (matches the frozen mod_scale_mlp capacity). Prevents BridgeGLU from
         # starving the MLP on tasks that need it; stays learnable.
-        self.log_gain = nn.Parameter(torch.tensor(math.log(2.7)))
+        self.log_gain: nn.Parameter = nn.Parameter(torch.tensor(math.log(2.7)))
 
-    def forward(self, delta):
+    def forward(self, delta: torch.Tensor) -> torch.Tensor:
         B, L, G, k = delta.shape
         flat = delta.reshape(B, L, G * k)                    # (B, L, G*k)
         g = torch.sigmoid(self.Wg(flat))                     # (B, L, G)
@@ -70,31 +73,31 @@ class GroupedCognitiveMirror(nn.Module):
       - mirror = tanh(linear + bias) + alpha * linear
       - Обеспечивает per-dim градиент для log_scale даже при насыщении tanh
     """
-    def __init__(self, D, G=32, k=32, log_scale_init_std=0.05,
-                 delta_var_ema_min=0.8, delta_var_ema_max=0.99, tie_mirror_proj=False,
-                 layer_idx=0, n_layers=32, has_private_mem=False,
-                 expert_asymmetry=False, meta_trust=False,
-                 gate_bias_scale=0.0, alpha_novelty_weight=0.0, seq_len=256,
-                    intent_bridge=False, bridge_glu=False,
-                    bridge_glu_beta=0.25,
-                    pm_write_delay=5000, pm_coh_gate_std=0.02,
-                     matur_write_thr=0.3,
-                     mirror_tau_min=2.0, mirror_tau_max=200.0,
-                     tau_config=None):
+    def __init__(self, D: int, G: int = 32, k: int = 32, log_scale_init_std: float = 0.05,
+                 delta_var_ema_min: float = 0.8, delta_var_ema_max: float = 0.99, tie_mirror_proj: bool = False,
+                 layer_idx: int = 0, n_layers: int = 32, has_private_mem: bool = False,
+                 expert_asymmetry: bool = False, meta_trust: bool = False,
+                 gate_bias_scale: float = 0.0, alpha_novelty_weight: float = 0.0, seq_len: int = 256,
+                    intent_bridge: bool = False, bridge_glu: bool = False,
+                    bridge_glu_beta: float = 0.25,
+                    pm_write_delay: int = 5000, pm_coh_gate_std: float = 0.02,
+                     matur_write_thr: float = 0.3,
+                     mirror_tau_min: float = 2.0, mirror_tau_max: float = 200.0,
+                     tau_config: Optional[object] = None) -> None:
         super().__init__()
         assert D % G == 0
-        self.D = D
-        self.G = G
-        self.k = k
-        self.d = D // G
-        self.seq_len = seq_len
-        self.tie_mirror_proj = tie_mirror_proj
-        self.bridge_glu = bridge_glu
+        self.D: int = D
+        self.G: int = G
+        self.k: int = k
+        self.d: int = D // G
+        self.seq_len: int = seq_len
+        self.tie_mirror_proj: bool = tie_mirror_proj
+        self.bridge_glu: bool = bridge_glu
         # φ — единая когнитивная координата глубины (логарифмическая)
-        phi = math.log(1 + layer_idx) / math.log(max(n_layers, 2))
+        phi: float = math.log(1 + layer_idx) / math.log(max(n_layers, 2))
         self.register_buffer('phi', torch.tensor(phi))
         
-        proj_std = 1.0 / (self.d * k) ** 0.25
+        proj_std: float = 1.0 / (self.d * k) ** 0.25
         
         if expert_asymmetry:
             W_p = torch.empty(G, self.d, k)
@@ -116,7 +119,7 @@ class GroupedCognitiveMirror(nn.Module):
         self.w_global = nn.Parameter(torch.randn(G, k))
         
         # Depthwise conv per group in K-space (CAUSAL: only past tokens)
-        self.conv_smooth = nn.Conv1d(G * k, G * k, 3, padding=0,
+        self.conv_smooth: nn.Conv1d = nn.Conv1d(G * k, G * k, 3, padding=0,
                                       groups=G * k, bias=False)
         with torch.no_grad():
             self.conv_smooth.weight.zero_()
@@ -131,13 +134,14 @@ class GroupedCognitiveMirror(nn.Module):
         #   τ_k = mirror_tau_min * (mirror_tau_max/mirror_tau_min)^(k/(K-1))
         #   α_k = exp(-1/τ_k)
         # Each expert inherits the same tau distribution (learnable divergence)
-        tau_min, tau_max = mirror_tau_min, mirror_tau_max
+        tau_min: float = mirror_tau_min
+        tau_max: float = mirror_tau_max
         if k > 1:
             frac = torch.arange(k, dtype=torch.float32) / (k - 1)
             tau_k = tau_min * (tau_max / tau_min) ** frac
         else:
             tau_k = torch.tensor([(tau_min + tau_max) / 2])
-        alpha_init = torch.exp(-1.0 / tau_k).view(1, k).expand(G, -1).clone()
+        alpha_init: torch.Tensor = torch.exp(-1.0 / tau_k).view(1, k).expand(G, -1).clone()
         if expert_asymmetry and G > 1:
             for g in range(G):
                 init_alpha = 0.85 + (g / (G - 1)) * 0.14
@@ -145,23 +149,23 @@ class GroupedCognitiveMirror(nn.Module):
         self.alpha_diag = nn.Parameter(alpha_init)
         self.tanh_bias = nn.Parameter(torch.zeros(G, k))
         # EMA norms for signal normalization (Proposal V-1)
-        n_signals = 5 if has_private_mem else 4
+        n_signals: int = 5 if has_private_mem else 4
         self.register_buffer('_signal_norm_ema', torch.ones(n_signals, G, k), persistent=False)
         if expert_asymmetry and G > 1:
             ls_vals = [math.log(0.05 * (1.5 ** g)) for g in range(G)]
-            ls_base = torch.tensor(ls_vals).unsqueeze(1).expand(G, self.d)
+            ls_base: torch.Tensor = torch.tensor(ls_vals).unsqueeze(1).expand(G, self.d)
         else:
-            ls_base = torch.linspace(-0.3, 0.3, G).unsqueeze(1).expand(G, self.d)
+            ls_base: torch.Tensor = torch.linspace(-0.3, 0.3, G).unsqueeze(1).expand(G, self.d)
         self.log_scale = nn.Parameter(ls_base + torch.randn(G, self.d) * log_scale_init_std)
         
         # ─── K-space gate (per-token, per-expert from hp) ───
         # w_gate: (G, k) — maps |pred_error| to gate logit per expert
-        gate_std = 1.0 / (self.k + 1) ** 0.5
+        gate_std: float = 1.0 / (self.k + 1) ** 0.5
         self.w_gate = nn.Parameter(torch.randn(G, self.k) * gate_std)
         self.b_gate = nn.Parameter(torch.zeros(G))
         # w_delta_gate: (G, k) — maps delta (correction) to gate logit
         self.w_delta_gate = nn.Parameter(torch.randn(G, self.k) / math.sqrt(self.k))
-        gate_bias_val = torch.linspace(-gate_bias_scale, gate_bias_scale, G)
+        gate_bias_val: torch.Tensor = torch.linspace(-gate_bias_scale, gate_bias_scale, G)
         self.gate_bias = nn.Parameter(gate_bias_val)
         self._alpha_novelty_weight = alpha_novelty_weight
 
@@ -214,11 +218,11 @@ class GroupedCognitiveMirror(nn.Module):
         self.register_buffer('_last_h_pool', torch.zeros(G, self.d), persistent=False)
         # Eval-only pred caches (fixed shapes; dynamic B/L written via slices).
         # Training keeps None-able plain attributes (see forward).
-        seq_max = self.seq_len
+        seq_max: int = self.seq_len
         self.register_buffer('_cached_hp_buf', torch.zeros(1, seq_max, G, self.k), persistent=False)
         self.register_buffer('_cached_pred_k_buf', torch.zeros(1, seq_max, G, self.k), persistent=False)
         self.register_buffer('_cached_pred_error_norm_buf', torch.zeros(1, seq_max), persistent=False)
-        _pos_g = torch.Generator().manual_seed(12345)
+        _pos_g: torch.Generator = torch.Generator().manual_seed(12345)
         self.register_buffer('_pos_id_buf', torch.sign(torch.randn(1, 4096, 1, k, generator=_pos_g)), persistent=False)
         # Gate EMA: gradual wakeup for mirror, cold-start at zero (self-adaptive per-expert warmup)
         self.register_buffer('_gate_ema', torch.zeros(G), persistent=True)
@@ -252,8 +256,8 @@ class GroupedCognitiveMirror(nn.Module):
         self.w_alpha = nn.Parameter(torch.zeros(self.G, 2 * self.d))
         self.b_alpha = nn.Parameter(torch.zeros(self.G))
         # mod_scale: L0≈-0.81, L31≈-2.30 (геометрия init; rho=0.6**layer_idx)
-        rho = 0.6 ** layer_idx
-        log_mod_init = -2.30 + (-0.81 - (-2.30)) * rho
+        rho: float = 0.6 ** layer_idx
+        log_mod_init: float = -2.30 + (-0.81 - (-2.30)) * rho
         self.log_dvar_mod_scale = nn.Parameter(torch.full((G,), log_mod_init))
         self.log_grad_mod_scale = nn.Parameter(torch.full((G,), log_mod_init))
         self.dvar_mod_bias = nn.Parameter(torch.full((G,), -0.01))
@@ -303,14 +307,21 @@ class GroupedCognitiveMirror(nn.Module):
         # Error-gated damping: порог резонансного демпфирования α на инференсе
         self.register_buffer('_damp_tau', torch.tensor(0.1), persistent=False)
     
-    def _sync_W_out(self):
+    def _sync_W_out(self) -> None:
         with torch.no_grad():
             self.W_out.copy_(self.W_proj.permute(0, 2, 1))
     
-    def forward(self, h, mem_all, global_state=None, diff=None,
-                tanh_bias_mod=1.0, pred_scale_mod=None,
-                context_mem=None, allow_write=None, step=None, intent=None,
-                salience=None, maturity=None):
+    def forward(self, h: torch.Tensor, mem_all: torch.Tensor,
+                global_state: Optional[torch.Tensor] = None,
+                diff: Optional[torch.Tensor] = None,
+                tanh_bias_mod: float = 1.0,
+                pred_scale_mod: Optional[torch.Tensor] = None,
+                context_mem: Optional[torch.Tensor] = None,
+                allow_write: Optional[bool] = None,
+                step: Optional[int] = None,
+                intent: Optional[torch.Tensor] = None,
+                salience: Optional[torch.Tensor] = None,
+                maturity: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B, L, D = h.shape
         G, d, k = self.G, self.d, self.k
         
@@ -489,7 +500,7 @@ class GroupedCognitiveMirror(nn.Module):
         #     crutch по std модуляции (исходное поведение). pm_write_delay<=0 тогда
         #     означает «только по когерентности» (без шагового пола).
         _write_ok = _write
-        _write_scale = torch.tensor(1.0, device=hp.device)
+        _write_scale: torch.Tensor = torch.tensor(1.0, device=hp.device)
         if _write_ok:
             if maturity is not None:
                 # Smooth scaling: sigmoid transition around threshold
@@ -748,7 +759,7 @@ class GroupedCognitiveMirror(nn.Module):
         
         return mirror, mlp_mod, mem_mod, hp, pred_error_norm
     
-    def cache_grad_norms(self, grad_h=None):
+    def cache_grad_norms(self, grad_h: Optional[torch.Tensor] = None) -> None:
         """Call after backward: store per-subspace gradient norm.
         Uses hp hook by default; falls back to explicit grad_h if provided."""
         if grad_h is not None:
@@ -759,9 +770,9 @@ class GroupedCognitiveMirror(nn.Module):
             self._prev_grad_norm.copy_(self._hp_grad)
 
     @torch.no_grad()
-    def debug_mind(self):
+    def debug_mind(self) -> Dict[str, object]:
         """Return a dict of meta-cognitive stats for generation interpretability."""
-        info = {}
+        info: Dict[str, object] = {}
         if not self._has_private_mem:
             return info
         info['private_mem_norm'] = self._private_mem.norm(dim=-1).mean().item()
@@ -810,7 +821,7 @@ class GroupedCognitiveMirror(nn.Module):
             info['cons_index'] = (cs * tr).tolist()
         return info
 
-    def meta_signals(self):
+    def meta_signals(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Cheap GPU-friendly meta-cognitive signals (no per-call host sync).
 
         Returns (trust_max, gate_ema_mean) as 0-dim tensors on the module device.

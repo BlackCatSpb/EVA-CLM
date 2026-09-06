@@ -47,7 +47,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core.adaptive_gate import hybrid_gate
+from .adaptive_gate import hybrid_gate
 
 
 def _memory_attention(q: torch.Tensor, k: torch.Tensor, temp: torch.Tensor,
