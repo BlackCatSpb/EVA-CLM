@@ -362,50 +362,51 @@ Overhead: +0.3% params, +3.6 GB VRAM.
 
 ---
 
-## 17. Logit Cache + VSA Compression
+## 17. Logit Cache — Dual-Mode (Training + Inference)
 
-**Ключевая инновация:** замена KV-cache на **compressed logits с attention**.
+**Ключевая инновация:** dual-mode cache — **training хранит h** (gradient flows), **inference хранит logits** (compressed).
 
 ### Архитектура
 
 ```
-logits (V=65536)
+TRAINING MODE:
+  h (B, L, D)
      ↓
-PerScaleLogitCache.store()
-  ├── Scale 0 (fast):   k=64  → 1928 bytes
-  ├── Scale 1:           k=48  → 1448 bytes
-  ├── Scale 2:           k=40  → 1208 bytes
-  └── Scale 3 (slow):    k=32  → 968 bytes
-  Total: 5,552 bytes per token
+  LogitCache.store(h, training=True)  → хранит h (1.25 MB/seq)
      ↓
-PerScaleLogitAttention(Q, Cache)
-  Q = q_proj(h)              — from hidden state
-  K_i = k_proj_i(cached)     — per-scale projection
-  V_i = v_proj_i(cached)     — per-scale projection
-  output = gate * combined + (1-gate) * h
+  LogitAttention(h, cache)            → gradient flows ✓
      ↓
-h_augmented → next token prediction
+  h_augmented → loss → backprop → model учится!
+
+INFERENCE MODE:
+  logits (B, L, V=65536)
+     ↓
+  LogitCache.store(logits, training=False)  → сжатые логиты (0.02 MB/seq)
+     ↓
+  LogitAttention(h, cache)                   → detached
+     ↓
+  h_augmented → next token (43x экономия)
 ```
 
-### VSA-driven Compression
+### Dual-Mode
 
-Каждый масштаб имеет **обучаемый** `vsa_scale`:
+| Режим | Что храним | Память | Градиент |
+|-------|-----------|--------|----------|
+| **Training** | h (hidden states) | 1.25 MB/seq | ✓ flows |
+| **Inference** | logits (compressed) | 0.02 MB/seq | ✗ detached |
+
+**Training:** модель учится производить полезные h — градиент течёт через cache.
+**Inference:** компрессия работает — 43x меньше KV-cache.
+
+### VSA-driven Compression (inference mode)
+
+VSA scales управляют сжатием:
 ```
 k = base_k * sigmoid(vsa_scale)
 ```
-- `vsa_scale → +∞`: k → base_k (максимальная точность)
-- `vsa_scale → -∞`: k → 0 (максимальное сжатие)
+- `vsa_scale → +∞`: k → base_k (точность)
+- `vsa_scale → -∞`: k → 0 (сжатие)
 - `vsa_scale = 0`: k = base_k/2 (баланс)
-
-**Модель сама выбирает оптимальное сжатие** для каждого масштаба.
-
-### Сравнение с KV-cache
-
-| Tokens | Logit Cache | KV-cache | Экономия |
-|--------|------------|----------|----------|
-| 10K | 55.5 MB | 2.4 GB | **43x** |
-| 100K | 555 MB | 24 GB | **43x** |
-| **1M** | **5.55 GB** | **240 GB** | **43x** |
 
 ### Window Attention (512 tokens)
 
@@ -417,14 +418,23 @@ Cache хранит **все** токены, attention смотрит на **по
 | 1000 | 1000 vs 512 | 0.999994 | 1.0000 |
 | 100K | 1024 vs 512 | 0.999994 | 1.0000 |
 
-**Потери = 0!** Далёкие токены (< 1% веса attention) не влияют на предсказание.
+**Потери = 0!**
+
+### Сравнение с KV-cache (inference)
+
+| Tokens | Logit Cache | KV-cache | Экономия |
+|--------|------------|----------|----------|
+| 10K | 55.5 MB | 2.4 GB | **43x** |
+| 100K | 555 MB | 24 GB | **43x** |
+| **1M** | **5.55 GB** | **240 GB** | **43x** |
 
 ### Реализация
 
-- `core/logit_cache_v2.py`: PerScaleLogitCache, PerScaleLogitAttention, PerScaleCacheAttention
-- Интеграция в `EVAStack.process_with_cache()`
+- `core/logit_cache.py`: LogitCache, LogitAttention, LogitCacheAttention
+- `core/tau_compression.py`: STE (Straight-Through Estimator)
+- Интеграция: `EVAStack.process_with_cache()`
 - Включение: `cfg.logit_cache_enabled=True`
-- Тесты: `scripts/test_logit_cache_v2.py`, `scripts/test_window_impact.py`
+- Тесты: `scripts/test_gradient_flow.py`, `scripts/test_unified_cache.py`
 
 ---
 
@@ -470,15 +480,15 @@ EVA-CLM/
 │   ├── mlp.py                  # GroupedMLP (SwiGLU)
 │   ├── reasoning.py            # ReasoningMemory + ReasoningGate
 │   ├── memory_bank.py          # StreamingMemoryBank: L1+L2+L3
-│   ├── logit_cache_v2.py       # PerScaleCache + VSA-driven compression
-│   ├── logit_cache.py          # v1 LogitCache (legacy)
+│   ├── logit_cache.py          # Dual-mode cache: training=h, inference=logits
 │   └── ...                     # other modules
 │
 ├── scripts/
 │   ├── train.py                # training loop
 │   ├── analyze.py              # checkpoint analyzer
 │   ├── generate.py             # generation: FCF-CPR, --smart
-│   ├── test_logit_cache_v2.py  # logit cache tests
+│   ├── test_gradient_flow.py   # gradient flow tests
+│   ├── test_unified_cache.py   # integration tests
 │   ├── test_window_impact.py   # window accuracy tests
 │   └── ...                     # other scripts
 │
