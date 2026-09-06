@@ -1,5 +1,5 @@
 """
-Checkpoint inspector: load, diagnose, and print key metrics from any WideBind .pt file.
+Checkpoint inspector: load, diagnose, and print key metrics from any EVA .pt file.
 
 Usage:
   python scripts/checkpoint_inspector.py <path/to/checkpoint.pt> [--codebase PATH]
@@ -17,8 +17,8 @@ def load_cfg_and_model(ckpt_path, codebase=None):
     if codebase is not None:
         sys.path.insert(0, codebase)
     from core import model as _mod, config as _cfg
-    CfgCls = getattr(_cfg, 'WideBindConfig', getattr(_cfg, 'WideBandConfig', None))
-    ModelCls = getattr(_mod, 'WideBindStack', getattr(_mod, 'WideBandStack', None))
+    CfgCls = getattr(_cfg, 'EVAConfig', getattr(_cfg, 'WideBandConfig', None))
+    ModelCls = getattr(_mod, 'EVAStack', getattr(_mod, 'WideBandStack', None))
     if CfgCls is None or ModelCls is None:
         raise ImportError(f'Cannot find Config/Model class in {codebase or "."}')
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)

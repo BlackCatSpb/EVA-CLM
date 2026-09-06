@@ -1,4 +1,4 @@
-"""WideBind: unified per-layer maturation gate.
+"""EVA: unified per-layer maturation gate.
 
 Replaces the ad-hoc wake-up crutches (hard pm_coh threshold on mlp_mod std,
 fixed pm_write_delay, bridge-injection scale=0 hack) with ONE principled

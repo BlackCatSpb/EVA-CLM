@@ -1,15 +1,15 @@
-# WideBind — Architecture Characterization & Comparative Survey
+# EVA — Architecture Characterization & Comparative Survey
 
 > Audience: external engineers/reviewers who already know modern sequence models
 > (Transformers, SSMs, memory-augmented and adaptive-compute networks).
-> Goal: give an accurate, mechanism-level picture of WideBind and map each of its
+> Goal: give an accurate, mechanism-level picture of EVA and map each of its
 > ideas to the closest known work, so differences are easy to spot.
 
 ---
 
 ## 1. Design philosophy
 
-WideBind is a **cognitive-inspired, VSA-centric language model** rather than a pure
+EVA is a **cognitive-inspired, VSA-centric language model** rather than a pure
 attention or state-space model. Three commitments shape every component:
 
 1. **Vector Symbolic Architecture (VSA / Holographic Reduced Representations) as the
@@ -34,9 +34,9 @@ suites yet, and its training dynamics are intentionally unusual (see §6).
 | Subsystem | Module | What it does |
 |---|---|---|
 | Token embed | `ZeckendorfEmbedding` / `PartitionedEmbedding` + `RotaryEmbedding` | Fibonacci/Zeckendorf-coded token ids + rotary position |
-| **Block** | `WideBindBlock` | Pre-LN → VSA bind → memory → conv → spectral → MLP |
+| **Block** | `EVABlock` | Pre-LN → VSA bind → memory → conv → spectral → MLP |
 | VSA bind | `TrajectorySpiralBind` (hybrid HRR) | `D→K` projection, **hybrid circular-convolution + elementwise** bind, frequency-modulated by a "trajectory spiral" of `hp` phases |
-| Sequence memory | `ExactSequenceMemory` | **scaled-dot-product softmax attention over the local sequence** (`q,k,v` linear → softmax) — i.e. WideBind *does* contain a local attention per block |
+| Sequence memory | `ExactSequenceMemory` | **scaled-dot-product softmax attention over the local sequence** (`q,k,v` linear → softmax) — i.e. EVA *does* contain a local attention per block |
 | Conv | depthwise 48-tap | local temporal mixing |
 | Spectral | DCT basis scaling | frequency-domain feature shaping |
 | MLP | `GroupedMLP` | grouped experts; **gate opened by gradient alignment** with the CE loss (`gradalign`) |
@@ -70,9 +70,9 @@ expert gates and the head.
 Legend: SM = sequence mixer, MEM = long-range memory, HEAD = output layer,
 ADAPT = recurrence/adaptive compute.
 
-| Project | SM (core) | MEM | HEAD | ADAPT | Relation to WideBind |
+| Project | SM (core) | MEM | HEAD | ADAPT | Relation to EVA |
 |---|---|---|---|---|---|
-| **Transformer** (Vaswani'17) | full softmax attention | none (context = window) | softmax | fixed depth | WideBind reuses local attention (`ExactSequenceMemory`) but adds VSA bind, conv, spectral, mirror, bridge on top |
+| **Transformer** (Vaswani'17) | full softmax attention | none (context = window) | softmax | fixed depth | EVA reuses local attention (`ExactSequenceMemory`) but adds VSA bind, conv, spectral, mirror, bridge on top |
 | **Transformer-XL** (Dai'19) | segmented attention | segment-level recurrence cache | softmax | — | Similar "carry context across depth" goal, but WB uses a compressed *intent* bus, not raw hidden caches |
 | **Compressive / Infini-Attention** (Rae'19 / Munkhdalai'24) | attention | compressive/attention memory | softmax | — | Same problem class (long context); WB's memory is VSA superposition + intent bus, not compressed KV |
 | **RetNet** (Sun'23) | retention (multi-scale decay) | implicit (decay state) | softmax | recurrent inference | RetNet's decayed state ≈ WB's `alpha_diag` time-constants, but WB learns per-dimension τ via residual variance |
@@ -115,14 +115,14 @@ ADAPT = recurrence/adaptive compute.
   (`w_intent` active only at the bottom layer L0; deeper layers still 0). Phase-2 (head
   stencil `bus_head_proj`) is clearly active and growing. This is consistent with the
   intended staged wake-up (bridge → mirrors → meta-core).
-- **Hybrid, not minimal.** WideBind stacks many mechanisms per block; compute/parameter
+- **Hybrid, not minimal.** EVA stacks many mechanisms per block; compute/parameter
   efficiency vs a clean Transformer/SSM baseline is an open empirical question.
 
 ---
 
 ## 6. One-paragraph summary for a busy reviewer
 
-WideBind is a 24-layer, ~143M-param cognitive-inspired LM that keeps a local
+EVA is a 24-layer, ~143M-param cognitive-inspired LM that keeps a local
 softmax-attention block per layer but surrounds it with VSA binding (`TrajectorySpiralBind`),
 vector-superposition memory, depthwise conv, spectral shaping, and gradient-aligned grouped
 experts. Its defining idea is an **Intent Bridge**: a detached, salience-gated cross-layer

@@ -1,4 +1,4 @@
-"""Mini testbed for WideBind semantic-connectivity experiments.
+"""Mini testbed for EVA semantic-connectivity experiments.
 
 Goal: try the per-layer semantic bridge cheaply, locally, on CPU.
 - Head is UNTOUCHED: training uses plain CE (model.compute_losses).
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn.functional as F
 
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 
 
 def make_corpus(seed=0):
@@ -62,7 +62,7 @@ def to_batches(ids, seq_len, batch, n_batches):
 
 
 def build_model(vocab_size, bridge_glu=False, bridge_conn=0.0):
-    cfg = WideBindConfig(
+    cfg = EVAConfig(
         D=256, n_layers=4, orth_weight=0.0,
         bind_K=32, mlp_groups=4, mlp_expand=2,
         vocab=vocab_size, seq_len=32,
@@ -75,7 +75,7 @@ def build_model(vocab_size, bridge_glu=False, bridge_conn=0.0):
         bridge_conn=bridge_conn,
         bridge_dim=128,
     )
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     return model, cfg
 
 

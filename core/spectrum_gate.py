@@ -1,4 +1,4 @@
-"""WideBind: SpectrumGate — sigmoid-softmax continuum.
+"""EVA: SpectrumGate — sigmoid-softmax continuum.
 
 Три режима на одном спектре, управляемом tau:
 

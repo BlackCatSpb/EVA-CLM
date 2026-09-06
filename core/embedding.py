@@ -1,10 +1,10 @@
-"""WideBind: embedding module."""
+"""EVA: embedding module."""
 
 import math, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .config import WideBindConfig
+from .config import EVAConfig
 from .vsa_utils import zeckendorf_codes, sparse_block_codes
 from .adaptive_gate import hybrid_gate
 

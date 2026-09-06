@@ -1,5 +1,5 @@
 """
-WideBind text generation.
+EVA text generation.
 Uses HuggingFace tokenizer from the training data directory.
 """
 
@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch.nn.functional as F
 from tokenizers import Tokenizer
 
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 from core.compression import FCF_CPR
 
 
@@ -267,13 +267,13 @@ def load_inference_checkpoint(path, skip_compression=False, device='cpu'):
     FCF_CPR compression that makes the GPU appear idle. Pass skip_compression=False
     (via --compress) to write/use a <name>_fcf.pt artifact instead."""
     from torch.serialization import add_safe_globals
-    add_safe_globals([WideBindConfig])
+    add_safe_globals([EVAConfig])
     cpr = FCF_CPR()
     state = torch.load(path, map_location='cpu', weights_only=False)
 
     if 'model_compressed' in state:
         # Already compressed: decompress in-memory (no second disk read).
-        cfg = state.get('cfg') or WideBindConfig()
+        cfg = state.get('cfg') or EVAConfig()
         state['model'] = cpr.decompress_sd(state['model_compressed'], state['meta'], cfg)
         del state['model_compressed']
         del state['meta']
@@ -289,7 +289,7 @@ def load_inference_checkpoint(path, skip_compression=False, device='cpu'):
         print(f'FCF_CPR: compressing {path} -> {fcf_path}')
         cpr.save_compressed(state, fcf_path)
     st = torch.load(fcf_path, map_location='cpu', weights_only=False)
-    cfg = st.get('cfg') or WideBindConfig()
+    cfg = st.get('cfg') or EVAConfig()
     st['model'] = cpr.decompress_sd(st['model_compressed'], st['meta'], cfg)
     del st['model_compressed']
     del st['meta']
@@ -351,8 +351,8 @@ if __name__ == '__main__':
     # to create the <name>_fcf.pt artifact, or point at an existing _fcf.pt.
     skip_compression = args.skip_compression or not args.compress
     state = load_inference_checkpoint(args.checkpoint, skip_compression=skip_compression, device=device)
-    cfg = state.get('cfg', WideBindConfig())
-    model = WideBindStack(cfg).to(device)
+    cfg = state.get('cfg', EVAConfig())
+    model = EVAStack(cfg).to(device)
     model.load_state_dict(state['model'], strict=False)
     if model.explicit_reasoning:
         model.reasoning_enabled_step = int(state.get('reasoning_enabled_step', 0))

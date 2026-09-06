@@ -1,12 +1,12 @@
 """
-Test inference on compressed WideBind checkpoint.
+Test inference on compressed EVA checkpoint.
 Measures: VRAM, tok/s, generation quality.
 """
 import sys, os, time, math
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
 from core.compression import FCF_CPR
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 
 
 def test_inference(ckpt_path, prompt_len=16, gen_len=128, device='cuda'):
@@ -21,7 +21,7 @@ def test_inference(ckpt_path, prompt_len=16, gen_len=128, device='cuda'):
     cfg = ckpt['cfg']
     
     # Model (fp16: half VRAM, ~2x speed on MX550)
-    model = WideBindStack(cfg).to(device)
+    model = EVAStack(cfg).to(device)
     model.load_state_dict(ckpt['model'], strict=False)
     model.eval()
     if device == 'cuda' and next(model.parameters()).dtype == torch.float32:

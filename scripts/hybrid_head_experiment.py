@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 from core.embedding import SigmoidCodedHead
 from scripts.generate import load_inference_checkpoint, load_russian_tokenizer, generate
 
@@ -81,7 +81,7 @@ def main():
 
     device = args.device
     state = load_inference_checkpoint(args.checkpoint, skip_compression=True, device='cpu')
-    cfg = state.get('cfg', WideBindConfig())
+    cfg = state.get('cfg', EVAConfig())
     tok = load_russian_tokenizer()
 
     print(f'Step: {state.get("step", "?")}')
@@ -89,7 +89,7 @@ def main():
     print()
 
     # --- Original ---
-    model_orig = WideBindStack(cfg).to(device)
+    model_orig = EVAStack(cfg).to(device)
     model_orig.load_state_dict(state['model'], strict=False)
     model_orig.reasoning_scale_override = 0.0
 
@@ -101,7 +101,7 @@ def main():
     print()
 
     # --- Hybrid ---
-    model_hybrid = WideBindStack(cfg).to(device)
+    model_hybrid = EVAStack(cfg).to(device)
     model_hybrid.load_state_dict(state['model'], strict=False)
     model_hybrid.reasoning_scale_override = 0.0
     model_hybrid.lm_head = HybridSigmoidSoftmaxHead(model_hybrid.lm_head)

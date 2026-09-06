@@ -1,12 +1,12 @@
 import sys; sys.path.insert(0, '.')
 import torch
-from core.config import WideBindConfig
-from core.stack import WideBindStack
+from core.config import EVAConfig
+from core.stack import EVAStack
 
-cfg = WideBindConfig(D=256, n_layers=4, vocab=1024, mlp_groups=4, bind_K=32,
+cfg = EVAConfig(D=256, n_layers=4, vocab=1024, mlp_groups=4, bind_K=32,
     memory_bank=True, mem_l1_slots=3, mem_l2_slots=8, mem_l3_concepts=4, mem_bridge_dim=64,
     bridge_conn=0.0, maturation_enabled=True)
-model = WideBindStack(cfg)
+model = EVAStack(cfg)
 model.eval()
 
 x = torch.randint(0, 1024, (2, 32))

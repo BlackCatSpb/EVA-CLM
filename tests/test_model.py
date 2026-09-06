@@ -1,4 +1,4 @@
-"""Comprehensive tests for WideBind core components."""
+"""Comprehensive tests for EVA core components."""
 
 import sys, os, math
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -7,10 +7,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core.config import WideBindConfig
+from core.config import EVAConfig
 from core.lambda_utils import LambdaConfig
 from core.model import (
-    WideBindStack, WideBindBlock, GroupedCognitiveMirror, GroupedMLP,
+    EVAStack, EVABlock, GroupedCognitiveMirror, GroupedMLP,
     PartitionedEmbedding, PartitionedHead, LmHead,
     sparse_block_codes, dct_basis, vsa_prefix_scan,
 )
@@ -61,7 +61,7 @@ def test_sparse_codes_prefix_stable():
 # ─── PartitionedEmbedding ──────────────────────────────────────────
 
 def test_partitioned_embed_shape():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     emb = PartitionedEmbedding(cfg)
     tokens = torch.randint(0, 1800, (2, 16))
     h = emb(tokens)
@@ -69,7 +69,7 @@ def test_partitioned_embed_shape():
 
 
 def test_partitioned_embed_gradient_grouping():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     emb = PartitionedEmbedding(cfg)
     tokens = torch.randint(0, 1800, (4, 32))
     h = emb(tokens)
@@ -86,7 +86,7 @@ def test_partitioned_embed_gradient_grouping():
 
 
 def test_partitioned_embed_small_vocab():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1800)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1800)
     emb = PartitionedEmbedding(cfg)
     tokens = torch.randint(0, 1800, (1, 8))
     h = emb(tokens)
@@ -94,7 +94,7 @@ def test_partitioned_embed_small_vocab():
 
 
 def test_partitioned_embed_grad_nonzero_with_active_bits():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     emb = PartitionedEmbedding(cfg)
     tokens = torch.tensor([[42]])
     h = emb(tokens)
@@ -105,7 +105,7 @@ def test_partitioned_embed_grad_nonzero_with_active_bits():
 
 
 def test_partitioned_embed_fewer_params():
-    cfg_dense = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg_dense = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     emb = PartitionedEmbedding(cfg_dense)
     expected = 16 * (512 // 16)
     assert emb.basis.numel() == expected
@@ -114,7 +114,7 @@ def test_partitioned_embed_fewer_params():
 # ─── PartitionedHead ───────────────────────────────────────────────
 
 def test_partitioned_head_shape():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     head = PartitionedHead(cfg)
     h = torch.randn(2, 16, 512)
     logits = head(h)
@@ -122,7 +122,7 @@ def test_partitioned_head_shape():
 
 
 def test_partitioned_head_gradient_grouping():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     head = PartitionedHead(cfg)
     h = torch.randn(4, 32, 512, requires_grad=True)
     logits = head(h)
@@ -134,7 +134,7 @@ def test_partitioned_head_gradient_grouping():
 
 
 def test_partitioned_head_zero_h_gives_uniform_logits():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     head = PartitionedHead(cfg)
     h = torch.zeros(1, 1, 512)
     logits = head(h)
@@ -299,11 +299,11 @@ def test_mlp_nonzero():
     assert out.abs().sum().item() > 0
 
 
-# ─── WideBindStack (end-to-end) ─────────────────────────────────────
+# ─── EVAStack (end-to-end) ─────────────────────────────────────
 
 def test_stack_forward():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     x = torch.randint(0, cfg.vocab, (2, 8), device=device)
     h = model.embed_tokens(x)
     out, state, global_state, _ = model(h)
@@ -312,8 +312,8 @@ def test_stack_forward():
 
 
 def test_stack_forward_twice_with_state():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     x = torch.randint(0, cfg.vocab, (1, 8), device=device)
     h = model.embed_tokens(x)
     out1, state1, gs1, _ = model(h)
@@ -322,8 +322,8 @@ def test_stack_forward_twice_with_state():
 
 
 def test_stack_loss():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     x = torch.randint(0, cfg.vocab, (2, 8), device=device)
     h = model.embed_tokens(x)
     out, _, _, _ = model(h)
@@ -335,23 +335,23 @@ def test_stack_loss():
 
 
 def test_stack_param_count():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg)
     n = model.param_count()
     assert n > 0
 
 
 def test_stack_embed_alignment():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg)
     K = cfg.code_dim
     assert model.embed.K == K
     assert model.lm_head.K == K
 
 
 def test_strict_false_compatibility():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg)
     old_sd = {k: v for k, v in model.state_dict().items()
               if not any(b in k for b in ['_last_gates', '_last_h_pool', '_prev_grad_norm', '_last_magnitude'])}
     model.load_state_dict(old_sd, strict=False)
@@ -381,8 +381,8 @@ def test_dct_basis_first_row():
 # ─── AdaptiveController ─────────────────────────────────────────────
 
 def test_adaptive_controller_ranges():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg)
     from core.model import AdaptiveController
     expl, diff = AdaptiveController.stats(model.layers)
     assert 0 <= expl <= 1
@@ -400,9 +400,9 @@ def test_adaptive_controller_ranges():
 # ─── Config integration tests ──────────────────────────────────────────
 
 def test_config_adaptive_controller_thresholds():
-    cfg = WideBindConfig(**SMALL, lambda_d_enabled=False,
+    cfg = EVAConfig(**SMALL, lambda_d_enabled=False,
                          exploration_threshold=0.5, differentiation_threshold=0.5)
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     h = torch.randn(1, 4, cfg.D)
     model(h)
     from core.model import AdaptiveController
@@ -414,11 +414,11 @@ def test_config_adaptive_controller_thresholds():
 
 def test_config_init_values():
     k = 4
-    cfg = WideBindConfig(**SMALL, mirror_k=k, mirror_k_staircase=False,
+    cfg = EVAConfig(**SMALL, mirror_k=k, mirror_k_staircase=False,
                          lambda_d_enabled=False,
                          log_scale_init_std=0.1,
                          w_d_init_std=0.5, conv_init_std=0.05)
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     m0 = model.layers[0].mirror
     assert m0.alpha_diag.shape == (cfg.mlp_groups, k)
     assert m0.tanh_bias.shape == (cfg.mlp_groups, k)
@@ -429,9 +429,9 @@ def test_config_init_values():
 
 
 def test_config_param_groups_multipliers():
-    cfg = WideBindConfig(**SMALL, lambda_d_enabled=False,
+    cfg = EVAConfig(**SMALL, lambda_d_enabled=False,
                          lambda_lr_hierarchy=False, gate_lr_mult=3.0)
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     groups = model.param_groups(1e-4)
     param_to_name = {id(p): n for n, p in model.named_parameters()}
     found_gate = False
@@ -445,7 +445,7 @@ def test_config_param_groups_multipliers():
 
 
 def test_lambda_d_hierarchy():
-    cfg = WideBindConfig()
+    cfg = EVAConfig()
     lc = LambdaConfig(3)
     assert abs(cfg.exploration_threshold - lc.exploration_threshold) < 1e-6
     assert abs(cfg.differentiation_threshold - lc.differentiation_threshold) < 1e-6
@@ -453,7 +453,7 @@ def test_lambda_d_hierarchy():
     assert abs(cfg.gate_lr_mult - lc.gate_lr_mult) < 1e-6
     assert cfg.warmup_steps == lc.warmup_steps
     assert cfg.eval_interval == lc.eval_interval
-    cfg2 = WideBindConfig(lambda_d_enabled=False)
+    cfg2 = EVAConfig(lambda_d_enabled=False)
     assert abs(cfg2.exploration_threshold - 0.25) < 1e-6
     assert abs(cfg2.ema_alpha_max - 0.99) < 1e-6
     assert cfg2.warmup_steps == 1000
@@ -462,8 +462,8 @@ def test_lambda_d_hierarchy():
 # ─── LiveInference ─────────────────────────────────────────────────
 
 def test_live_inference_basic():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     model.eval()
     live = LiveInference(model, cfg)
     h = model.embed_tokens(torch.randint(0, cfg.vocab, (1, 4), device=device))
@@ -472,8 +472,8 @@ def test_live_inference_basic():
 
 
 def test_live_inference_state_persists():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     model.eval()
     live = LiveInference(model, cfg)
     h1 = model.embed_tokens(torch.randint(0, cfg.vocab, (1, 4), device=device))
@@ -485,8 +485,8 @@ def test_live_inference_state_persists():
 
 
 def test_live_inference_think():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     model.eval()
     live = LiveInference(model, cfg)
     with torch.no_grad():
@@ -495,8 +495,8 @@ def test_live_inference_think():
 
 
 def test_live_inference_think_persists():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     model.eval()
     live = LiveInference(model, cfg)
     with torch.no_grad():
@@ -505,8 +505,8 @@ def test_live_inference_think_persists():
 
 
 def test_live_inference_reset():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     model.eval()
     live = LiveInference(model, cfg)
     h = model.embed_tokens(torch.randint(0, cfg.vocab, (1, 4), device=device))
@@ -520,8 +520,8 @@ def test_live_inference_reset():
 # ─── MirrorMonitor ────────────────────────────────────────────────
 
 def test_mirror_monitor_trace():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     model.eval()
     monitor = MirrorMonitor(model)
     x = torch.randint(0, cfg.vocab, (2, 8), device=device)
@@ -537,8 +537,8 @@ def test_mirror_monitor_trace():
 
 
 def test_mirror_monitor_rolling():
-    cfg = WideBindConfig(**SMALL)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(**SMALL)
+    model = EVAStack(cfg).to(device)
     model.eval()
     monitor = MirrorMonitor(model, max_history=5)
     for _ in range(10):
@@ -565,9 +565,9 @@ def test_alpha_gradient_stronger_than_wpred():
 
 
 def test_alpha_deviation_on_structured_data():
-    cfg = WideBindConfig(D=512, n_layers=2, mlp_groups=4, mirror_k=4,
+    cfg = EVAConfig(D=512, n_layers=2, mlp_groups=4, mirror_k=4,
                          code_dim=16, code_sparsity=4, vocab=1000)
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     opt = torch.optim.AdamW(model.param_groups(), lr=1e-3)
     for step in range(50):
         x = torch.randint(0, 100, (2, 8))
@@ -602,9 +602,9 @@ def test_no_lo_hi_split_grad_to_all_k():
 
 
 def test_D4096_G32_forward():
-    cfg = WideBindConfig(n_layers=2, D=512, mlp_groups=4, mirror_k=4,
+    cfg = EVAConfig(n_layers=2, D=512, mlp_groups=4, mirror_k=4,
                           code_dim=16, code_sparsity=4, vocab=1820)
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     x = torch.randint(0, 100, (1, 4))
     h = model.embed_tokens(x)
     out, _, _, _ = model(h, None)
@@ -614,7 +614,7 @@ def test_D4096_G32_forward():
 
 
 def test_gradient_grouping_demonstrable():
-    cfg = WideBindConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     emb = PartitionedEmbedding(cfg)
     tokens = torch.tensor([[0, 1, 2, 42, 100, 500, 1000, 1500]])
     h = emb(tokens)
@@ -672,7 +672,7 @@ def test_layer_bridge_gate_explosion_control():
 
 def test_maturation_no_warmup():
     from core.maturation import MaturationController
-    cfg = WideBindConfig(**SMALL)
+    cfg = EVAConfig(**SMALL)
     mc = MaturationController(n_layers=cfg.n_layers, tau_min=1e-4, tau_max=1.0, cfg=cfg)
     assert not hasattr(mc, 'set_resume_step')
     assert not hasattr(mc, 'warmup_steps')

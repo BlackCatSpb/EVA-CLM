@@ -4,8 +4,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
 import torch.nn.functional as F
 from torch.serialization import add_safe_globals
-from core import WideBindConfig
-add_safe_globals([WideBindConfig])
+from core import EVAConfig
+add_safe_globals([EVAConfig])
 
 ckpt = torch.load('checkpoints/best 27.pt', map_location='cpu', weights_only=True)
 sd = ckpt['model']

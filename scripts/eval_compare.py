@@ -45,7 +45,7 @@ def evaluate():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     state = load_inference_checkpoint(a.checkpoint, skip_compression=False, device='cpu')
     cfg = state['cfg']
-    model = __import__('core').WideBindStack(cfg).to(device)
+    model = __import__('core').EVAStack(cfg).to(device)
     model.load_state_dict(state['model'], strict=False)
     vocab = cfg.vocab
 

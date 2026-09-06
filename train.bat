@@ -1,9 +1,9 @@
 @echo off
-cd /d "C:\Users\black\OneDrive\Desktop\WideBind"
-echo [WideBind] Loading environment...
-call conda activate base 2>nul || echo [WideBind] No conda, using system Python
+cd /d "C:\Users\black\OneDrive\Desktop\EVA CLM"
+echo [EVA-CLM] Loading environment...
+call conda activate base 2>nul || echo [EVA-CLM] No conda, using system Python
 
-echo [WideBind] Starting training...
+echo [EVA-CLM] Starting training...
 echo   Data: C:\Users\black\OneDrive\Desktop\fcp
 echo   Model: 152M params, 32 layers, B=2, L=128
 echo   VRAM: ~2-3 GB peak
@@ -31,5 +31,5 @@ start /b /wait "" python train.py ^
     --scheduler mirror
 
 echo.
-echo [WideBind] Training finished.
+echo [EVA-CLM] Training finished.
 pause

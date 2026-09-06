@@ -19,12 +19,12 @@ import math
 import sys
 import torch
 
-from core.stack import WideBindStack, MirrorLRScheduler
-from core.config import WideBindConfig
+from core.stack import EVAStack, MirrorLRScheduler
+from core.config import EVAConfig
 
 
 def tiny_cfg(boost_max=2.0):
-    cfg = WideBindConfig(
+    cfg = EVAConfig(
         n_layers=6, D=96, bind_K=16, mlp_groups=6,
         mirror_k=8, mirror_k_staircase=False, vocab=256,
         code_dim=32, code_sparsity=6, head_mode='sigmoid_coded',
@@ -36,7 +36,7 @@ def tiny_cfg(boost_max=2.0):
 
 def build(boost_max=2.0):
     cfg = tiny_cfg(boost_max)
-    model = WideBindStack(cfg).to('cpu')
+    model = EVAStack(cfg).to('cpu')
     opt = torch.optim.Adam(model.parameters(), lr=3e-3)
     sched = MirrorLRScheduler(model, opt, base_lr=3e-3, warmup=0, cfg=cfg)
     sched.warmup = 0   # override cfg.warmup_steps so we exercise the stats branch
@@ -111,7 +111,7 @@ def test_gating():
 def test_integration():
     """Real tiny model, short run: must stay finite; OLD caps at 1.0."""
     cfg = tiny_cfg(boost_max=1.0)
-    model = WideBindStack(cfg).to('cpu')
+    model = EVAStack(cfg).to('cpu')
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=3e-3)
     sched = MirrorLRScheduler(model, opt, base_lr=3e-3, warmup=10, cfg=cfg)

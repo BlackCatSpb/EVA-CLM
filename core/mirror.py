@@ -1,10 +1,10 @@
-"""WideBind: mirror module."""
+"""EVA: mirror module."""
 
 import math, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .config import WideBindConfig
+from .config import EVAConfig
 from .vsa_utils import fib_sigmoid_init, dct_basis
 from .adaptive_gate import AdaptiveGate
 

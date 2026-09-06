@@ -1,13 +1,13 @@
-"""Faithful CPU smoke test of the colab.ipynb training path against current core."""
+"""Faithful CPU smoke test of the eva_colab.ipynb training path against current core."""
 import os, sys, time, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn.functional as F
-from core import WideBindConfig, WideBindStack, MirrorLRScheduler
+from core import EVAConfig, EVAStack, MirrorLRScheduler
 from core.adaptation import LossBalancer, GradientClipper, set_active_depth
 
 # ---- cell 4 cfg (notebook flags, tiny D for CPU) ----
-cfg = WideBindConfig(
+cfg = EVAConfig(
     D=256, n_layers=4, bind_K=32, vocab=300, mask_eos=False,
     mlp_groups=32, mlp_expand=4, seq_len=48,
     lr=3e-4, max_steps=20, warmup_steps=5,
@@ -39,7 +39,7 @@ cfg.llrd = 0.5
 cfg.eval_interval = 2000
 
 device = 'cpu'
-model = WideBindStack(cfg).to(device)
+model = EVAStack(cfg).to(device)
 assert getattr(model, 'bridge', None) is not None, "bridge NOT created -> notebook cfg broken"
 print(f'Model params: {model.param_count():,}; bridge params: {sum(p.numel() for p in model.bridge.parameters()):,}')
 
@@ -100,7 +100,7 @@ print('Checkpoint saved with', len(safe_names), 'param names (no StopIteration)'
 # ---- load round-trip ----
 from core.migrate import migrate_state_dict
 ck = torch.load(tmp, map_location='cpu', weights_only=False)
-model2 = WideBindStack(cfg).to(device)
+model2 = EVAStack(cfg).to(device)
 migrated, _ = migrate_state_dict(ck['model'], model2)
 miss, unexp = model2.load_state_dict(migrated, strict=False)
 print(f'Reload: missing={len(miss)} unexpected={len(unexp)} (bridge params present: {any(k.startswith("bridge.") for k in ck["model"].keys())})')

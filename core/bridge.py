@@ -1,4 +1,4 @@
-"""WideBind: per-layer semantic bridge (in-pipeline, active in train AND inference).
+"""EVA: per-layer semantic bridge (in-pipeline, active in train AND inference).
 
 Mirrors the Intent Bridge streaming pattern: a single shared probe head emits a
 semantic vector ``s_l = probe(h_l)`` at every layer ``l`` (B, L, bridge_dim).

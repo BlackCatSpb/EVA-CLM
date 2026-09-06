@@ -14,7 +14,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 
 try:
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -26,7 +26,7 @@ os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 
 def make_cfg(adaptive):
-    return WideBindConfig(
+    return EVAConfig(
         D=128, n_layers=2, bind_K=8, vocab=128, seq_len=8, batch_size=16,
         mlp_groups=4, mlp_expand=2, mirror_k=8,
         code_dim=16, code_sparsity=3, conv_kernel=8,
@@ -63,7 +63,7 @@ def main():
     torch.manual_seed(42)
     rng = torch.Generator().manual_seed(42)
     cfg = make_cfg(True)
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
 
     losses = []

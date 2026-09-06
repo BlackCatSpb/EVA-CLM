@@ -1,4 +1,4 @@
-"""Единый анализатор чекпоинтов WideBind.
+"""Единый анализатор чекпоинтов EVA.
 
 Объединяет все методы анализа в один прогон:
   - static    — конфиг, per-layer параметры, VSA-лестница, зеркало, MLP, голова, NaN/Inf
@@ -31,8 +31,9 @@ import torch.nn.functional as F
 from torch.serialization import add_safe_globals
 
 sys.path.insert(0, BASE)
-from core import WideBindConfig, WideBindStack
-add_safe_globals([WideBindConfig])
+from core import EVAConfig, EVAStack
+from core.config import WideBindConfig
+add_safe_globals([EVAConfig, WideBindConfig])
 
 PUNCT = re.compile(r'^[\s\.,:;!?\-—–…"«»()\[\]{}]+$')
 WORD = re.compile(r'[а-яёА-ЯЁ]')
@@ -43,7 +44,7 @@ WORD = re.compile(r'[а-яёА-ЯЁ]')
 def load_ckpt(path):
     ckpt = torch.load(path, map_location='cpu', weights_only=True)
     cfg = ckpt['cfg']
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
     model.train()
     if model.explicit_reasoning:
@@ -1049,7 +1050,7 @@ def render_log_html(data, outpath):
         ('tok/s', f'{_last(main, "tok_s"):.0f}'),
     ]
     ch = []
-    ch.append('<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>WideBind training log</title><style>')
+    ch.append('<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>EVA training log</title><style>')
     ch.append('body{background:#0d1117;color:#c9d1d9;font:14px/1.5 Consolas,monospace;margin:24px}'
               'h1{color:#f0f6fc}h2{color:#79c0ff;border-bottom:1px solid #30363d;padding-bottom:4px;margin-top:26px}'
               '.cards{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}'
@@ -1060,7 +1061,7 @@ def render_log_html(data, outpath):
               '.scroll{max-height:420px;overflow:auto;border:1px solid #30363d;border-radius:8px}'
               '.dim{color:#8b949e}.g{color:#7ee787}.y{color:#e3b341}.r{color:#ff7b72}')
     ch.append('</style></head><body>')
-    ch.append('<h1>WideBind — Training Log Dashboard</h1>')
+    ch.append('<h1>EVA — Training Log Dashboard</h1>')
     if data['bridge']:
         ch.append(f'<div class="dim">bridge: {H.escape(data["bridge"])}</div>')
     if data['saves']:
@@ -1215,7 +1216,7 @@ def save_html_report(ckpt, cfg, model, wake, live, head, anomaly=None, bridge=No
                           if flag in ('PASS', 'WATCH', 'WAKE') else flag)
     ch = []
     ch.append('<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">')
-    ch.append('<title>WideBind report step ' + str(step) + '</title><style>')
+    ch.append('<title>EVA report step ' + str(step) + '</title><style>')
     ch.append('''body{background:#0d1117;color:#c9d1d9;font:14px/1.5 Consolas,monospace;margin:24px}
 h1{font-size:20px;color:#f0f6fc}h2{font-size:16px;color:#79c0ff;border-bottom:1px solid #30363d;padding-bottom:4px;margin-top:28px}
 .cards{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
@@ -1232,7 +1233,7 @@ td:first-child,th:first-child{text-align:left}
 .bar span{position:absolute;left:6px;top:0;font-size:10px;color:#e6edf3}
 .g{color:#7ee787}.y{color:#e3b341}.r{color:#ff7b72}.dim{color:#8b949e}''')
     ch.append('</style></head><body>')
-    ch.append(f'<h1>WideBind — {H.escape(os.path.basename(path))}</h1>')
+    ch.append(f'<h1>EVA — {H.escape(os.path.basename(path))}</h1>')
     ch.append(f'<div class="dim">step={step} &nbsp; best_val={best:.4f} &nbsp; params={params:.2f}M '
               f'&nbsp; {wake["verdict"]}</div>')
 
@@ -1506,7 +1507,7 @@ td:first-child,th:first-child{text-align:left}
 # ─────────────────────────── MAIN ───────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description='WideBind checkpoint analyzer (все методы + лог)')
+    ap = argparse.ArgumentParser(description='EVA checkpoint analyzer (все методы + лог)')
     ap.add_argument('checkpoints', nargs='*', help='path(s) to .pt (optional if --log given)')
     ap.add_argument('--no-live', action='store_true', help='skip live forward dissection')
     ap.add_argument('--no-gradinfo', action='store_true',

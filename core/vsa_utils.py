@@ -1,10 +1,10 @@
-"""WideBind: vsa_utils module."""
+"""EVA: vsa_utils module."""
 
 import math, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .config import WideBindConfig
+from .config import EVAConfig
 
 def dct_basis(n):
     """DCT-II basis vectors of shape (n, n) — orthogonal rows."""

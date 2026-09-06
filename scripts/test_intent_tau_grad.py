@@ -9,7 +9,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import WideBindStack
+from core import EVAStack
 from scripts.generate import load_inference_checkpoint
 
 CKPT = os.path.join('checkpoints', 'step_11844_fcf.pt')
@@ -20,7 +20,7 @@ def build():
     cfg = state.get('cfg')
     cfg.intent_bridge = True
     cfg.intent_tau_hierarchy_weight = 0.01
-    m = WideBindStack(cfg)
+    m = EVAStack(cfg)
     m.load_state_dict(state['model'], strict=False)
     m.train()
     return m, cfg

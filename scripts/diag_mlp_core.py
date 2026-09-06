@@ -39,7 +39,7 @@ def load_ckpt(path, codebase=None):
     if codebase is not None:
         sys.path.insert(0, codebase)
     from core import model as _mod, config as _cfg
-    ModelCls = getattr(_mod, 'WideBindStack', getattr(_mod, 'WideBandStack', None))
+    ModelCls = getattr(_mod, 'EVAStack', getattr(_mod, 'WideBandStack', None))
     if ModelCls is None:
         raise ImportError('Cannot find model class')
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
@@ -54,7 +54,7 @@ def build_fresh(cfg, codebase=None):
     if codebase is not None:
         sys.path.insert(0, codebase)
     from core import model as _mod
-    ModelCls = getattr(_mod, 'WideBindStack', getattr(_mod, 'WideBandStack', None))
+    ModelCls = getattr(_mod, 'EVAStack', getattr(_mod, 'WideBandStack', None))
     return ModelCls(cfg).eval()
 
 

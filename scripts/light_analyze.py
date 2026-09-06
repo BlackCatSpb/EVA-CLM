@@ -1,9 +1,9 @@
 """Lightweight checkpoint comparison — no forward pass, just state dict inspection."""
 import sys, os, torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core import WideBindConfig
+from core import EVAConfig
 from torch.serialization import add_safe_globals
-add_safe_globals([WideBindConfig])
+add_safe_globals([EVAConfig])
 
 for name in ['best.pt', 'best 2.pt', 'best 3.pt']:
     path = os.path.join('checkpoints', name)

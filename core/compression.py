@@ -1,6 +1,6 @@
 """
 FCF-CPR: Fractal Cognitive Field CheckPoint Reduction.
-Compresses WideBind .pt files: removes deterministic buffers, 
+Compresses EVA .pt files: removes deterministic buffers, 
 quantizes real weights with uniform 8-bit per tensor.
 """
 import math, os, sys

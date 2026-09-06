@@ -316,7 +316,7 @@ def spectral_radius(model, h, n_steps=20, n_iters=1):
     Inference (autoregressive): ρ > 1 → exponential error growth.
     
     Args:
-        model: WideBindStack or any nn.Module
+        model: EVAStack or any nn.Module
         h: (B, L, D) input tensor with requires_grad=True
         n_steps: power iteration steps
         n_iters: repeat with new random v and average (for reliability)
@@ -354,10 +354,10 @@ def spectral_radius(model, h, n_steps=20, n_iters=1):
 
     @staticmethod
     def print_comparison(d: int = 3):
-        """Print λ_d-derived values vs current WideBind defaults."""
+        """Print λ_d-derived values vs current EVA defaults."""
         lc = LambdaConfig(d)
-        from .config import WideBindConfig
-        cfg = WideBindConfig()
+        from .config import EVAConfig
+        cfg = EVAConfig()
         print(f'λ_{d} = {lc.lam:.6f}')
         print(f'  {"Parameter":<35} {"Old":>10} {"New":>10}')
         print(f'  {"─"*35} {"─"*10} {"─"*10}')

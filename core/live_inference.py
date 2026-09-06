@@ -1,8 +1,8 @@
 """
 LiveInference + MirrorMonitor — continuous stateful inference
-with internal state tracing for the WideBind model.
+with internal state tracing for the EVA model.
 
-LiveInference:  Wraps WideBindStack, preserves global_state + layer states
+LiveInference:  Wraps EVAStack, preserves global_state + layer states
                 between calls. Supports think() (self-dialogue without input)
                 and respond() (process actual input).
 
@@ -12,7 +12,7 @@ MirrorMonitor:  Non-invasive tracer. After each forward, reads per-expert gates,
 """
 
 import torch
-from .stack import WideBindStack, AdaptiveController
+from .stack import EVAStack, AdaptiveController
 
 
 class MirrorMonitor:
@@ -22,7 +22,7 @@ class MirrorMonitor:
     metrics.  History is stored as lists of tensors for later analysis.
     """
 
-    def __init__(self, model: WideBindStack, max_history: int = 5000):
+    def __init__(self, model: EVAStack, max_history: int = 5000):
         self.model = model
         self.max_history = max_history
         self.clear()
@@ -116,14 +116,14 @@ class MirrorMonitor:
 
 
 class LiveInference:
-    """Continuous stateful inference wrapper for WideBindStack.
+    """Continuous stateful inference wrapper for EVAStack.
 
     Maintains global_state and layer states between forward calls.
     Enables "self-dialogue" via think() — runs mirror exchange even
     without external input.
 
     Usage:
-        model = WideBindStack(cfg)
+        model = EVAStack(cfg)
         live = LiveInference(model, cfg)
 
         # Model "lives" — internal state evolves
@@ -138,7 +138,7 @@ class LiveInference:
         summary = live.monitor.summary(window=50)
     """
 
-    def __init__(self, model: WideBindStack, cfg,
+    def __init__(self, model: EVAStack, cfg,
                  monitor: bool = True, max_history: int = 5000):
         self.model = model
         self.cfg = cfg

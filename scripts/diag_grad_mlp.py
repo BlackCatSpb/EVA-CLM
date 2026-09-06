@@ -9,16 +9,16 @@ import torch.nn.functional as F
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 from torch.serialization import add_safe_globals
 
 def main():
     ckpt_path = sys.argv[1] if len(sys.argv) > 1 else 'checkpoints/best.pt'
     B, S = 2, 64
-    add_safe_globals([WideBindConfig])
+    add_safe_globals([EVAConfig])
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
     cfg = ckpt['cfg']
-    model = WideBindStack(cfg)
+    model = EVAStack(cfg)
     model.load_state_dict(ckpt['model'], strict=False)
     model.train()
     dev = 'cpu'

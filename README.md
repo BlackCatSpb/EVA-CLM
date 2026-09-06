@@ -1,6 +1,6 @@
-# WideBind — языковая модель без transformer
+# EVA-CLM — Единая Вычислительная Архитектура
 
-**Векторная память (VSA) + Cognitive Mirror + GroupedMLP + Unified τ-field.
+**Cognitive Learning Model · Векторная память (VSA) + Cognitive Mirror + GroupedMLP + Unified τ-field.
 D=2560, ~191M параметров, 24 слоя. Без attention, без softmax-матриц,
 без KV-cache.**
 
@@ -11,7 +11,7 @@ D=2560, ~191M параметров, 24 слоя. Без attention, без softma
 
 ```
   ┌───────────────────────────────────────────────────────────────┐
-  │                     WideBind / EVA                            │
+  │              EVA-CLM · Единая Вычислительная Архитектура       │
   │   VSA-память · Bind-скрещивание · Cognitive Mirror            │
   │   Unified τ-field · SemanticBridge · MemoryBank L1/L2/L3      │
   │   D=2560 · ~191M params · 24 layers                           │
@@ -21,7 +21,7 @@ D=2560, ~191M параметров, 24 слоя. Без attention, без softma
 
 ## Манифест
 
-WideBind — это попытка построить не языковую модель в привычном смысле, а
+EVA-CLM — это попытка построить не языковую модель в привычном смысле, а
 **когнитивную архитектуру**: систему, которая *мыслит структуру*, а не
 статистически предсказывает следующий токен. Ниже — то, что мы считаем
 фундаментальным и из чего исходим.
@@ -56,7 +56,7 @@ WideBind — это попытка построить не языковую мо
    времени. Полномочие на самонаправленное мышление она получает **только при
    зрелости** — когда неокортекс заполнен, а формы устоялись.
 
-WideBind ещё не продукт и не готовая система — это поле эксперимента над тем,
+EVA-CLM ещё не продукт и не готовая система — это поле эксперимента над тем,
 какой может быть архитектура, не сводимая к трансформеру.
 
 ---
@@ -67,7 +67,7 @@ WideBind ещё не продукт и не готовая система — э
 2. [Два типоразмера: Mini и Большая](#2-два-типоразмера-mini-и-большая)
 3. [Обзор потока данных](#3-обзор-потока-данных)
 4. [Эмбеддинг](#4-эмбеддинг)
-5. [Основной блок (WideBindBlock)](#5-основной-блок-widebindblock)
+5. [Основной блок (EVABlock)](#5-основной-блок-evablock)
    - [Pre-LN и свёртка](#51-pre-ln-и-свёртка)
    - [Bind — скрещивание размерностей](#52-bind--скрещивание-размерностей)
    - [VSA-память](#53-vsa-память)
@@ -124,7 +124,7 @@ K×V с попарными оценками), здесь генерация лю
 - **L2 — meta-gate:** ворота «открывать ли зеркало» — настройка,
   выполненная самой моделью (полезность, доверие, противоречия).
 
-**Дезайн-слоган:** WideBind не «хранит и распространяет», а различает,
+**Дезайн-слоган:** EVA не «хранит и распространяет», а различает,
 сворачивает и разворачивает.
 
 ---
@@ -132,7 +132,7 @@ K×V с попарными оценками), здесь генерация лю
 ## 2. Два типоразмера: Mini и Большая
 
 Код один и тот же (папка `core/`), отличаются только параметры
-`WideBindConfig`. **Mini** живёт отдельным репозиторием
+`EVAConfig`. **EVA-CLM Mini** живёт отдельным репозиторием
 (`github.com/BlackCatSpb/widebind-mini`) и используется для быстрых
 экспериментов (34/34 тестов); **Большая** — основной контур обучения.
 
@@ -155,14 +155,14 @@ K×V с попарными оценками), здесь генерация лю
   проверяются здесь (когерентность спиралей, симуляции).
 - **Большая (обучаемая)** — активный контур:
    `D=2560, G=32, n_layers=24, vocab=65536, bind_K=32` (см. канонический
-   ноутбук `notebooks/colab.ipynb`), **точное число параметров
+   ноутбук `notebooks/eva_colab.ipynb`), **точное число параметров
    191,372,273 (191.37M)** при `intent_bridge=True, bridge_glu=True,
    explicit_reasoning=True, collective_read_out=True, variable_precision=True,
    bridge_conn=0.1, memory_bank=True` — включая +K каналов когерентности спиралей (W_out хвост),
    BridgeGLU (~0.92M), **in-core SemanticBridge** (разделяемая per-layer probe
    + proj, ≈2.0M, см. §5.11.2; параметры живут внутри модели) и **Streaming Memory Bank** (L1+L2+L3, ≈0.54M, см. §15); **итого ≈ 191.4M**
    обучаемых параметров. Небольшой прирост от `val_norm` LayerNorm в Memory Bank (~512 params) незначителен и не меняет общую цифру. Актуальный тренировочный контур
-   (`notebooks/colab.ipynb`, Colab T4, fp32):
+   (`notebooks/eva_colab.ipynb`, Colab T4, fp32):
 
   | Флаг | Значение |
   |---|---|
@@ -177,7 +177,7 @@ K×V с попарными оценками), здесь генерация лю
   | use_amp | False (fp32; AMP ломал фазу «кризиса согласования» на T4) |
 
 - **Большая XL** — референс большой версии: `D=4096, G=32, bind_K=64,
-  vocab=65536` (см. `notebooks/widebind_colab.ipynb`; на T4‑16GB берётся
+   vocab=65536` (см. `notebooks/eva_colab.ipynb`; на T4‑16GB берётся
   16 слоёв, на 24GB+ — 32).
 
 ### 2.1 Референс 3B-класса
@@ -196,7 +196,7 @@ K×V с попарными оценками), здесь генерация лю
 Рекомендуемый конфиг 3B-класса (24 слоя, с reasoning — стиль best.pt):
 
 ```python
-cfg = WideBindConfig(D=16384, n_layers=24, bind_K=32, vocab=65536,
+cfg = EVAConfig(D=16384, n_layers=24, bind_K=32, vocab=65536,
                       mlp_groups=64, mlp_expand=4,
                       variable_precision=True, collective_read_out=True,
                       explicit_reasoning=True, use_amp=True)
@@ -229,7 +229,7 @@ seq 256/B3. Обучение: AdamW+bf16 ≈ 25–35 GB VRAM (оптимизат
      ↓
 [Streaming Memory Bank: L1+L2+L3 read (if memory_bank=True)]
      ↓
-  n_layers × WideBindBlock  (каждый со state: mem, mu, conv)
+  n_layers × EVABlock  (каждый со state: mem, mu, conv)
      ↓
 [Reasoning loop: adaptive depth (при explicit_reasoning=True)]
      ↓
@@ -296,7 +296,7 @@ LR (§9–§10) и когерентностью спиралей (§5.2) это�
 сегментах, что упрощает согласование прохода B.
 
 ---
-## 5. Основной блок (WideBindBlock)
+## 5. Основной блок (EVABlock)
 
 Каждый блок получает на вход скрытый вектор `h`, рекуррентные состояния
 (`mem_state`, `mu_state`, `conv_state`), `global_state` и управляющие
@@ -380,7 +380,7 @@ i_gate ×= (1 + bind_coh_gate · mean(|Z|))       # резонанс усили�
   на Mini/M/L (проверено: |Z| mean ≈ 0.248-0.249 при D=256/896/4096).
 - **bind_coh_gate** — обучаемый скаляр на слой (init 0.5): сила усиления
   записи резонансными позициями.
-- Симуляция (`WideBind Mini/scripts/sim_coherence.py`): классификация
+- Симуляция (`EVA-CLM Mini/scripts/sim_coherence.py`): классификация
   резонансных позиций линейным readout из выхода bind — new
   **0.33–0.38 BCE** против old (без |Z|-каналов) **0.53–0.61** (baseline
   0.69): |Z|-каналы несут информацию, которой не было у старой версии.
@@ -731,7 +731,7 @@ mlp_mod = usefulness · base · (1 + β·(2·glu − 1))   # живой гейт
 
 ### 5.11.2 Мост связности (in-core SemanticBridge, train + inference)
 
-`cfg.bridge_conn` (по умолчанию **0.1** в ноутбуке `colab.ipynb`) включает
+`cfg.bridge_conn` (по умолчанию **0.1** в ноутбуке `eva_colab.ipynb`) включает
 **внутриядерный** семантический мост `SemanticBridge` (`core/bridge.py`), который
 живёт ВНУТРИ пайплайна модели и активен и при обучении, и при генерации
 (в отличие от ранней внешней aux-головы). Мост — **per-layer**: на КАЖДОМ слое
@@ -840,7 +840,7 @@ tau_l  = exp(log_tau)
 - **Все пороги через sigmoid(τ·x)**: новизна, уверенность, момент обновления,
   зрелость — никаких магических чисел
 
-Реализация: `core/tau_config.py` (`TauConfig`). Используется в `WideBindStack`
+Реализация: `core/tau_config.py` (`TauConfig`). Используется в `EVAStack`
 как `self.tau_config`, интегрирован с `MaturationController` и `UnifiedConceptLayer`.
 
 ---
@@ -1430,10 +1430,10 @@ EMA `alpha_intent_l`. Глубокие слои (lf→1) получают бóл
 ### Конфигурация
 
 ```python
-cfg = WideBindConfig(
+cfg = EVAConfig(
     memory_bank=True,
     mem_l1_slots=3,           # L1 rolling buffer slots
-    mem_l2_slots=16,          # L2 learned bank slots
+    mem_l2_slots=32,          # L2 learned bank slots
     mem_l3_concepts=8,        # L3 emergent concept slots
     mem_l3_birth_threshold=0.7,  # cosine sim for concept birth
     mem_bridge_dim=256,       # memory bank bridge dim
@@ -1446,7 +1446,7 @@ cfg = WideBindConfig(
 | Метрика | Без memory bank | С memory bank |
 |---|---|---|
 | Params | ~190.8M | ~191.4M (+0.3%) |
-| VRAM | ~7.0 GB | ~8.3 GB (24 слоя + memory bank) |
+| VRAM | ~7.0 GB | ~10.6 GB (24 слоя + memory bank) |
 | Speed | ~34 tok/s | ~32 tok/s |
 
 ### Diagnostics в логе
@@ -1465,15 +1465,15 @@ L1=258 L2=258 L3=1(1b) scale=-0.964
 ## 18. Структура репозитория
 
 ```
-WideBind/
+EVA-CLM/
 ├── core/                       # архитектура: весь код модели
-│   ├── config.py               # WideBindConfig + λ-иерархия
+│   ├── config.py               # EVAConfig + λ-иерархия
 │   ├── tau_config.py           # TauConfig: единое τ-поле (все τ-зависимые величины)
 │   ├── adaptation.py           # LossBalancer, DepthController, FailureDetector, AGC
 │   ├── compression.py          # FCF-CPR: сжатие/декомпрессия чекпоинтов (~8–16×)
 │   ├── lambda_utils.py         # LambdaConfig, λ_d, fib, производные
-│   ├── block.py                # WideBindBlock (пре-kernel)
-│   ├── stack.py                # WideBindStack, compute_losses, param_groups
+│   ├── block.py                # EVABlock (пре-kernel)
+│   ├── stack.py                # EVAStack, compute_losses, param_groups
 │   ├── bind.py                 # Bottleneck/Spiral/Trajectory(-Manifold)Bind,
 │   │                           #   когерентность спиралей (|Z|, freq_scale)
 │   ├── mirror.py               # GroupedCognitiveMirror (32 эксперта), BridgeGLU
@@ -1516,13 +1516,12 @@ WideBind/
 │   └── test_reasoning_grad.py  # проверка живых градиентов гейтов
 │
 ├── notebooks/
-│   ├── colab.ipynb             # канонический ноутбук (D2560/24L, T4)
-│   └── widebind_colab.ipynb    # вариант D4096/16L (24GB+ вариант)
+│   └── eva_colab.ipynb         # канонический ноутбук (D2560/24L, T4)
 │
-├── docs/                       # документы; LIVE_TRAINING_LOG.md — единственный журнал обучения (актуальный)
-├── checkpoints/                # чекпоинты (best.pt, step_N.pt, step_N_fcf.pt — FCF-CPR сжатые)
+├── docs/                       # документы (ARCHITECTURE_REPORT.md, AGENT_BRIEF.md)
+├── checkponts/                # чекпоинты (best 1.pt — best 10.pt)
 ├── wb/                         # BPE-токенизатор (russian_tokenizer/) + обучающие потоки (token_stream_*_eos.bin)
-├── tests/                      # smoke-тесты (53 passed / 9 known-fail baseline)
+├── tests/                      # тесты (214/214 passing)
 ├── logs/                       # логи тренировки (gitignored)
 ├── archive/                    # старый код/эксперименты — локально, вне репозитория (.gitignore)
 └── README.md                   # этот файл
@@ -1531,15 +1530,15 @@ WideBind/
 ### Как использовать
 
 ```python
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 
 # Mini
-cfg = WideBindConfig(D=896, n_layers=24, bind_K=32, vocab=65536,
+cfg = EVAConfig(D=896, n_layers=24, bind_K=32, vocab=65536,
                      mlp_groups=8, mirror_k=16)
-model = WideBindStack(cfg)
+model = EVAStack(cfg)
 
-# Большая (обучаемая, T4) — актуальный тренировочный контур (colab.ipynb)
-cfg = WideBindConfig(D=2560, n_layers=24, bind_K=32, vocab=65536,
+# Большая (обучаемая, T4) — актуальный тренировочный контур (eva_colab.ipynb)
+cfg = EVAConfig(D=2560, n_layers=24, bind_K=32, vocab=65536,
                      mlp_groups=32, mlp_expand=4,
                      variable_precision=True, collective_read_out=True,
                      explicit_reasoning=True, use_amp=False,
@@ -1547,15 +1546,15 @@ cfg = WideBindConfig(D=2560, n_layers=24, bind_K=32, vocab=65536,
                      memory_bank=True,  # L1+L2+L3 streaming memory
                      maturation_enabled=True,  # единый wake-up контроллер
                      triad_reason=True,  # Рассудок-участник
-                     mem_l1_slots=3, mem_l2_slots=16, mem_l3_concepts=8)
-model = WideBindStack(cfg).to('cuda')
+                     mem_l1_slots=3, mem_l2_slots=32, mem_l3_concepts=8)
+model = EVAStack(cfg).to('cuda')
 print(model.param_count())   # 191,372,273 (191.37M)
 ```
 
 Полные конфиги — в ноутбуках `notebooks/*.ipynb`.
 
 - **Тренировка**: `python scripts/train.py --data-dir <dir> --save-dir …`
-  (см. argparse в train.py) либо ноутбук `colab.ipynb`;
+  (см. argparse в train.py) либо ноутбук `eva_colab.ipynb`;
 - **Единый анализ чекпоинта**: `python scripts/analyze.py checkpoints/best.pt`
    (статика, wake-вердикт, live-разбор, head-анализ, сравнение нескольких чекпоинтов — одним вызовом).
    Дополнительно анализатор дампит **все мета-когнитивные буферы** (зрелость
@@ -1582,7 +1581,7 @@ print(model.param_count())   # 191,372,273 (191.37M)
 `bind_coh_gate=0.0`, `freq_scale=1.0`). Миграция автоматически
    применяется при resume (`scripts/train.py`) и в ноутбуках Colab.
 
-> WideBind — исследовательский проект нейроморфной языковой архитектуры:
+> EVA-CLM — исследовательский проект нейроморфной языковой архитектуры:
 > векторные символьные операции (VSA), биллинейное связывание,
 > самоорганизующиеся регуляторы по λ_d — без attention и без больших
 > softmax-матриц.
@@ -1698,7 +1697,7 @@ maturation 0.055→0.088, все слои равномерно активны.
 
 ## 21. Текущий статус обучения
 
-Актуальный контрольный контур — `notebooks/colab.ipynb` (Colab T4, fp32,
+Актуальный контрольный контур — `notebooks/eva_colab.ipynb` (Colab T4, fp32,
 `use_amp=False`).
 
 **Ключевые изменения архитектуры:**
@@ -1722,7 +1721,7 @@ maturation 0.055→0.088, все слои равномерно активны.
 | Параметров | 191,372,273 (191.37M) |
 | bridge_glu, intent_bridge, explicit_reasoning, reasoning_adaptive, collective_read_out, variable_precision, bind_twist_gate, maturation_enabled, triad_reason, memory_bank | True |
 | bridge_conn | 0.1 (вес aux) |
-| mem_l1_slots / mem_l2_slots / mem_l3_concepts | 3 / 16 / 8 |
+| mem_l1_slots / mem_l2_slots / mem_l3_concepts | 3 / 32 / 8 |
 | mem_l3_birth_threshold | 0.7 (cosine sim for concept birth) |
 | concept_birth_novelty_threshold | 0.15 (skip births if too similar) |
 | pm_write_delay | 0 (игнорируется при maturation_enabled) |
@@ -1730,38 +1729,39 @@ maturation 0.055→0.088, все слои равномерно активны.
 | use_amp | False (fp32) |
 | maturation: T0 / T_delay / delta | 8000 / 8000 / 4000 |
 
-**Последний чекпоинт (`checkpoints/best 18.pt`):**
+**Последний чекпоинт (`checkponts/best 10.pt`):**
 
 | Метрика | Значение |
 |---|---|
-| **val_loss** | **9.674** (step 6757) |
-| **val_ppl** | — |
-| **CE(random)** | ~25 |
-| **Maturation** | 0.240 [0.096, 0.437] |
-| **Memory Bank** | L1=13468, L2=13468 (7195 consumed), L3=8 (5991 born) |
-| **gate L15** | 0.67 (close to wake threshold 0.75) |
-| **cos_sim(diversity, CE)** | -0.9702 |
-| **VRAM** | ~8.3 GB |
+| **val_loss** | **10.006** (step 4660) |
+| **CE(random)** | ~13.7 |
+| **Maturation** | 0.303 [0.060, 0.303] |
+| **Memory Bank** | L1/L2/L3 активны (с step ~4620) |
+| **bridge_conn** | 0.128 |
+| **cos_sim(diversity, CE)** | 0.988 |
+| **VRAM** | ~10.6 GB |
 | **Слои** | Все 24 активны (DepthController fully engaged) |
 
-**Траектория val (fresh start 3, step 0→6757):**
-11.068 → 9.674 за 6757 шагов
+**Траектория val (текущий запуск, step 0→4660):**
+10.985 → 10.006 за 4660 шагов (впервые < 10)
 
 **Ключевые метрики по чекпоинтам:**
 
-| Checkpoint | Step | val_loss | CE(random) | maturation |
-|---|---|---|---|---|
-| best_4 | 2097 | 10.644 | 25.42 | 0.088 |
-| best_18 | 6757 | 9.674 | ~25 | 0.240 |
+| Checkpoint | Step | val_loss |
+|---|---|---|
+| best 1 | 466 | 10.985 |
+| best 4 | 1864 | 10.561 |
+| best 6 | 3029 | 10.361 |
+| best 10 | 4660 | 10.006 |
 
 **Наблюдения:**
-- CE(random) стабилизировался на ~25 — голова учится различать токены
-- Maturation растёт: 0.088→0.240 — слои открываются по компетентности моста
-- Все 24 слоя активны — hybrid attention распределяет градиент равномерно
-- **L2 vals взрыв нормы был диагностирован (std=579) и ИСПРАВЛЕН** добавлением LayerNorm (`val_norm`) при чтении (коммит `6740434`)
-- gate L15 = 0.67 — близко к порогу пробуждения (0.75)
-- cos_sim(diversity, CE) = -0.9702 — разнообразие обратно пропорционально CE (ожидаемо)
+- val_loss стабильно падает: 10.985 → 10.006
+- Bridge gradient fix работает: `w_intent` на L12/L23 активирован (0.0 → 0.05–0.07)
+- Memory Bank активировался на step ~4620, L1/L2/L3 функционируют
+- Maturation ramp идёт по расписанию: deep=0.30, shallow=0.06
+- Reasoning gates ещё не активировались (ramp не дотянулся)
+- Все 214 тестов проходят
 
-**Цель:** выйти к `val < 9.0` к step 15000.
+**Цель:** продолжить обучение до 300K шагов.
 
 *Замечания, вопросы и PR — приветствуются.*

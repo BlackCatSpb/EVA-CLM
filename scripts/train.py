@@ -1,5 +1,5 @@
 """
-WideBind training: streaming from token_stream_{GENRE}.bin files.
+EVA training: streaming from token_stream_{GENRE}.bin files.
 """
 
 import os, sys, math, time, json, glob, pickle
@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.serialization import add_safe_globals
 
-from core import WideBindConfig, WideBindStack, MirrorLRScheduler
+from core import EVAConfig, EVAStack, MirrorLRScheduler
 
 
 def _save_checkpoint_safely(state, path):
@@ -26,7 +26,7 @@ except Exception:
     # Report generation is optional; training must run without it.
     generate_report = lambda *a, **k: None
 
-add_safe_globals([WideBindConfig])
+add_safe_globals([EVAConfig])
 
 
 def _detach_state(st):
@@ -137,7 +137,7 @@ def _restore_optimizer(optimizer, model, ckpt_opt):
 
 def train(cfg=None, resume_path=None):
     if cfg is None:
-        cfg = WideBindConfig()
+        cfg = EVAConfig()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     dtype = torch.float32  # no AMP for stability
@@ -162,14 +162,14 @@ def train(cfg=None, resume_path=None):
     
     # Model (retry once on OOM вЂ” transient CUDA context cleanup)
     try:
-        model = WideBindStack(cfg).to(device)
+        model = EVAStack(cfg).to(device)
     except RuntimeError as e:
         if 'out of memory' in str(e) and device == 'cuda':
-            print('[WideBind] OOM on first attempt, clearing cache and retrying...')
+            print('[EVA] OOM on first attempt, clearing cache and retrying...')
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
             time.sleep(1)
-            model = WideBindStack(cfg).to(device)
+            model = EVAStack(cfg).to(device)
         else:
             raise
     n_params = model.param_count()
@@ -207,7 +207,7 @@ def train(cfg=None, resume_path=None):
     watchdog = FailureDetector(model, scheduler, _make_opt,
                                os.path.join(cfg.save_dir, 'best.pt'), cfg.lr,
                                k_sigma=3.0, warmup=cfg.warmup_steps)
-    # Adaptive gradient clipping (AGC, scale-free ratio). WideBind-блоки
+    # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
     clipper = GradientClipper(c=0.1)
@@ -566,8 +566,8 @@ def train(cfg=None, resume_path=None):
             
             # Periodic step_*.pt checkpoints DISABLED: only best.pt is written (saves space).
     except KeyboardInterrupt:
-        print('\n[WideBind] Ctrl+C detected - keeping last best.pt (no separate checkpoint written)')
-        print('[WideBind] Exiting gracefully.')
+        print('\n[EVA] Ctrl+C detected - keeping last best.pt (no separate checkpoint written)')
+        print('[EVA] Exiting gracefully.')
         sys.exit(0)
     
     print('Training complete!')
@@ -653,7 +653,7 @@ if __name__ == '__main__':
                         help='Do NOT save optimizer state in checkpoints (avoids resume OOM on <=16GB GPU)')
     args = parser.parse_args()
     
-    cfg = WideBindConfig(
+    cfg = EVAConfig(
         data_dir=args.data_dir,
         save_dir=args.save_dir,
         batch_size=args.batch_size,

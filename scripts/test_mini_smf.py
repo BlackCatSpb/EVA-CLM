@@ -1,4 +1,4 @@
-"""WideBind Mini-probe: validates SMF (α on mirror) + variant A (mirror-conditioned
+"""EVA Mini-probe: validates SMF (α on mirror) + variant A (mirror-conditioned
 SwiGLU) on a reduced Mini that fits the local MX550 (2GB). Mechanism is scale-invariant;
 the full D=896/24-layer Mini is the scale-up.
 
@@ -14,8 +14,8 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.config import WideBindConfig
-from core.stack import WideBindStack
+from core.config import EVAConfig
+from core.stack import EVAStack
 
 torch.manual_seed(0)
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -27,14 +27,14 @@ BATCH = 4
 STEPS = 400
 STREAM = os.path.join('wb', 'token_stream_TALES_eos.bin')
 
-cfg = WideBindConfig(
+cfg = EVAConfig(
     D=512, n_layers=16, bind_K=32, vocab=VOCAB,
     mlp_groups=8, mirror_k=16, mirror_k_staircase=False,
     seq_len=SEQ, batch_size=BATCH,
     private_mem=True, gradient_checkpointing=False, use_amp=False,
     mask_eos=True, lambda_lr_hierarchy=True,
 )
-model = WideBindStack(cfg).to(DEVICE)
+model = EVAStack(cfg).to(DEVICE)
 n_params = sum(p.numel() for p in model.parameters())
 print(f"params={n_params/1e6:.1f}M layers={cfg.n_layers} D={cfg.D} G={cfg.mlp_groups} k={cfg.mirror_k}")
 

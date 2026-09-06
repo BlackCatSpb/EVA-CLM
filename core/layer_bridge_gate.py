@@ -1,4 +1,4 @@
-"""WideBind: per-layer bridge gate with SpectrumGate (sigmoid-softmax hybrid).
+"""EVA: per-layer bridge gate with SpectrumGate (sigmoid-softmax hybrid).
 
 Каждый слой имеет SpectrumGate, который агрегирует diagnostics в gate value.
 Gate = SpectrumGate(diagnostics) * tau_maturation — связь с maturation.

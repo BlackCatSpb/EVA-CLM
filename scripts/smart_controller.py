@@ -1,5 +1,5 @@
 """
-smart_controller.py — экспериментальный «умный инференс» для WideBind.
+smart_controller.py — экспериментальный «умный инференс» для EVA.
 
 SmartController сам подбирает параметры генерации ПЕРЕТОКЕНОВО, опираясь на
 собственные сигналы модели:
@@ -16,7 +16,7 @@ SmartController сам подбирает параметры генерации 
 """
 import os, sys, math, torch
 import torch.nn.functional as F
-from core import WideBindStack
+from core import EVAStack
 
 
 def lerp(a, b, t):

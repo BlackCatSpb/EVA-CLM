@@ -10,12 +10,12 @@ Tests (on a tiny model, cpu/fp32):
 import math, sys
 import torch
 
-from core.stack import WideBindStack
-from core.config import WideBindConfig
+from core.stack import EVAStack
+from core.config import EVAConfig
 
 
 def tiny_cfg():
-    return WideBindConfig(
+    return EVAConfig(
         n_layers=4, D=64, bind_K=16, mlp_groups=4,
         mirror_k=8, mirror_k_staircase=False, vocab=256,
         code_dim=32, code_sparsity=6, head_mode='sigmoid_coded',
@@ -34,7 +34,7 @@ def main():
     torch.manual_seed(0)
     device = 'cpu'
     cfg = tiny_cfg()
-    model = WideBindStack(cfg).to(device)
+    model = EVAStack(cfg).to(device)
     model.train()
     nparams = sum(p.numel() for p in model.parameters())
     print(f'model params = {nparams:,}')

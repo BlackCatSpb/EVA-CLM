@@ -6,6 +6,6 @@ from .embedding import ZeckendorfEmbedding, PartitionedEmbedding, LmHead, Partit
 from .bind import migrate_bind_state_dict, BottleneckBind
 from .mirror import GroupedCognitiveMirror
 from .mlp import GroupedMLP
-from .block import WideBindBlock
-from .stack import WideBindStack, AdaptiveController, MirrorLRScheduler
+from .block import EVABlock
+from .stack import EVAStack, AdaptiveController, MirrorLRScheduler
 from .vsa_utils import dct_basis, zeckendorf_codes, fib_sigmoid_init, sparse_block_codes, vsa_prefix_scan

@@ -1,11 +1,11 @@
 """Test τ-reform v2: monotonic ladder, intent_alpha, gradient flow."""
 import torch
-from core.config import WideBindConfig
-from core.stack import WideBindStack
+from core.config import EVAConfig
+from core.stack import EVAStack
 
 
 def test_forward_backward():
-    cfg = WideBindConfig(
+    cfg = EVAConfig(
         D=2560, n_layers=24, vocab=65536, bind_K=32,
         bridge_dim=256, bridge_conn=0.1, memory_bank=True,
         seq_len=128, batch_size=1, use_amp=False,
@@ -13,7 +13,7 @@ def test_forward_backward():
         collective_S=4, collective_layer_idx=None,
         mlp_groups=32,
     )
-    model = WideBindStack(cfg).float()
+    model = EVAStack(cfg).float()
 
     print(f'Params: {model.param_count()/1e6:.2f}M')
 

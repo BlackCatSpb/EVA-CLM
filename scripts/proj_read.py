@@ -14,12 +14,12 @@ try:
 except (AttributeError, ValueError):
     pass
 
-from core import WideBindConfig, WideBindStack
+from core import EVAConfig, EVAStack
 from core.projector import Projector
 from generate import load_russian_tokenizer
 from torch.serialization import add_safe_globals
 
-add_safe_globals([WideBindConfig])
+add_safe_globals([EVAConfig])
 
 CKPT = sys.argv[1] if len(sys.argv) > 1 else "checkpoints/best.pt"
 TEXT = ("Москва — столица России. Зима в этом году выдалась холодной и снежной. "
@@ -36,7 +36,7 @@ TEXT = ("Москва — столица России. Зима в этом го
 tok = load_russian_tokenizer()
 ckpt = torch.load(CKPT, map_location='cpu', weights_only=True)
 cfg = ckpt['cfg']
-model = WideBindStack(cfg)
+model = EVAStack(cfg)
 missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
 model.eval()
 proj = Projector(tok)

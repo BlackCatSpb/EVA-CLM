@@ -1,4 +1,4 @@
-"""WideBind configuration with λ_d hierarchy support."""
+"""EVA configuration with λ_d hierarchy support."""
 
 from dataclasses import dataclass, field
 from .lambda_utils import LambdaConfig
@@ -415,3 +415,7 @@ class WideBindConfig:
         self.eval_interval = lc.eval_interval
         self.save_interval = lc.save_interval
         self.patience = lc.patience
+
+
+# EVA branding alias (keeps WideBindConfig as canonical for pickle compat)
+EVAConfig = WideBindConfig

@@ -1,11 +1,11 @@
-"""WideBind: stack module."""
+"""EVA: stack module."""
 
 import math, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .config import WideBindConfig
-from .block import WideBindBlock, PrecisionGate, ExactSequenceMemory
+from .config import EVAConfig
+from .block import EVABlock, PrecisionGate, ExactSequenceMemory
 from .bridge import SemanticBridge
 from .maturation import MaturationController
 from .layer_bridge_gate import LayerBridgeGate
@@ -16,10 +16,10 @@ from .memory_bank import StreamingMemoryBank
 from .concept_layer import UnifiedConceptLayer
 from .tau_config import TauConfig
 
-class WideBindStack(nn.Module):
-    """Stack of WideBindBlock layers with embedding and lm_head."""
+class EVAStack(nn.Module):
+    """Stack of EVABlock layers with embedding and lm_head."""
     
-    def __init__(self, cfg: WideBindConfig):
+    def __init__(self, cfg: EVAConfig):
         super().__init__()
         self.cfg = cfg
         self.embed = PartitionedEmbedding(cfg)
@@ -51,7 +51,7 @@ class WideBindStack(nn.Module):
         self.tau_config.update()  # initial computation
 
         self.layers = nn.ModuleList([
-            WideBindBlock(cfg, i, tau_config=self.tau_config) for i in range(cfg.n_layers)
+            EVABlock(cfg, i, tau_config=self.tau_config) for i in range(cfg.n_layers)
         ])
 
         # ─── Explicit Reasoning ───
@@ -414,9 +414,10 @@ class WideBindStack(nn.Module):
                 bus_i = (_bus_running + (_bus_sum - _bus_le_carried)) / n_layers  # (1,1,G,Kmax)
                 _last_bus = bus_i
                 intent_i = bus_i[..., :_ki]            # truncate to layer k
-                if mat_gate is not None:
-                    # Intent bus strength is gated by layer maturity (unified wake-up).
-                    intent_i = intent_i * mat_gate[i]
+                # NB: mat_gate НЕ масштабирует intent_i — зеркало уже управляет
+                # зрелостью через bridge_glu_net(delta)*maturity и expert_gate.
+                # Двойное гейтирование убивало gradient(w_intent) без пользы
+                # (mat_gate~0.09 → ik≈0 → hp-ik≈hp → gradient вырожден).
             # ─── Semantic Bridge (in-pipeline per-layer) ───
             # Inject the carried cross-layer stream into this layer's hidden state,
             # then emit + record the layer's semantic vector and EMA-update the
@@ -473,7 +474,7 @@ class WideBindStack(nn.Module):
                 _layer_tau_ratio = tau_l[i] / tau_mid
                 _vsa_tau_i = _base_vsa * _layer_tau_ratio
                 _out = _cp(
-                    WideBindStack._checkpointed_block,
+                    EVAStack._checkpointed_block,
                     layer, h, s, gs_i,
                     _saved_pen, _saved_hp,
                     mem2v_scale, l_diff, nscale,
@@ -705,10 +706,11 @@ class WideBindStack(nn.Module):
         data-dependent `break` becomes a tensor run-mask — non-running steps
         contribute exactly zero. Numerically identical to the python loop;
         required for torch.export (no python control flow on tensor values)."""
-        K = getattr(self.cfg, 'reasoning_max_steps', 8)
+        K_full = getattr(self.cfg, 'reasoning_max_steps', 8)
         # U2: τ-adaptive reasoning budget: scale by layer τ_norm
+        K = K_full
         if hasattr(self, '_tau_norm_reasoning'):
-            K = max(1, round(K * self._tau_norm_reasoning))
+            K = max(1, round(K_full * self._tau_norm_reasoning))
         stop_thr = getattr(self.cfg, 'reasoning_gate_stop_threshold', 0.5)
         know = self._knowledge_signal(h)  # (B, 8)
         conf_base = know[:, 0]  # head confidence on the raw h (B,)
@@ -719,7 +721,7 @@ class WideBindStack(nn.Module):
         buf = reasoning_buffer
         count = reasoning_count
         if buf is None:
-            buf = torch.zeros(h.shape[0], K, h.shape[-1], device=h.device, dtype=h.dtype)
+            buf = torch.zeros(h.shape[0], K_full, h.shape[-1], device=h.device, dtype=h.dtype)
         if count is None:
             count = torch.zeros((), dtype=torch.long, device=h.device)
         prev_open = torch.ones((), device=h.device)
@@ -798,7 +800,9 @@ class WideBindStack(nn.Module):
             prev_open = a_i.detach().mean()
             gates.append(a_i.detach().mean() * w_soft * run.float())
         if gates:
-            self._reasoning_gates.copy_(torch.stack(gates))
+            g = torch.stack(gates)
+            self._reasoning_gates.zero_()
+            self._reasoning_gates[:g.shape[0]].copy_(g)
         return h_acc
 
     @property
@@ -2024,14 +2028,14 @@ if __name__ == '__main__':
     import torch
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    cfg = WideBindConfig(n_layers=24, D=896, bottleneck=896, bind_K=32, mlp_groups=8)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(n_layers=24, D=896, bottleneck=896, bind_K=32, mlp_groups=8)
+    model = EVAStack(cfg).to(device)
     n = model.param_count()
     print(f'  D=896 G=8: params={n:,} ({n/1e6:.2f}M)')
     
     print()
-    cfg = WideBindConfig(n_layers=4, D=896, bottleneck=896, bind_K=32)
-    model = WideBindStack(cfg).to(device)
+    cfg = EVAConfig(n_layers=4, D=896, bottleneck=896, bind_K=32)
+    model = EVAStack(cfg).to(device)
     
     x = torch.randint(0, cfg.vocab, (2, 16), device=device)
     h = model.embed_tokens(x)

@@ -1,17 +1,17 @@
-"""WideBind: block module."""
+"""EVA: block module."""
 
 import math, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .config import WideBindConfig
+from .config import EVAConfig
 from .bind import BottleneckBind, SpiralBind, TrajectorySpiralBind, TrajectoryManifoldBind
 from .mirror import GroupedCognitiveMirror
 from .concept_layer import UnifiedConceptLayer
 from .mlp import GroupedMLP
 from .vsa_utils import dct_basis, fib_sigmoid_init
 
-# ─── Module-level prefix scan (hoisted from WideBindBlock.forward) ───
+# ─── Module-level prefix scan (hoisted from EVABlock.forward) ───
 
 _EPS_SCAN = 1e-6
 
@@ -86,7 +86,7 @@ class ExactSequenceMemory(nn.Module):
         attn = torch.softmax(q @ k.transpose(-2, -1) / math.sqrt(self.k), dim=-1)
         return self.proj(attn @ v)
 
-class WideBindBlock(nn.Module):
+class EVABlock(nn.Module):
     """
     Hybrid block: D -> K (bottleneck bind) + VSA memory + Conv + Spectral + MLP.
     
@@ -100,7 +100,7 @@ class WideBindBlock(nn.Module):
     - MLP: D -> bottleneck -> D with residual
     """
     
-    def __init__(self, cfg: WideBindConfig, layer_idx: int, tau_config=None):
+    def __init__(self, cfg: EVAConfig, layer_idx: int, tau_config=None):
         super().__init__()
         self.D = cfg.D
         self.K = cfg.bind_K
@@ -310,7 +310,7 @@ class WideBindBlock(nn.Module):
         
         # ─── VSA Memory (multi-scale: S=4 фиксированных τ) ───
         S = self._n_scales
-        tau_s = self._tau_s if tau_s is None else tau_s
+        tau_s = torch.exp(self._vsa_tau_log) if tau_s is None else tau_s
         d_s = torch.exp(-1.0 / tau_s.to(device))  # (S,) — τ-scales from learnable param
         # Surprisal-gated write: i_gate = softplus(linear + γ·||ê||₂)
         igate_logit = h * self.w_i + self.b_i

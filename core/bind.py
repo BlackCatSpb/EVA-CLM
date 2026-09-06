@@ -1,10 +1,10 @@
-﻿"""WideBind: bind module."""
+﻿"""EVA: bind module."""
 
 import math, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .config import WideBindConfig
+from .config import EVAConfig
 from .vsa_utils import dct_basis, fib_sigmoid_init
 
 
@@ -387,7 +387,7 @@ class TrajectorySpiralBind(nn.Module):
             # freq_eff = freq_scale * (tau_min / tau_l)^η
             # tau_l = tau_min * (tau_max/tau_min)^tau_norm → tau_min/tau_l = (tau_min/tau_max)^tau_norm
             _tau_ratio = (self._tau_min / 512.0) ** self._tau_norm  # tau_min/tau_max = 8/512
-            _freq_eff = self.freq_scale * (_tau_ratio ** _eta.item())
+            _freq_eff = self.freq_scale * (_tau_ratio ** _eta)
         else:
             _freq_eff = self.freq_scale
 

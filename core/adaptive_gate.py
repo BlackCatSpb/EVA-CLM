@@ -1,4 +1,4 @@
-"""WideBind: Hybrid Gate — unified sigmoid-softmax continuum.
+"""EVA: Hybrid Gate — unified sigmoid-softmax continuum.
 
 Единая формула для ВСЕХ гейтов в архитектуре:
 

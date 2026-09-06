@@ -25,7 +25,7 @@ def main():
     device = 'cuda' if (args.device == 'auto' and torch.cuda.is_available()) else (args.device if args.device != 'auto' else 'cpu')
     state = load_inference_checkpoint(args.checkpoint, skip_compression=False, device='cpu')
     cfg = state['cfg']
-    model = __import__('core').WideBindStack(cfg).to(device)
+    model = __import__('core').EVAStack(cfg).to(device)
     model.load_state_dict(state['model'], strict=False)
     model.reasoning_scale_override = 0.0
     vocab = cfg.vocab

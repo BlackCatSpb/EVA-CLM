@@ -1,10 +1,10 @@
-"""WideBind: mlp module."""
+"""EVA: mlp module."""
 
 import math, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .config import WideBindConfig
+from .config import EVAConfig
 
 class GroupedMLP(nn.Module):
     """

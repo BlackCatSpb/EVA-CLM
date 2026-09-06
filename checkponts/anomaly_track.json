@@ -1,0 +1,42 @@
+[
+ {
+  "step": 466,
+  "hp_max": 2.923711061477661,
+  "hp_layer": 0,
+  "predmse_max": 2.461803436279297,
+  "predmse_layer": 7,
+  "gate_min": 0.46244996786117554,
+  "gate_min_layer": 2,
+  "births": []
+ },
+ {
+  "step": 1165,
+  "hp_max": 3.241751194000244,
+  "hp_layer": 0,
+  "predmse_max": 2.736204147338867,
+  "predmse_layer": 0,
+  "gate_min": 0.4271906614303589,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 3029,
+  "hp_max": 3.751235008239746,
+  "hp_layer": 0,
+  "predmse_max": 3.63769793510437,
+  "predmse_layer": 0,
+  "gate_min": 0.29334917664527893,
+  "gate_min_layer": 3,
+  "births": []
+ },
+ {
+  "step": 4660,
+  "hp_max": 3.265859603881836,
+  "hp_layer": 0,
+  "predmse_max": 2.797294855117798,
+  "predmse_layer": 0,
+  "gate_min": 0.33983808755874634,
+  "gate_min_layer": 4,
+  "births": []
+ }
+]

@@ -1,8 +1,8 @@
-**Кому:** внешний агент (помощь по обучению WideBind)
+**Кому:** внешний агент (помощь по обучению EVA)
 **Тема:** что сделано для успеха текущего прогона — gradient-reactive loss (`gradalign`) + fp32
 
 **1. Контекст**
-WideBind — нестандартная LLM-архитектура с метакогнитивным ядром (mirror/self-consistency, intent bridge, collective memory, VSA-лестница, explicit reasoning, variable-precision memory). Обучаем с нуля на Colab T4 в **fp32 (`use_amp=False`)** — AMP ранее ломал фазу «кризиса согласования» и расходил модель.
+EVA — нестандартная LLM-архитектура с метакогнитивным ядром (mirror/self-consistency, intent bridge, collective memory, VSA-лестница, explicit reasoning, variable-precision memory). Обучаем с нуля на Colab T4 в **fp32 (`use_amp=False`)** — AMP ранее ломал фазу «кризиса согласования» и расходил модель.
 
 **2. Проблема, которую решили**
 После выхода на хорошую валидность (val≈10.6) обнаружили, что гейты модуляции `mod_scale_mlp`, `w_sal`, `w_intent` «заморожены» на init: `sigmoid(mod_scale_mlp)=0.667` (= init). Модель при этом била рекорды, то есть заморозка была benign, но динамическая модуляция MLP/саленс не работала вообще.
@@ -18,7 +18,7 @@ WideBind — нестандартная LLM-архитектура с метак
 - Включается параметром `cfg.gradalign_weight` (0 = OFF, по умолчанию). Есть в `scripts/train.py` и в Colab-cell.
 
 **5. Валидация**
-- Mini-прототип (`WideBind Mini`, commit `f0aa2f5`): синтетика (order-2 Markov). Baseline `ga_w=0` → `mod_mlp=0.667` (точно заморожен); `ga_w=0.3` → `0.667→0.650` за 385 шагов, потеря стабильна. Гипотеза подтверждена.
+- Mini-прототип (`EVA Mini`, commit `f0aa2f5`): синтетика (order-2 Markov). Baseline `ga_w=0` → `mod_mlp=0.667` (точно заморожен); `ga_w=0.3` → `0.667→0.650` за 385 шагов, потеря стабильна. Гипотеза подтверждена.
 - Main (commit `6383883`): те же кэши + поле `gradalign_weight`; smoke-тест — ненулевой градиент в `mod_scale_mlp`.
 - Colab (live): `gradalign_weight=0.3` поверх `best.pt` (step 2796).
 
@@ -32,7 +32,7 @@ WideBind — нестандартная LLM-архитектура с метак
 
 **7. Что знать, если будешь править обучение**
 - **fp32 обязателен** (`use_amp=False`).
-- `notebooks/colab.ipynb` имеет **СОБСТВЕННЫЙ inline training-loop (cell 9)** — он НЕ вызывает `scripts/train.py`. Правки `scripts/train.py` на Colab не применяются; меняй саму ячейку. В cell 9 обязательна строка `batch_size = getattr(cfg, 'batch_size', 1)` (иначе `NameError`).
+- `notebooks/eva_colab.ipynb` имеет **СОБСТВЕННЫЙ inline training-loop (cell 9)** — он НЕ вызывает `scripts/train.py`. Правки `scripts/train.py` на Colab не применяются; меняй саму ячейку. В cell 9 обязательна строка `batch_size = getattr(cfg, 'batch_size', 1)` (иначе `NameError`).
 - В логах `loss` может быть **отрицательным** — это НОРМА для нестандартной композитной цели (куча aux-термов). Доверяй `ce` и `val_loss`, не `loss`.
 - `cos_sim(diversity, CE)` в `analyze.py` даёт взорванные числа (~1e10) — игнорируй.
 - `best.pt` — **живой** best-чекпоинт, перезаписывается при улучшении val (сейчас = step 3495).
