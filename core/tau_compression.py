@@ -6,6 +6,10 @@ Compression strategy is modulated by tau_norm and maturation:
   - deep layers (high tau): sparse top-k (683-1365x, extreme compression)
 
 No retraining needed — purely post-hoc compression of model outputs.
+
+STE (Straight-Through Estimator) enables differentiable compression:
+  - Forward: quantize normally (uint8)
+  - Backward: gradient flows through as if quantization didn't happen
 """
 from __future__ import annotations
 
@@ -15,6 +19,41 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+
+
+# ─── Straight-Through Estimator (STE) ──────────────────────────
+
+class StraightThroughRound(torch.autograd.Function):
+    """Round with STE: forward rounds, backward passes gradient through."""
+    @staticmethod
+    def forward(ctx, x):
+        return x.round()
+    
+    @staticmethod
+    def backward(ctx, grad):
+        return grad  # identity
+
+
+class StraightThroughQuantize(torch.autograd.Function):
+    """Quantize to uint8 with STE: forward quantizes, backward passes gradient."""
+    @staticmethod
+    def forward(ctx, x, vmin, scale):
+        idx = ((x - vmin) / scale).round_().clamp_(0, 255)
+        return idx
+    
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None, None  # only pass gradient through x
+
+
+def ste_round(x: torch.Tensor) -> torch.Tensor:
+    """Differentiable round via STE."""
+    return StraightThroughRound.apply(x)
+
+
+def ste_quantize(x: torch.Tensor, vmin: float, scale: float) -> torch.Tensor:
+    """Differentiable quantize via STE."""
+    return StraightThroughQuantize.apply(x, vmin, scale)
 
 
 # ─── Compression primitives ──────────────────────────────────────
@@ -66,6 +105,73 @@ def decompress_delta(idx, d_min, scale, cached, dtype):
     if idx is None:
         return cached.to(dtype)
     return cached.to(dtype) + (idx.float() * scale + d_min).to(dtype)
+
+
+# ─── Differentiable compression (STE) ─────────────────────────
+
+def compress_sparse_topk_ste(t: torch.Tensor, k: int = 128) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Differentiable sparse top-k compression with STE.
+    
+    Returns: (idx_pos, idx_vals, meta, topk_vals_ste)
+        topk_vals_ste: straight-through restored values for gradient flow
+    """
+    topk_vals, topk_idx = t.topk(k, dim=-1)
+    vmin = topk_vals.min().item()
+    vmax = topk_vals.max().item()
+    scale = (vmax - vmin) / 255.0 if vmax > vmin else 1.0
+    
+    # Quantize with STE (gradient flows through)
+    idx_vals = ste_quantize(topk_vals, vmin, scale).to(torch.uint8)
+    
+    # Reconstruct values for gradient flow (detached quantization, but STE in backward)
+    vals_ste = idx_vals.float() * scale + vmin
+    # Add STE: gradient flows as if quantization didn't happen
+    vals_ste = vals_ste + (topk_vals - vals_ste).detach()
+    
+    return topk_idx.to(torch.uint16), idx_vals, torch.tensor([vmin, scale]), vals_ste
+
+
+def decompress_sparse_topk_ste(idx_pos, idx_vals, meta, vals_ste, shape, dtype):
+    """Differentiable sparse top-k decompression with STE.
+    
+    Uses vals_ste (straight-through restored values) for gradient flow.
+    """
+    B, L, V = shape
+    
+    # Use STE values for gradient flow
+    vals = vals_ste
+    
+    result = torch.full((B, L, V), float('-inf'), dtype=dtype, device=idx_pos.device)
+    result.scatter_(-1, idx_pos.long(), vals.to(dtype))
+    return result
+
+
+def compress_uniform8_ste(t: torch.Tensor) -> Tuple[torch.Tensor, float, float, torch.Tensor]:
+    """Differentiable uniform 8-bit compression with STE.
+    
+    Returns: (idx, t_min, scale, vals_ste)
+    """
+    t_f = t.float().flatten()
+    t_min, t_max = t_f.min().item(), t_f.max().item()
+    if t_min == t_max:
+        return None, t_min, 0.0, t_f
+    scale = (t_max - t_min) / 255.0
+    
+    # Quantize with STE
+    idx = ste_quantize(t_f, t_min, scale).clamp_(0, 255).to(torch.uint8)
+    
+    # Reconstruct with STE
+    vals_ste = idx.float() * scale + t_min
+    vals_ste = vals_ste + (t_f - vals_ste).detach()
+    
+    return idx.reshape(t.shape), t_min, scale, vals_ste
+
+
+def decompress_uniform8_ste(idx, t_min, scale, vals_ste, shape, dtype):
+    """Differentiable uniform decompression with STE."""
+    if idx is None:
+        return torch.tensor(t_min, dtype=dtype).expand(shape).clone()
+    return vals_ste.to(dtype)
 
 
 # ─── tau-adaptive compression schedule ─────────────────────────────

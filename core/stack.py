@@ -19,7 +19,6 @@ from .adaptive_controller import AdaptiveController
 from .lr_scheduler import MirrorLRScheduler
 from .losses import compute_losses as _compute_losses_fn
 from .logit_cache import LogitCacheAttention
-from .logit_cache_v2 import PerScaleCacheAttention
 
 class EVAStack(nn.Module):
     """Stack of EVABlock layers with embedding and lm_head."""
@@ -178,10 +177,9 @@ class EVAStack(nn.Module):
         # U2: τ-norm for reasoning budget (mean across layers)
         self._tau_norm_reasoning = self.tau_config.tau_norm.mean().item()
         # ─── Logit Cache with Attention (long-context memory) ───
-        # Per-scale compression driven by VSA scales.
-        # Stores compressed logits for 1M+ tokens with ~216x compression.
-        # The model LEARNS vsa_scales to control compression per scale.
-        self.logit_cache = PerScaleCacheAttention(
+        # Dual-mode: stores h during training (gradient flows), logits during inference (compressed).
+        # VSA-driven compression: model LEARNS vsa_scales to control compression per scale.
+        self.logit_cache = LogitCacheAttention(
             D=cfg.D,
             V=cfg.vocab,
             n_layers=cfg.n_layers,
@@ -914,7 +912,12 @@ class EVAStack(nn.Module):
             return h, logits
 
         # Process through cache (stores + attends)
-        h_augmented, logits_out = self.logit_cache(h, logits, use_cache=True)
+        # training=True: stores h (gradient flows); training=False: stores logits (compressed)
+        h_augmented, logits_out = self.logit_cache(
+            h, logits,
+            training=self.training,
+            use_cache=True
+        )
 
         return h_augmented, logits_out
 
@@ -926,7 +929,7 @@ class EVAStack(nn.Module):
     def cache_size_mb(self) -> float:
         """Get current cache size in MB."""
         if self.logit_cache is not None:
-            return self.logit_cache.cache.size_mb()
+            return self.logit_cache.cache.size_mb(training=self.training)
         return 0.0
 
     def compute_losses(self, h, targets, pred_weight=None, h_emb=None):

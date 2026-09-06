@@ -8,7 +8,6 @@ from .block import EVABlock
 from .stack import EVAStack, AdaptiveController, MirrorLRScheduler
 from .live_inference import LiveInference, MirrorMonitor
 from .logit_cache import LogitCache, LogitAttention, LogitCacheAttention
-from .logit_cache_v2 import PerScaleCacheAttention
 
 # Backward compat
 CognitiveMirror = GroupedCognitiveMirror

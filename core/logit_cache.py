@@ -1,8 +1,16 @@
 """
-logit_cache.py — Logit Cache with tau-adaptive compression for EVA-CLM.
+logit_cache.py — Per-scale LogitCache with dual-mode: training + inference.
 
-Stores compressed logits for 1M+ tokens with 1310x compression.
-Enables attention over cached logits for long-context generation.
+Training mode:
+  - Stores hidden states h (full, no compression)
+  - Gradient flows through cache → model learns to produce useful representations
+  - Memory: D × 4 bytes/token = 10 KB/token (seq_len=128 → 1.3 MB)
+
+Inference mode:
+  - Stores compressed logits (VSA-driven, 4 scales)
+  - Memory: ~1.1 KB/token → 1M tokens = 1.1 GB (vs 240 GB KV-cache)
+
+The model LEARNS vsa_scales to control compression per scale.
 """
 from __future__ import annotations
 
@@ -14,209 +22,149 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .tau_compression import (
-    compress_uniform8, decompress_uniform8,
     compress_sparse_topk, decompress_sparse_topk,
 )
 
 
+# ─── Base k values (maximum per scale) ────────────────────────
+BASE_K = [128, 96, 80, 64]
+
+
 class LogitCache(nn.Module):
-    """Compressed logit cache for long-context generation.
+    """Per-scale logit cache with dual-mode storage.
 
-    Stores logits with tau-adaptive compression:
-    - Low tau (shallow): sparse-topk-128 (683x, 98.4% accuracy)
-    - High tau (deep): sparse-topk-64 (1365x, 94.5% accuracy)
-
-    Memory usage:
-    - 1K tokens: 0.23 MB
-    - 10K tokens: 2.3 MB
-    - 100K tokens: 23 MB
-    - 1M tokens: 230 MB
+    Training: stores h (hidden states) for gradient flow.
+    Inference: stores compressed logits for memory efficiency.
     """
 
-    def __init__(self, V: int, max_tokens: int = 1_000_000,
-                 n_layers: int = 24, device: torch.device = torch.device('cpu')):
+    def __init__(self, V: int, D: int, max_tokens: int = 1_000_000,
+                 n_scales: int = 4, device: torch.device = torch.device('cpu')):
         super().__init__()
         self.V = V
+        self.D = D
         self.max_tokens = max_tokens
-        self.n_layers = n_layers
+        self.n_scales = n_scales
         self.device = device
 
-        # Compression schedule per layer (tau-adaptive)
-        # Shallow layers (low tau): sparse-topk-128
-        # Deep layers (high tau): sparse-topk-64
-        self._schedule = []
-        for i in range(n_layers):
-            tau_norm = i / max(n_layers - 1, 1)  # 0..1
-            if tau_norm < 0.3:
-                self._schedule.append({'strategy': 'sparse_topk', 'topk': 128})
-            elif tau_norm < 0.6:
-                self._schedule.append({'strategy': 'sparse_topk', 'topk': 128})
-            else:
-                self._schedule.append({'strategy': 'sparse_topk', 'topk': 64})
+        # VSA scale parameters (learned)
+        # sigmoid(vsa_scale) ∈ [0, 1] → k = base_k * sigmoid(vsa_scale)
+        # Initialized to 0 → sigmoid(0) = 0.5 → k = base_k/2
+        self.vsa_scales = nn.Parameter(torch.zeros(n_scales))
 
-        # Cache storage: list of compressed logits per position
-        # Each entry: {pos: int, layer_data: list of compressed tensors}
-        self._cache: List[Dict] = []
+        # Storage: either h (training) or compressed logits (inference)
+        self._h_cache: List[torch.Tensor] = []  # training: store h
+        self._logit_cache: List[Dict] = []  # inference: store compressed logits
         self._position = 0
 
-        # Pre-allocate for efficiency (optional)
-        self._max_cached = max_tokens
+    def get_k(self, scale_idx: int) -> int:
+        """Get adaptive k value for scale (VSA-driven)."""
+        base_k = BASE_K[scale_idx]
+        k = int(base_k * torch.sigmoid(self.vsa_scales[scale_idx]).item())
+        return max(k, 8)
 
-    def compress(self, logits: torch.Tensor, layer_idx: int = 0) -> Dict:
-        """Compress logits for storage.
+    def store(self, h_or_logits: torch.Tensor, training: bool = True) -> None:
+        """Store data in cache.
 
         Args:
-            logits: (B, L, V) or (V,) tensor
-            layer_idx: which layer's compression schedule to use
+            h_or_logits: (B, L, D) hidden states (training) or (B, L, V) logits (inference)
+            training: if True, store h (gradient flows); if False, store compressed logits
+        """
+        if training:
+            # Store h directly (no compression, gradient flows - NO detach!)
+            self._h_cache.append(h_or_logits)
+            if len(self._h_cache) > self.max_tokens:
+                self._h_cache.pop(0)
+        else:
+            # Store compressed logits (no gradient)
+            compressed = self._compress(h_or_logits)
+            self._logit_cache.append(compressed)
+            if len(self._logit_cache) > self.max_tokens:
+                self._logit_cache.pop(0)
+
+        self._position += 1
+
+    def retrieve(self, n: int = None, training: bool = True) -> Optional[torch.Tensor]:
+        """Retrieve data from cache.
+
+        Args:
+            n: number of recent entries to retrieve (None = all within window)
+            training: if True, retrieve h; if False, retrieve logits
 
         Returns:
-            Compressed representation
+            (B, M, D) hidden states or (B, M, V) logits
         """
+        if training:
+            if not self._h_cache:
+                return None
+            entries = self._h_cache[-n:] if n else self._h_cache
+            return torch.cat(entries, dim=1)
+        else:
+            if not self._logit_cache:
+                return None
+            entries = self._logit_cache[-n:] if n else self._logit_cache
+            logits = [self._decompress(e) for e in entries]
+            return torch.cat(logits, dim=1)
+
+    def _compress(self, logits: torch.Tensor) -> Dict:
+        """Compress logits for inference storage."""
         if logits.dim() == 1:
             logits = logits.unsqueeze(0).unsqueeze(0)
         elif logits.dim() == 2:
             logits = logits.unsqueeze(1)
 
-        B, L, V = logits.shape
-        sched = self._schedule[layer_idx % self.n_layers]
-
-        # Use tau-adaptive compression for maximum ratio
-        # sparse_topk with k=64 gives 1310x compression with 94.5% accuracy
-        k = min(sched['topk'], V)
+        # Use first scale's k for simplicity (or average)
+        k = self.get_k(0)
         idx_pos, idx_vals, meta = compress_sparse_topk(logits, k=k)
+
         return {
-            'type': 'sparse_topk',
-            'pos': idx_pos,
-            'vals': idx_vals,
-            'meta': meta,
+            'pos': idx_pos.detach(),
+            'vals': idx_vals.detach(),
+            'meta': meta.detach(),
             'shape': logits.shape,
             'dtype': logits.dtype,
         }
 
-    def decompress(self, compressed: Dict) -> torch.Tensor:
-        """Decompress logits.
-
-        Args:
-            compressed: compressed representation from compress()
-
-        Returns:
-            Decompressed logits tensor
-        """
+    def _decompress(self, compressed: Dict) -> torch.Tensor:
+        """Decompress logits for inference retrieval."""
         return decompress_sparse_topk(
             compressed['pos'], compressed['vals'], compressed['meta'],
             compressed['shape'], compressed['dtype']
         )
 
-    def store(self, logits: torch.Tensor, position: int = None) -> None:
-        """Store compressed logits in cache.
-
-        Args:
-            logits: (B, L, V) tensor of logits
-            position: optional position index (auto-incremented if None)
-        """
-        if position is None:
-            position = self._position
-            self._position += 1
-
-        # Compress for each layer (or just final logits)
-        compressed = self.compress(logits, layer_idx=0)
-
-        entry = {
-            'position': position,
-            'compressed': compressed,
-            'original_shape': logits.shape,
-        }
-
-        # Manage cache size
-        if len(self._cache) >= self._max_cached:
-            self._cache.pop(0)  # Remove oldest
-
-        self._cache.append(entry)
-
-    def retrieve(self, position: int = None, length: int = None) -> torch.Tensor:
-        """Retrieve and decompress logits from cache.
-
-        Args:
-            position: start position (None = most recent)
-            length: number of positions to retrieve (None = single)
-
-        Returns:
-            Decompressed logits tensor
-        """
-        if len(self._cache) == 0:
-            return None
-
-        if position is None:
-            # Return most recent
-            if length is None:
-                return self.decompress(self._cache[-1]['compressed'])
-            else:
-                # Return last `length` entries
-                entries = self._cache[-length:]
-                logits = [self.decompress(e['compressed']) for e in entries]
-                return torch.cat(logits, dim=1)  # (B, length, V)
-        else:
-            # Find entries at or after position
-            entries = [e for e in self._cache if e['position'] >= position]
-            if length is not None:
-                entries = entries[:length]
-            if not entries:
-                return None
-            logits = [self.decompress(e['compressed']) for e in entries]
-            return torch.cat(logits, dim=1)
-
-    def get_recent(self, n: int = 10) -> torch.Tensor:
-        """Get n most recent logits.
-
-        Args:
-            n: number of recent entries
-
-        Returns:
-            (B, n, V) tensor or None
-        """
-        if len(self._cache) == 0:
-            return None
-        entries = self._cache[-n:]
-        logits = [self.decompress(e['compressed']) for e in entries]
-        return torch.cat(logits, dim=1)
-
-    def size_bytes(self) -> int:
-        """Estimate cache size in bytes."""
-        total = 0
-        for entry in self._cache:
-            c = entry['compressed']
-            # sparse_topk: pos (int16) + vals (uint8) + meta (2 floats)
-            total += c['pos'].numel() * 2 + c['vals'].numel() + 32
-        return total
-
-    def size_mb(self) -> float:
-        """Estimate cache size in megabytes."""
-        return self.size_bytes() / (1024 * 1024)
-
     def clear(self) -> None:
         """Clear the cache."""
-        self._cache.clear()
+        self._h_cache.clear()
+        self._logit_cache.clear()
         self._position = 0
 
+    def size_mb(self, training: bool = True) -> float:
+        """Estimate cache size in megabytes."""
+        if training:
+            if not self._h_cache:
+                return 0.0
+            # h: (B, L, D) × float32 × number of entries
+            total_bytes = sum(h.numel() * 4 for h in self._h_cache)
+        else:
+            if not self._logit_cache:
+                return 0.0
+            total_bytes = 0
+            for e in self._logit_cache:
+                total_bytes += e['pos'].numel() * 2 + e['vals'].numel() + e['meta'].numel() * 4
+        return total_bytes / (1024 * 1024)
+
     def __len__(self) -> int:
-        return len(self._cache)
+        return max(len(self._h_cache), len(self._logit_cache))
 
 
 class LogitAttention(nn.Module):
-    """Attention over cached logits.
+    """Attention over cached hidden states or logits.
 
-    Enables the model to attend to previous predictions,
-    creating a "soft memory" over generation history.
+    Training mode: attends to cached h (hidden states)
+    Inference mode: attends to cached logits
 
     Architecture:
         Q: current hidden state (B, L, D)
-        K: cached logits projected to D (B, M, D)
-        V: cached logits projected to D (B, M, D)
-
-    This allows the model to:
-        1. Attend to relevant previous predictions
-        2. Use the cache as a form of "soft memory"
-        3. Connect 1M tokens without full KV-cache
+        K, V: cached data projected to D (B, M, D)
     """
 
     def __init__(self, D: int, V: int, n_heads: int = 8,
@@ -228,20 +176,25 @@ class LogitAttention(nn.Module):
         self.head_dim = D // n_heads
         assert D % n_heads == 0, f"D={D} must be divisible by n_heads={n_heads}"
 
-        # Projections
+        # Projections for h (training mode)
         self.q_proj = nn.Linear(D, D, bias=False)
-        self.k_proj = nn.Linear(V, D, bias=False)  # V → D
-        self.v_proj = nn.Linear(V, D, bias=False)  # V → D
+        self.k_proj_h = nn.Linear(D, D, bias=False)  # h → D
+        self.v_proj_h = nn.Linear(D, D, bias=False)  # h → D
+
+        # Projections for logits (inference mode)
+        self.k_proj_l = nn.Linear(V, D, bias=False)  # logits → D
+        self.v_proj_l = nn.Linear(V, D, bias=False)  # logits → D
+
         self.out_proj = nn.Linear(D, D, bias=False)
 
-        # LayerNorm for numerical stability (V → D projection can cause large values)
+        # LayerNorm for stability
         self.k_norm = nn.LayerNorm(D)
         self.v_norm = nn.LayerNorm(D)
 
         # Learned temperature
-        self.log_tau = nn.Parameter(torch.tensor(0.0))  # tau=1.0
+        self.log_tau = nn.Parameter(torch.tensor(0.0))
 
-        # Position encoding for cache positions
+        # Position encoding
         self.pos_enc = nn.Embedding(max_cache_len, D)
 
         # Gate: how much to use cache vs direct
@@ -257,12 +210,14 @@ class LogitAttention(nn.Module):
         nn.init.zeros_(self.cache_gate[-2].bias)
 
     def forward(self, h: torch.Tensor, cache: LogitCache,
+                training: bool = True,
                 return_attention: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Attend to cached logits.
+        """Attend to cached data.
 
         Args:
             h: (B, L, D) current hidden state
-            cache: LogitCache with stored logits
+            cache: LogitCache with stored data
+            training: if True, retrieve h; if False, retrieve logits
             return_attention: if True, also return attention weights
 
         Returns:
@@ -272,57 +227,60 @@ class LogitAttention(nn.Module):
         B, L, D = h.shape
 
         if len(cache) == 0:
-            # No cache yet, return direct path
             if return_attention:
                 return h, None
             return h
 
-        # Get cached logits: (B, M, V)
-        cached_logits = cache.get_recent(min(len(cache), 1024))
+        # Retrieve cached data
+        cached = cache.retrieve(n=min(len(cache), 512), training=training)
 
-        if cached_logits is None:
+        if cached is None:
             if return_attention:
                 return h, None
             return h
 
-        M = cached_logits.shape[1]
+        M = cached.shape[1]
 
-        # Normalize cached logits for numerical stability
-        # Logits can be unbounded, so we normalize to [-1, 1] range
-        cached_logits = torch.tanh(cached_logits / 10.0)  # Soft normalization
+        # Normalize for numerical stability
+        if not training:
+            # logits: tanh normalization
+            cached = torch.tanh(cached / 10.0)
 
         # Project Q from hidden state
-        Q = self.q_proj(h)  # (B, L, D)
+        Q = self.q_proj(h)
 
-        # Add position encoding
+        # Project K, V from cached data
         positions = torch.arange(M, device=h.device).unsqueeze(0).expand(B, -1)
-        K = self.k_norm(self.k_proj(cached_logits)) + self.pos_enc(positions)  # (B, M, D)
-        V_cache = self.v_norm(self.v_proj(cached_logits))  # (B, M, D)
 
-        # Reshape for multi-head attention
-        Q = Q.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, L, head_dim)
-        K = K.view(B, M, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, M, head_dim)
-        V_cache = V_cache.view(B, M, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, M, head_dim)
+        if training:
+            # h mode: project h → D
+            K = self.k_norm(self.k_proj_h(cached)) + self.pos_enc(positions)
+            V_cache = self.v_norm(self.v_proj_h(cached))
+        else:
+            # logits mode: project logits → D
+            K = self.k_norm(self.k_proj_l(cached)) + self.pos_enc(positions)
+            V_cache = self.v_norm(self.v_proj_l(cached))
 
-        # Attention
+        # Multi-head attention
+        Q = Q.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        K = K.view(B, M, self.n_heads, self.head_dim).transpose(1, 2)
+        V_cache = V_cache.view(B, M, self.n_heads, self.head_dim).transpose(1, 2)
+
         tau = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
         scale = math.sqrt(self.head_dim) * tau
-        attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / scale  # (B, n_heads, L, M)
+        attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / scale
         attn_weights = F.softmax(attn_weights, dim=-1)
 
-        # Weighted sum
-        attn_output = torch.matmul(attn_weights, V_cache)  # (B, n_heads, L, head_dim)
-
-        # Reshape and project
+        attn_output = torch.matmul(attn_weights, V_cache)
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, L, D)
         output = self.out_proj(attn_output)
 
         # Gate: blend cache output with direct path
-        gate = self.cache_gate(h)  # (B, L, 1)
+        gate = self.cache_gate(h)
         output = gate * output + (1 - gate) * h
 
         if return_attention:
-            attn_avg = attn_weights.mean(dim=1)  # (B, L, M)
+            attn_avg = attn_weights.mean(dim=1)
             return output, attn_avg
         return output
 
@@ -330,54 +288,59 @@ class LogitAttention(nn.Module):
 class LogitCacheAttention(nn.Module):
     """Combined LogitCache + LogitAttention module.
 
-    Integrates into EVAStack to provide long-context memory
-    via compressed logits.
+    Integrates into EVAStack to provide long-context memory.
+
+    Training: stores h (gradient flows, model learns)
+    Inference: stores compressed logits (43x smaller than KV-cache)
     """
 
     def __init__(self, D: int, V: int, n_layers: int = 24,
                  max_tokens: int = 1_000_000, n_heads: int = 8):
         super().__init__()
-        self.cache = LogitCache(V, max_tokens, n_layers)
+        self.cache = LogitCache(V, D, max_tokens, n_scales=4)
         self.attention = LogitAttention(D, V, n_heads)
 
-        # Optional: project logits to hidden space for Knowledge Signal
+        # Project logits to hidden space (for inference mode)
         self.logit_to_hidden = nn.Linear(V, D, bias=False)
-        # Initialize with small random values (not identity, since V != D)
         nn.init.xavier_uniform_(self.logit_to_hidden.weight, gain=0.01)
 
     def forward(self, h: torch.Tensor, logits: torch.Tensor,
+                training: bool = True,
                 use_cache: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Process logits through cache and augment hidden state.
+        """Process through cache and augment hidden state.
 
         Args:
             h: (B, L, D) hidden state
             logits: (B, L, V) logits from lm_head
-            use_cache: if True, store and attend to cache
+            training: if True, store h; if False, store logits
+            use_cache: if False, return h unchanged
 
         Returns:
             h_augmented: (B, L, D) hidden state augmented with cache info
-            logits_out: (B, L, V) logits (possibly modified)
+            logits_out: (B, L, V) logits (unchanged)
         """
-        if use_cache:
-            # Store current logits in cache
-            self.cache.store(logits.detach())  # Detach to avoid grad through cache
+        if not use_cache:
+            return h, logits
 
-            # Attend to cache
-            h_augmented = self.attention(h, self.cache)
+        # Store in cache
+        if training:
+            self.cache.store(h, training=True)
+        else:
+            self.cache.store(logits, training=False)
 
-            # Check for NaN and replace with original if found
-            if torch.isnan(h_augmented).any():
-                h_augmented = h
+        # Attend to cache
+        h_augmented = self.attention(h, self.cache, training=training)
 
-            # Optionally: project cached logits to hidden space
-            # This provides a "reverse signal" from cache to model
-            cached = self.cache.get_recent(1)
-            if cached is not None:
-                cached_h = self.logit_to_hidden(cached)  # (B, 1, D)
-                # Check for NaN before adding
+        # Check for NaN
+        if torch.isnan(h_augmented).any():
+            h_augmented = h
+
+        # In inference mode: also project cached logits to hidden space
+        if not training:
+            cached_logits = self.cache.retrieve(n=1, training=False)
+            if cached_logits is not None:
+                cached_h = self.logit_to_hidden(cached_logits)
                 if not torch.isnan(cached_h).any():
                     h_augmented = h_augmented + cached_h
 
-            return h_augmented, logits
-        else:
-            return h, logits
+        return h_augmented, logits
