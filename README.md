@@ -6,10 +6,10 @@
 ```
   ┌───────────────────────────────────────────────────────────────┐
   │              EVA-CLM · Unified Computing Architecture         │
-  │   VSA-memory · Bind-crossing · Cognitive Mirror              │
-  │   Unified τ-field · SemanticBridge · MemoryBank L1/L2/L3     │
-  │   Logit Cache · VSA-driven Compression                       │
-  │   D=2560 · ~191M params · 24 layers                          │
+  │   VSA-memory · Bind-crossing · Cognitive Mirror               │
+  │   Unified τ-field · SemanticBridge · MemoryBank L1/L2/L3      │
+  │   Logit Cache · VSA-driven Compression                        │
+  │   D=2560 · ~191M params · 24 layers                           │
   └───────────────────────────────────────────────────────────────┘
 ```
 
