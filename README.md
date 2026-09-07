@@ -1,7 +1,7 @@
 # EVA-CLM — Единая Вычислительная Архитектура
 
 **Cognitive Learning Model · VSA + Cognitive Mirror + GroupedMLP + Unified τ-field.**
-**D=2560, ~191M параметров, 24 слоя. Без attention, без softmax-матриц.**
+**D=2560, ~723M параметров, 24 слоя. Без attention, без softmax-матриц.**
 
 ```
   ┌───────────────────────────────────────────────────────────────┐
@@ -9,7 +9,7 @@
   │   VSA-memory · Bind-crossing · Cognitive Mirror               │
   │   Unified τ-field · SemanticBridge · MemoryBank L1/L2/L3      │
   │   Logit Cache · VSA-driven Compression                        │
-  │   D=2560 · ~191M params · 24 layers                           │
+  │   D=2560 · ~723M params · 24 layers                           │
   └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -53,7 +53,7 @@
 
 1. **Память — вектор, не матрица.** Знание живёт в суперпозиции VSA, а не в K×V таблице. Нет KV-cache, O(1)-контекст.
 2. **Глубина не убивает градиент.** Bind — изометрия (циклический сдвиг), сохраняющая норму. 24+ слоя с живой обратной связью.
-3. **Точность переменна.** ~191M делают работу плотной модели много раз больше. Переменная точность через PrecisionGate.
+3. **Точность переменна.** ~723M делают работу плотной модели много раз больше. Переменная точность через PrecisionGate.
 4. **Обучение непрерывно.** Инференс = обучение: градиент оседает в неокортексе, зрелые паттерны — в ядро.
 5. **Цель — субъект, а не функция.** Модель думает над концепциями, консолидирует опыт, реакционна во времени.
 
@@ -249,7 +249,7 @@ tau_l   = exp(log_tau)
 | U9 | Gradient Clipping | `c_eff = c · (1 + τ_norm)^(−γ)` |
 | U10 | Bind Frequency | `freq_eff = freq_scale · (τ_min / τ_max)^(τ_norm · η)` |
 
-**Итого:** G + 6 = 38 новых параметров (0.002% от 191M).
+**Итого:** G + 6 = 38 новых параметров (0.005% от 723M).
 
 ---
 
@@ -543,7 +543,7 @@ EVA-CLM/
 | Концептуальная новизна | **10/10** | VSA + cognitive mirror + maturation + dual-mode Logit Cache — уникальная комбинация, нет аналогов |
 | Математическая обоснованность | **9/10** | τ-field, VSA scales, sigmoid bits — всё выведено аналитически |
 | Архитектурная целостность | **9/10** | Единый принцип: τ → maturation → adaptive gating → dual-mode cache |
-| Продуктивность | **9/10** | 191M params, 43x compression, gradient flows — efficiency выше трансформеров |
+| Продуктивность | **9/10** | 723M params, 43x compression, gradient flows — efficiency выше трансформеров |
 | Обучаемость | **8/10** | Maturation саморегулируется, gradient flow через cache, bridge activation ~8K steps |
 
 ### Ключевые инновации
@@ -590,27 +590,19 @@ EVA-CLM/
 
 ## 21. Статус обучения
 
-**Последний чекпоинт** (`checkponts/best 19.pt`):
+**Текущий запуск** (с нуля, с Logit Cache):
 
-| Метрика | Значение |
-|---|---|
-| val_loss | **9.180** (step 8155) |
-| Maturation deep | 0.509 |
-| Memory Bank L3 | 4859 births |
-| bridge_conn | 0.213 |
-| VRAM | ~10.6 GB |
+| Параметр | Значение |
+|----------|----------|
+| **Params** | **723M** (was 191M) |
+| **Head** | sigmoid_coded |
+| **Bind** | trajectory_spiral |
+| **Collective** | unified_concept_layer (S=8) |
+| **Reasoning** | explicit (max_steps=8, adaptive) |
+| **Logit Cache** | enabled (100K tokens, R1 scheduled sampling) |
+| **VRAM** | ~9.5 GB (T4 15GB) → L4 22GB при полной нагрузке |
 
-**Траектория:**
-
-| Step | val_loss | mat | Events |
-|------|----------|-----|--------|
-| 6990 | 14.461 | 0.437 | LR reset |
-| 7223 | 9.339 | 0.452 | |
-| 8155 | **9.180** | **0.509** | mat > 0.50 |
-| 8305 | — | 0.519 | Bridge activation |
-| 8388 | **9.122** | 0.522 | Latest eval |
-
-**Цель:** 300K шагов.
+**Цель:** 300K шагов. Лимит T4 → переход на L4 при необходимости.
 
 ---
 
