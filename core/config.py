@@ -309,6 +309,11 @@ class WideBindConfig:
     unified_concept_layer: bool = True  # enable unified concept layer (global, after embedding)
     unified_concept_S: int = 8          # number of concept prototypes
 
+    # ─── Logit Cache (dual-mode: training=h, inference=logits) ───
+    logit_cache_enabled: bool = False    # enable logit cache
+    logit_cache_max_tokens: int = 102_400  # max tokens in cache (100K)
+    logit_cache_n_heads: int = 8         # attention heads for logit cache
+
     # ─── Режим Б (открытое сознание): отказ от softmax-свёртки ───
     # Все точки комбинации смыслов используют нормированное сигмоид-среднее
     # (выпуклая комбинация, сумма весов = 1) вместо softmax-конкуренции.
