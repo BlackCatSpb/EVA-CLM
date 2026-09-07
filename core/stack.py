@@ -183,9 +183,9 @@ class EVAStack(nn.Module):
         self.logit_cache = LogitCacheAttention(
             D=cfg.D,
             V=cfg.vocab,
-            n_layers=cfg.n_layers,
-            max_tokens=getattr(cfg, 'logit_cache_max_tokens', 1_000_000),
+            max_tokens=getattr(cfg, 'logit_cache_max_tokens', 102_400),
             n_heads=getattr(cfg, 'logit_cache_n_heads', 8),
+            scheduled_sampling_ratio=getattr(cfg, 'logit_cache_scheduled_sampling', 0.05),
         ) if getattr(cfg, 'logit_cache_enabled', False) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,

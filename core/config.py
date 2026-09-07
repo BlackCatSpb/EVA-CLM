@@ -313,6 +313,8 @@ class WideBindConfig:
     logit_cache_enabled: bool = False    # enable logit cache
     logit_cache_max_tokens: int = 102_400  # max tokens in cache (100K)
     logit_cache_n_heads: int = 8         # attention heads for logit cache
+    logit_cache_scheduled_sampling: float = 0.05  # R1: probability of inference-mode during training (0.05 = 5%)
+    logit_cache_reset_on_resume: bool = True  # R6: clear cache on resume/LR-reset
 
     # ─── Режим Б (открытое сознание): отказ от softmax-свёртки ───
     # Все точки комбинации смыслов используют нормированное сигмоид-среднее

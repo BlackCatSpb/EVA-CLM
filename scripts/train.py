@@ -278,6 +278,10 @@ def train(cfg=None, resume_path=None):
             print(f'  Missing keys (new arch): {len(missing)}')
         if unexpected:
             print(f'  Unexpected keys (old arch): {len(unexpected)}')
+        # R6: Invalidate cache on resume (stale cache from old weights)
+        if getattr(cfg, 'logit_cache_reset_on_resume', True):
+            model.reset_cache()
+            print('  Cache invalidated on resume (R6)')
         # Restore optimizer/scheduler from checkpoint for stable resume.
         optimizer = _make_opt(cfg.lr)
         if 'optimizer' in ckpt and ckpt['optimizer'] is not None and not args.no_save_optimizer:

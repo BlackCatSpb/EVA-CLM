@@ -437,6 +437,36 @@ Cache хранит **все** токены, attention смотрит на **по
 - Включение: `cfg.logit_cache_enabled=True`
 - Тесты: `scripts/test_gradient_flow.py`, `scripts/test_unified_cache.py`
 
+### R1: Scheduled Sampling (train/inference alignment)
+
+**Проблема:** training хранит `h`, inference хранит logits — разные representational spaces.
+
+**Решение:** с вероятностью `scheduled_sampling_ratio` (default 5%) модель работает в inference-режиме даже при обучении:
+
+```
+Training step:
+  if random() < 0.05:
+      # Scheduled sampling: inference mode
+      cache.store(logits, training=False)  # compressed logits
+      attention(h, cache, training=False)  # inference attention
+  else:
+      # Normal training
+      cache.store(h, training=True)  # h, gradient flows
+      attention(h, cache, training=True)  # training attention
+```
+
+**Эффект:** модель учится работать с теми же представлениями, которые будут при инференсе.
+
+### R6: Cache Invalidation (resume + LR-reset)
+
+**Проблема:** после resume/LR-reset кэш содержит данные от старых весов — семантически несогласован.
+
+**Решение:** автоматическая инвалидация кэша:
+1. **Resume:** `model.reset_cache()` после загрузки весов
+2. **LR-reset (FailureDetector):** `model.reset_cache()` после отката к best.pt
+
+**Флаг:** `cfg.logit_cache_reset_on_resume=True` (default)
+
 ---
 
 ## 18. Maturation + Triad

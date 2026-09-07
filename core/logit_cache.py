@@ -292,13 +292,19 @@ class LogitCacheAttention(nn.Module):
 
     Training: stores h (gradient flows, model learns)
     Inference: stores compressed logits (43x smaller than KV-cache)
+
+    Scheduled sampling: with probability `scheduled_sampling_ratio`,
+    uses inference-mode (compressed logits) during training to align
+    train/inference representations (R1: close train/inference skew).
     """
 
     def __init__(self, D: int, V: int, n_layers: int = 24,
-                 max_tokens: int = 1_000_000, n_heads: int = 8):
+                 max_tokens: int = 1_000_000, n_heads: int = 8,
+                 scheduled_sampling_ratio: float = 0.05):
         super().__init__()
         self.cache = LogitCache(V, D, max_tokens, n_scales=4)
         self.attention = LogitAttention(D, V, n_heads)
+        self.scheduled_sampling_ratio = scheduled_sampling_ratio
 
         # Project logits to hidden space (for inference mode)
         self.logit_to_hidden = nn.Linear(V, D, bias=False)
@@ -322,21 +328,33 @@ class LogitCacheAttention(nn.Module):
         if not use_cache:
             return h, logits
 
+        # R1: Scheduled sampling — with probability scheduled_sampling_ratio,
+        # use inference-mode (compressed logits) during training to align
+        # train/inference representations.
+        use_inference_mode = False
+        if training and self.scheduled_sampling_ratio > 0:
+            if torch.rand(1).item() < self.scheduled_sampling_ratio:
+                use_inference_mode = True
+
         # Store in cache
-        if training:
+        if training and not use_inference_mode:
+            # Normal training: store h (gradient flows)
             self.cache.store(h, training=True)
         else:
+            # Inference mode or scheduled sampling: store compressed logits
             self.cache.store(logits, training=False)
 
         # Attend to cache
-        h_augmented = self.attention(h, self.cache, training=training)
+        # During scheduled sampling, attend to compressed logits (inference mode)
+        h_augmented = self.attention(h, self.cache,
+                                     training=(training and not use_inference_mode))
 
         # Check for NaN
         if torch.isnan(h_augmented).any():
             h_augmented = h
 
         # In inference mode: also project cached logits to hidden space
-        if not training:
+        if not training or use_inference_mode:
             cached_logits = self.cache.retrieve(n=1, training=False)
             if cached_logits is not None:
                 cached_h = self.logit_to_hidden(cached_logits)

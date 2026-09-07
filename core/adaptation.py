@@ -380,6 +380,9 @@ class FailureDetector:
             self.optimizer = new_opt
             self.lr_controller.optimizer = new_opt
             self.lr_controller.rewind()
+            # R6: Invalidate cache on LR-reset (stale cache from old weights)
+            if hasattr(self.model, 'reset_cache'):
+                self.model.reset_cache()
             del ckpt
             gc.collect()
             torch.cuda.empty_cache()
