@@ -221,6 +221,14 @@ class EVABlock(nn.Module):
         
         # ─── Spectral (self-organizing frequency filters) ───
         self.register_buffer('V_dct', dct_basis(cfg.D))
+        # ─── MLP-output runaway tracker (self-referencing, τ-linked) ───
+        # fast (0.99) vs slow (0.999) EMA of ‖h_mlp‖ — same a/a_slow convention as
+        # the FailureDetector. Healthy ratio ≈ 1; a ×2–50 runaway lifts it past the
+        # detector's relative margin within a few steps, unlike an absolute SPC
+        # bound which the runaway's growing variance absorbs.
+        self.register_buffer('_mlp_now_ema', torch.ones(1), persistent=False)
+        self.register_buffer('_mlp_base_ema', torch.ones(1), persistent=False)
+        self._mlp_ratio = 1.0
         base = 0.5 + layer_idx / max(cfg.n_layers - 1, 1)
         # Per-dim variation: low frequencies get slight boost, high get slight cut
         # Creates natural 1/f-like distribution encouraging frequency band separation
@@ -488,6 +496,11 @@ class EVABlock(nn.Module):
         h_mlp = self.mlp(h, mirror_gate=mlp_mod)
         self._cache_mlp_out = h_mlp  # raw MLP output (gradalign target source)
         if _chk(h_mlp, 'mlp_out'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        with torch.no_grad():
+            _mrms = torch.norm(h_mlp.detach().reshape(-1)).float()
+            self._mlp_now_ema.mul_(0.99).add_(_mrms, alpha=0.01)
+            self._mlp_base_ema.mul_(0.999).add_(_mrms, alpha=0.001)
+            self._mlp_ratio = float((self._mlp_now_ema / (self._mlp_base_ema + 1e-12)).item())
         h = h + h_mlp
         if _chk(h, 'post_mlp'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         

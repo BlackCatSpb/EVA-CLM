@@ -126,20 +126,26 @@ def apply_tau_lr(model, tau_config=None, ls_mults: Optional[List[float]] = None)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FailureDetector:
-    """Roll back to ``best.pt`` + fresh Adam + LR rewind on a *statistical*
+    """Roll back to ``best.pt`` + fresh Adam + LR rewind on a *relative*
     divergence of ANY monitored signal.
 
-    The SAME outlier rule is applied to CE and to every protective metric
-    (diversity, gate_mean, mlp_out, effective gate amplitude):
+    The SAME relative rule is applied to CE and to every protective metric
+    (diversity, gate_l1, mlp_ratio, effective gate amplitude). Each signal
+    carries a fast EMA (a, half-life ~70) against a slow self-referencing
+    baseline (a_slow, half-life ~700):
 
-        bound = ema + max(k_sigma·σ, rel_margin·|ema|)
+        viol  = value > slow_ema·(1 + rel_margin)   AND   value ≥ prev
 
     A metric that jumps orders of magnitude (A2 crash: diversity 3.8e22 vs a
-    healthy ~0.4) violates the bound immediately; slow exponential drift is
-    caught like CE is. Each signal bootstraps its stats for the EMA half-life
-    (1/(1−a) samples) — the guard is live from ~step 100, not from a hand
-    picked warmup (the A2 explosion unfolded between steps 550–880, i.e.
-    inside the old silent warmup window).
+    healthy ~0.4) violates instantly. Critically, a *slow ramp to a new plateau*
+    is caught too: the long baseline still weights the old healthy level, so
+    ``value`` stays above ``slow_ema·1.15`` for hundreds of steps even after
+    the signal flattens (a flat absolute SPC bound `ema + kσ` goes blind the
+    moment the EMA absorbs the new level — the exact failure of the A2-era
+    CE-only watchdog at CE≈120).
+
+    Each signal bootstraps for the fast-EMA half-life (1/(1−a) samples); the
+    guard is live from ~step 100, not from a hand picked warmup.
     """
 
     def __init__(self, model: torch.nn.Module, lr_controller,
@@ -153,14 +159,15 @@ class FailureDetector:
         self.make_optimizer_fn = make_optimizer_fn
         self.best_path = best_path
         self.base_lr = float(base_lr)
-        self.k_sigma = float(k_sigma)
+        self.k_sigma = float(k_sigma)  # kept for API compatibility; rule is relative now
         self.warmup = int(warmup)  # kept for API compatibility; bootstrap count governs
         self.recover_max = int(recover_max)
         self.cooldown = int(cooldown)
         self.min_consecutive = int(min_consecutive)
         self.a = float(ema_decay)
+        self.a_slow = max(self.a, 1.0 - (1.0 - self.a) / 10.0)  # half-life ~700
         self._min_samples = max(3, int(round(1.0 / (1.0 - self.a))))
-        self.rel_margin = 0.15  # same relative-outlier floor used for CE
+        self.rel_margin = 0.15  # relative-outlier floor (CE's own; same for all signals)
         self._cooldown = 0
         self._viol: Dict[str, int] = {}  # consecutive violations per signal
         self.recover_count = 0
@@ -168,31 +175,33 @@ class FailureDetector:
         self._stats: Dict[str, List[float]] = {}  # name -> [ema, var, prev, n]
 
     def _observe(self, name: str, value: float) -> bool:
-        """Test the sample against the *prior* distribution, then update.
+        """Relative-outlier test against a *long* self-referencing baseline.
 
-        Testing against the pre-update EMA/SD (classical SPC semantics) keeps a
-        single spike from inflating its own bound: ``bound`` is the historical
-        reference, not the chasing one.
+        States are ``[fast_ema, prev, n, slow_ema]``. The rule is deliberately
+        non-SPC: an absolute ``ema + kσ`` bound chases a slow runaway (its mean
+        and variance both inflate), going blind exactly when the signal settles
+        on a new plateau. ``slow_ema·(1 + rel_margin)`` keeps weighting the
+        pre-runaway level for ~700 steps, so a ramp is flagged the whole time
+        and a plateau is still flagged long after the fast EMA adapts.
         """
         s = self._stats.get(name)
         if s is None:
-            self._stats[name] = [float(value), 0.0, float(value), 1]
+            self._stats[name] = [float(value), float(value), 1, float(value)]
             return False
-        ema, var, prev, n = s
+        fast, prev, n, slow = s
         n += 1
         value = float(value)
         if n < self._min_samples:
-            s[2] = value
-            s[3] = n
+            fast = self.a * fast + (1 - self.a) * value
+            slow = self.a_slow * slow + (1 - self.a_slow) * value
+            s[0], s[1], s[2], s[3] = fast, value, n, slow
             return False
-        std = math.sqrt(var) + 1e-8
-        bound = ema + max(self.k_sigma * std, self.rel_margin * abs(ema))
         rising = value >= prev  # plateau at a new level is still a sustained shift
-        viol = (value > bound) and rising
-        a = self.a
-        ema2 = a * ema + (1 - a) * value
-        var2 = a * var + (1 - a) * (value - ema2) ** 2
-        s[0], s[1], s[2], s[3] = ema2, var2, value, n
+        viol = (value > slow * (1.0 + self.rel_margin)) and rising
+        s[0] = self.a * fast + (1 - self.a) * value
+        s[1] = value
+        s[2] = n
+        s[3] = self.a_slow * slow + (1 - self.a_slow) * value
         return viol
 
     def check(self, ce: float, step: int,
