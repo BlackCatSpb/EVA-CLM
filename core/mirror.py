@@ -151,6 +151,11 @@ class GroupedCognitiveMirror(nn.Module):
         # EMA norms for signal normalization (Proposal V-1)
         n_signals: int = 5 if has_private_mem else 4
         self.register_buffer('_signal_norm_ema', torch.ones(n_signals, G, k), persistent=False)
+        # Intent bridge + contradiction gate: running RMS EMA for amplitude
+        # normalization (data-driven, zero hand-picked thresholds; τ-tied via
+        # self._intent_alpha = 1 − exp(−τ_l / τ_min)).
+        self.register_buffer('_ig_norm_ema', torch.ones(G), persistent=False)
+        self.register_buffer('_ctr_norm_ema', torch.ones(G), persistent=False)
         if expert_asymmetry and G > 1:
             ls_vals = [math.log(0.05 * (1.5 ** g)) for g in range(G)]
             ls_base: torch.Tensor = torch.tensor(ls_vals).unsqueeze(1).expand(G, self.d)
@@ -269,12 +274,16 @@ class GroupedCognitiveMirror(nn.Module):
         self._signal_log_weights = nn.Parameter(fib_sigmoid_init(n_signals))
         # U5: τ-scheduled signal temperature
         self._tau_signal_log = nn.Parameter(torch.tensor(0.0))  # τ_signal base (learnable)
-        # Store layer-specific τ_norm for signal temperature scheduling
+        # Store layer-specific τ primitives for signal temperature scheduling
+        # and τ-tied gate amplitude authority (intent_alpha = 1 − exp(−τ_l/τ_min)).
         self._tau_norm_layer = None
+        self._intent_alpha = 1.0
         if tau_config is not None and hasattr(tau_config, 'tau_norm'):
             with torch.no_grad():
-                tau_norm_val = tau_config.tau_norm[layer_idx]
-                self._tau_norm_layer = tau_norm_val.item()
+                self._tau_norm_layer = tau_config.tau_norm[layer_idx].item()
+            if hasattr(tau_config, 'intent_alpha'):
+                with torch.no_grad():
+                    self._intent_alpha = tau_config.intent_alpha[layer_idx].item()
 
         
         # ─── Self-organizing usefulness predictor (competitive) ───
@@ -689,60 +698,59 @@ class GroupedCognitiveMirror(nn.Module):
         gate_logits = gate_logits + grad_mod.unsqueeze(0).unsqueeze(0)
         gate_logits = gate_logits + dvar_mod.unsqueeze(0).unsqueeze(0)
         # Intent Bridge: нисходящий intent модулирует открытость экспертов.
-        # w_intent/b_intent zero-init → без эффекта при init (checkpoint-safe).
+        # w_intent/b_intent/w_sal zero-init → без эффекта при init (checkpoint-safe).
         if intent is not None and self._intent_bridge:
             # intent is the per-head stream already in (…,G,k) expert space.
             ik = intent
-            # U-τ: bounded + τ-tied intent authority (fix for w_intent runaway).
-            # Raw w_intent is zero-init and excluded from AGC while ‖w‖<eps, so
-            # nothing bounded it: gate→output→hp→gate positive feedback drove
-            # ‖w_intent‖ to ~62k and gate_logits to blow up (loss 3.8e22, A2).
-            #   1) weight-norm bound w_intent → w/(1+‖w‖_row): contribution ~
-            #      O(‖hp−ik‖) at ALL magnitudes; ≈ w·(hp−ik) while small (init
-            #      behaviour unchanged), saturates as ‖w‖ grows; gradient alive.
-            #   2) b_intent bounded the same way (bias could saturate the sigmoid).
-            #   3) τ-tied amplitude: intent authority scales with the layer's
-            #      τ-field, same form as intent_alpha/LBG tau; floor 0.25 keeps
-            #      gradient flowing even on shallow (τ_norm→0) layers.
-            wn = self.w_intent / (1.0 + self.w_intent.norm(dim=1, keepdim=True))
-            bb = self.b_intent / (1.0 + self.b_intent.abs().max())
-            intent_gate = torch.einsum('blgk,gk->blg', hp - ik, wn) + bb
-            if self._tau_norm_layer is not None:
-                intent_gate = intent_gate * (0.25 + 0.75 * self._tau_norm_layer)
-            gate_logits = gate_logits + intent_gate
-        # Salience (word importance from output) -> per-expert gate bias.
-        if salience is not None and self._intent_bridge:
-            Lg = gate_logits.shape[1]
-            if salience.shape[1] != Lg:
-                # In recurrent/autoregressive generation `_last_salience` carries the
-                # previous step's sequence length (S), which differs from the current
-                # forward length (L). Align it: keep the last L positions, or broadcast
-                # the (single/newest) salience across positions. No-op in training (S==L).
-                if salience.dim() == 2:
-                    salience = salience.unsqueeze(-1)
-                if salience.shape[1] >= Lg:
-                    salience = salience[:, -Lg:, :]
-                else:
-                    reps = Lg - salience.shape[1]
-                    last = salience[:, -1:, :].expand(-1, reps, -1)
-                    salience = torch.cat([salience, last], dim=1)
-            # U-τ: w_sal bounded the same way (zero-init, second unbounded door).
-            ws = self.w_sal / (1.0 + self.w_sal.abs().max())
-            gate_logits = gate_logits + salience * ws.view(1, 1, -1)
-        # Contradiction signal: expert vs collective disagreement opens gate (arbiter)
+            # Salience alignment for recurrent generation (S≠L); no-op in training.
+            sal = salience
+            if sal is not None:
+                Lg = gate_logits.shape[1]
+                if sal.dim() == 2:
+                    sal = sal.unsqueeze(-1)
+                if sal.shape[1] != Lg:
+                    if sal.shape[1] >= Lg:
+                        sal = sal[:, -Lg:, :]
+                    else:
+                        reps = Lg - sal.shape[1]
+                        last = sal[:, -1:, :].expand(-1, reps, -1)
+                        sal = torch.cat([sal, last], dim=1)
+            # All intent-bridge contributions (w_intent, b_intent, w_sal) into one
+            # term, then: (1) divide by running RMS of the term itself — bounded
+            # contribution at ANY ‖w‖ (data-driven, no magic constants) while the
+            # gradient stays alive; (2) scale by τ-authority intent_alpha =
+            # 1 − exp(−τ_l / τ_min) — the τ-field's own gate-amplitude formula
+            # (fixes the run-A2 runaway: raw w_intent grew to ‖w_intent‖≈62k and
+            # pushed gate_logits into positive feedback, loss 3.8e22).
+            ig = torch.einsum('blgk,gk->blg', hp - ik, self.w_intent) + self.b_intent
+            if sal is not None:
+                ig = ig + sal * self.w_sal.view(1, 1, -1)
+            if self.training:
+                with torch.no_grad():
+                    rms = ig.pow(2).mean(dim=(0, 1)).sqrt()          # (G,)
+                    self._ig_norm_ema.mul_(0.99).add_(rms, alpha=0.01)
+            ig = ig / (self._ig_norm_ema.unsqueeze(0).unsqueeze(0) + 1e-8)
+            gate_logits = gate_logits + ig * self._intent_alpha
+        # Contradiction signal: expert vs collective disagreement opens gate.
+        # Same pattern as the intent bridge: running-RMS normalization + τ-authority
+        # (prevents unbounded feedback through w_contra, the second gate weight).
         if self._has_private_mem:
-            gate_logits = gate_logits + disagreement * self.w_contra.unsqueeze(0).unsqueeze(0)
+            ctr = disagreement * self.w_contra.unsqueeze(0).unsqueeze(0)
             # Concept graph pressure: high contradiction → open gate more
             if self._cached_contra_expert is not None:
-                ce = self._cached_contra_expert.to(gate_logits.device).unsqueeze(0).unsqueeze(0)
-                gate_logits = gate_logits + ce  # collective contradiction raises gate
+                ctr = ctr + self._cached_contra_expert.to(gate_logits.device).unsqueeze(0).unsqueeze(0)
             # Soft routing overlay: specialization + consensus modulate gate via w_contra
             spec = self._behavior_div_ema.mean(dim=-1)            # (G,) — avg divergence per expert
             spec = spec / (spec.max() + 1e-10)                    # norm to [0, 1]
             cons = self._concept_sim_ema.mean(dim=-1)             # (G,) — avg similarity per expert
             cons = cons / (cons.max() + 1e-10)                    # norm to [0, 1]
-            gate_bonus = (spec * 0.5 + cons * 0.5) * self.w_contra * 0.1
-            gate_logits = gate_logits + gate_bonus.unsqueeze(0).unsqueeze(0)
+            ctr = ctr + (spec * 0.5 + cons * 0.5) * self.w_contra * 0.1
+            if self.training:
+                with torch.no_grad():
+                    rms = ctr.pow(2).mean(dim=(0, 1)).sqrt()      # (G,)
+                    self._ctr_norm_ema.mul_(0.99).add_(rms, alpha=0.01)
+            ctr = ctr / (self._ctr_norm_ema.unsqueeze(0).unsqueeze(0) + 1e-8)
+            gate_logits = gate_logits + ctr * self._intent_alpha
         if self._meta_trust and self._has_private_mem:
             p = self._meta_private_mem.unsqueeze(0).unsqueeze(0)
             gate_logits = gate_logits - 0.5 * p

@@ -88,15 +88,20 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     
     diversity_loss = 0.0
     n_div = 0
-    for layer in stack.layers:
+    for i, layer in enumerate(stack.layers):
         group_out = getattr(layer.mlp, '_cached_group_out', None)
         if group_out is not None:
             B, L, G, d = group_out.shape
             y = group_out.norm(dim=-1).reshape(-1, G)
-            y = y - y.mean(dim=0, keepdim=True)
-            cov = y.T @ y / (y.shape[0] - 1 + 1e-10)
-            div = F.mse_loss(cov, torch.eye(G, device=cov.device))
-            diversity_loss = diversity_loss + div
+            # Scale-invariant: correlation matrix (column-standardized) → bounded
+            # regardless of ‖y‖; raw covariance scaled as ‖y‖⁴ and exploded in A2.
+            y = (y - y.mean(dim=0)) / (y.std(dim=0) + 1e-8)
+            corr = y.T @ y / (y.shape[0] - 1 + 1e-10)
+            div = F.mse_loss(corr, torch.eye(G, device=group_out.device))
+            # τ-tied per-layer weight: intent_alpha = 1 − exp(−τ_l/τ_min)
+            # (τ-field expresses exploration authority; deep layers explore more).
+            alpha = 1.0 - torch.exp(-stack.tau_config.tau_l[i].detach() / stack.tau_config.tau_min)
+            diversity_loss = diversity_loss + alpha * div
             n_div = n_div + 1
     if n_div > 0:
         diversity_loss = diversity_loss / n_div

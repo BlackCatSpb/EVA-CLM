@@ -114,6 +114,10 @@ class EVABlock(nn.Module):
         if tau_config is not None and hasattr(tau_config, 'tau_norm'):
             with torch.no_grad():
                 self._tau_norm = tau_config.tau_norm[layer_idx].item()
+        # Keep the τ-field so the mirror can bind its gate authorities to τ
+        # (intent_alpha etc.); previously the mirror always saw tau_config=None,
+        # which silently disabled all τ-ties inside GroupedCognitiveMirror.
+        self.tau_config: Optional[object] = tau_config
         
         # Pre-LN weight
         self.register_buffer('pre_ln_w', torch.ones(cfg.D))
@@ -164,7 +168,8 @@ class EVABlock(nn.Module):
             pm_write_delay=getattr(cfg, 'pm_write_delay', 5000),
             pm_coh_gate_std=getattr(cfg, 'pm_coh_gate_std', 0.02),
             mirror_tau_min=getattr(cfg, 'mirror_tau_min', 2.0),
-            mirror_tau_max=getattr(cfg, 'mirror_tau_max', 200.0))
+            mirror_tau_max=getattr(cfg, 'mirror_tau_max', 200.0),
+            tau_config=tau_config)
         
         # ─── VSA Memory (multi-scale VSA: S=4 фиксированных τ) ───
         self._n_scales = 4
