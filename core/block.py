@@ -228,6 +228,7 @@ class EVABlock(nn.Module):
         # bound which the runaway's growing variance absorbs.
         self.register_buffer('_mlp_now_ema', torch.ones(1), persistent=False)
         self.register_buffer('_mlp_base_ema', torch.ones(1), persistent=False)
+        self.register_buffer('_mlp_cnt', torch.zeros(1), persistent=False)
         self._mlp_ratio = 1.0
         base = 0.5 + layer_idx / max(cfg.n_layers - 1, 1)
         # Per-dim variation: low frequencies get slight boost, high get slight cut
@@ -498,8 +499,15 @@ class EVABlock(nn.Module):
         if _chk(h_mlp, 'mlp_out'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         with torch.no_grad():
             _mrms = torch.norm(h_mlp.detach().reshape(-1)).float()
-            self._mlp_now_ema.mul_(0.99).add_(_mrms, alpha=0.01)
-            self._mlp_base_ema.mul_(0.999).add_(_mrms, alpha=0.001)
+            if self._mlp_cnt.item() == 0:
+                # cold-start: baseline = first observed level, not the init 1.0
+                # (else ratio is inflated while the slow EMA climbs for ~700 steps)
+                self._mlp_now_ema.copy_(_mrms)
+                self._mlp_base_ema.copy_(_mrms)
+            else:
+                self._mlp_now_ema.mul_(0.99).add_(_mrms, alpha=0.01)
+                self._mlp_base_ema.mul_(0.999).add_(_mrms, alpha=0.001)
+            self._mlp_cnt.add_(1)
             self._mlp_ratio = float((self._mlp_now_ema / (self._mlp_base_ema + 1e-12)).item())
         h = h + h_mlp
         if _chk(h, 'post_mlp'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)

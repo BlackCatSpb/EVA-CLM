@@ -136,6 +136,12 @@ class FailureDetector:
 
         viol  = value > slow_ema·(1 + rel_margin)   AND   value ≥ prev
 
+    CE additionally under a ``ce_armed`` flag: the run's first ~1k steps show a
+    *known benign transient* (CE 66→29→11 across 3 healthy restarts); rolling
+    back inside it thrashes the LR. CE joins the watch only after the first
+    val eval (the notebook arms it), while protective magnitudes are armed from
+    bootstrap end — they are the ones that caught A2's diversity explosion.
+
     A metric that jumps orders of magnitude (A2 crash: diversity 3.8e22 vs a
     healthy ~0.4) violates instantly. Critically, a *slow ramp to a new plateau*
     is caught too: the long baseline still weights the old healthy level, so
@@ -168,6 +174,7 @@ class FailureDetector:
         self.a_slow = max(self.a, 1.0 - (1.0 - self.a) / 10.0)  # half-life ~700
         self._min_samples = max(3, int(round(1.0 / (1.0 - self.a))))
         self.rel_margin = 0.15  # relative-outlier floor (CE's own; same for all signals)
+        self.ce_armed = False  # CE joins the watch after the first val eval
         self._cooldown = 0
         self._viol: Dict[str, int] = {}  # consecutive violations per signal
         self.recover_count = 0
@@ -202,6 +209,8 @@ class FailureDetector:
         s[1] = value
         s[2] = n
         s[3] = self.a_slow * slow + (1 - self.a_slow) * value
+        if name == 'ce' and not self.ce_armed:
+            return False  # stats still warm; CE joins the watch once armed
         return viol
 
     def check(self, ce: float, step: int,
