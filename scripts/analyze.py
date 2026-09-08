@@ -42,10 +42,43 @@ WORD = re.compile(r'[а-яёА-ЯЁ]')
 # ─────────────────────────── загрузка ───────────────────────────
 
 def load_ckpt(path):
+    """Потоковая загрузка с минимальным пиком RAM.
+
+    torch.load возвращает ЧЕКПОИНТ-словник целиком: стейт-дикт модели
+    (886M чисел ~3.5GB) + optimizer (ADAM m+v ~5.8GB) + scheduler. Если
+    держать всё одновременно с моделью (~6.7GB с буферами), пик ~16GB —
+    это OOM на машинах с малым RAM. Здесь:
+      1) optimizer/scheduler/param_names выбрасываются СРАЗУ после load,
+      2) стейт-дикт копируется в модель поэлементно и освобождается по ходу
+         (пик во время копирования ~ модель + один тензор вместо 2 дублей).
+    """
     ckpt = torch.load(path, map_location='cpu', weights_only=True)
     cfg = ckpt['cfg']
+    for _k in ('optimizer', 'scheduler', 'param_names'):
+        ckpt.pop(_k, None)
+    sd = ckpt.pop('model') or {}
+    ckpt['_n_tensors'] = len(sd)
+    sd_keys = set(sd.keys())
     model = EVAStack(cfg)
-    missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
+    params_d = dict(model.named_parameters())
+    buffers_d = dict(model.named_buffers())
+    with torch.no_grad():
+        for k in list(sd.keys()):
+            v = sd.pop(k)
+            if k in params_d:
+                d = params_d[k]
+                if d.shape == v.shape:
+                    d.copy_(v)
+                else:
+                    print(f'  [warn] shape-mismatch {k}: ckpt={list(v.shape)} model={list(d.shape)}')
+            elif k in buffers_d:
+                b = buffers_d[k]
+                if b.shape == v.shape:
+                    b.copy_(v)
+            del v
+    model_keys = set(params_d) | set(buffers_d)
+    missing = sorted(model_keys - sd_keys)
+    unexpected = sorted(sd_keys - model_keys)
     model.train()
     if model.explicit_reasoning:
         model.reasoning_enabled_step = int(ckpt.get('reasoning_enabled_step', 0))
@@ -62,13 +95,18 @@ def sec(title):
 # ─────────────────────────── STATIC ───────────────────────────
 
 def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
-    sd = ckpt['model']
+    st = {'config': [], 'param_groups': [], 'per_layer': [], 'vsatau': {},
+          'mirror': [], 'lm_head': [], 'tensors': {}, 'reasoning': None,
+          'inspector': None, 'file': os.path.basename(ckpt.get('_path', '?')),
+          'step': ckpt.get('step', '?'),
+          'best_val': float(ckpt.get('best_val_loss', float('inf'))),
+          'missing': [k for k in missing[:10]], 'unexpected': [k for k in unexpected[:10]]}
     sec('STATIC')
-    print(f'File:       {os.path.basename(ckpt.get("_path", "?"))}')
-    print(f'Step:       {ckpt.get("step", "?")}')
-    print(f'Best val:   {ckpt.get("best_val_loss", float("inf"))}')
+    print(f'File:       {st["file"]}')
+    print(f'Step:       {st["step"]}')
+    print(f'Best val:   {st["best_val"]}')
     print(f'Params:     {model.param_count() / 1e6:.2f}M')
-    print(f'Tensors:    {len(sd)}')
+    print(f'Tensors:    {ckpt.get("_n_tensors", "-")}')
     print(f'Missing:    {len(missing)}   Unexpected: {len(unexpected)}')
     if missing:
         for k in missing[:5]:
@@ -83,12 +121,17 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
            'collective_read_out', 'private_mem', 'head_mode', 'bind_twist_mode']
     print('\nCONFIG:')
     for a in imp:
-        print(f'  {a:24s} = {getattr(cfg, a, "N/A")}')
+        v = getattr(cfg, a, 'N/A')
+        st['config'].append((a, v))
+        print(f'  {a:24s} = {v}')
 
     print('\nPARAM GROUPS (LR multipliers):')
     for g in model.param_groups():
-        print(f'  lr={g.get("lr", cfg.lr):.6f} wd={g.get("weight_decay", 0):.4f} '
-              f'n_params={len(g["params"]):4d}')
+        lr = g.get('lr', cfg.lr)
+        wd = g.get('weight_decay', 0)
+        n = len(g['params'])
+        st['param_groups'].append({'lr': lr, 'wd': wd, 'n': n})
+        print(f'  lr={lr:.6f} wd={wd:.4f} n_params={n:4d}')
 
     print('\nPER-LAYER (params, без forward):')
     hdr = f'{"L":>3s} {"alpha":>7s} {"|1-a|":>7s} {"ls_std":>7s} {"w_help":>7s} ' \
@@ -104,6 +147,10 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
         sw = torch.sigmoid(layer.scale_w.data)
         cw = layer.conv.weight.data
         pm = m._private_mem.norm(dim=-1).mean().item() if m._has_private_mem else float('nan')
+        st['per_layer'].append({'layer': i, 'alpha': a.mean().item(), 'a1': (1 - a).abs().mean().item(),
+                                'ls_std': ls.std().item(), 'w_help': wh.mean().item(),
+                                'skip': lsa.mean().item(), 'scale_w': sw.mean().item(),
+                                'conv_std': cw.std().item(), 'pm_norm': pm})
         print(f'{i:3d} {a.mean().item():7.4f} {(1 - a).abs().mean().item():7.4f} '
               f'{ls.std().item():7.4f} {wh.mean().item():7.4f} {lsa.mean().item():7.4f} '
               f'{sw.mean().item():7.4f} {cw.std().item():8.4f} {pm:8.3f}')
@@ -113,6 +160,11 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
     td = model._tau_l_dev.data
     b_d = model.b_d.data if hasattr(model, 'b_d') else None
     b_i = model.b_i.data if hasattr(model, 'b_i') else None
+    st['vsatau'] = {'tau0': float(vsa_tau[0].item()), 'taun': float(vsa_tau[-1].item()),
+                    'ratio': float(vsa_tau[-1].item() / vsa_tau[0].item()),
+                    'tau_l_dev': float(td.mean().item()), 'tau_l_std': float(td.std().item()),
+                    'b_d': (float(b_d.mean().item()), float(b_d.min().item()), float(b_d.max().item())) if b_d is not None else None,
+                    'b_i': (float(b_i.mean().item()), float(b_i.min().item()), float(b_i.max().item())) if b_i is not None else None}
     print(f'\nVSA TAU: tau[0]={vsa_tau[0].item():.2f}  tau[-1]={vsa_tau[-1].item():.2f}  '
           f'ratio={vsa_tau[-1].item() / vsa_tau[0].item():.1f}x  '
           f'tau_l_dev={td.mean().item():.4f} (std {td.std().item():.4f})')
@@ -125,6 +177,7 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
     print('\nMIRROR INTERNALS (L0, mid, last) — ВСЕ параметры зеркала:')
     for i in (0, len(model.layers) // 2, len(model.layers) - 1):
         m = model.layers[i].mirror
+        lrow = {'layer': i, 'params': []}
         print(f'  L{i}:')
         for attr, t in m.named_parameters():
             t = t.data
@@ -134,32 +187,68 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
                 info += f' vals={[round(v, 3) for v in t.flatten().tolist()]}'
             elif attr == 'tanh_bias':
                 info += f' min={t.min().item():.4f} max={t.max().item():.4f}'
+            lrow['params'].append({'name': attr, 'shape': list(t.shape),
+                                   'mean': float(t.mean().item()), 'std': float(stdv),
+                                   'min': float(t.min().item()), 'max': float(t.max().item())})
             print(f'    {attr:18s}: {info}')
+        st['mirror'].append(lrow)
 
     lm = getattr(model, 'lm_head', None)
     if lm is not None:
         print('\nLM HEAD:')
         for name, p in lm.named_parameters():
-            print(f'  {name:24s}: shape={list(p.data.shape)} mean={p.data.mean().item():.6f} '
-                  f'std={p.data.std().item():.6f}')
+            d = p.data
+            st['lm_head'].append({'name': name, 'shape': list(d.shape),
+                                  'mean': float(d.mean().item()), 'std': float(d.std().item())})
+            print(f'  {name:24s}: shape={list(d.shape)} mean={d.mean().item():.6f} '
+                  f'std={d.std().item():.6f}')
 
-    all_vals = torch.cat([p.data.flatten() for p in model.parameters()])
-    print(f'\nTENSORS: {all_vals.numel()} scalars | mean={all_vals.mean().item():.6f} '
-          f'std={all_vals.std().item():.6f} | min={all_vals.min().item():.6f} '
-          f'max={all_vals.max().item():.6f}')
+    params = list(model.parameters())
+    numel = 0
+    s_sum = torch.zeros((), dtype=torch.float64)
+    s_sq = torch.zeros((), dtype=torch.float64)
+    t_min = float('inf')
+    t_max = float('-inf')
+    n_nan = n_inf = 0
+    sample = []
+    SAMPLE_CAP = 2_000_000
+    cap_per = max(1, SAMPLE_CAP // max(len(params), 1))
+    for p in params:
+        d = p.data
+        f = d.detach().float().flatten()
+        n = f.numel()
+        if n == 0:
+            continue
+        numel += n
+        s_sum += f.sum(dtype=torch.float64)
+        s_sq += (f * f).sum(dtype=torch.float64)
+        if numel - n == 0:
+            t_min = float(d.min())
+            t_max = float(d.max())
+        else:
+            t_min = min(t_min, float(d.min()))
+            t_max = max(t_max, float(d.max()))
+        n_nan += int(torch.isnan(d).sum())
+        n_inf += int(torch.isinf(d).sum())
+        stride = max(1, n // cap_per)
+        sample.append(f[::stride] if stride > 1 else f)
+    mean = (s_sum / numel).item()
+    std = max(float(s_sq / numel) - mean * mean, 0.0) ** 0.5
+    st['tensors'] = {'numel': numel, 'mean': mean, 'std': std, 'min': t_min, 'max': t_max,
+                     'nan': n_nan, 'inf': n_inf, 'quantiles': []}
+    print(f'\nTENSORS: {numel} scalars | mean={mean:.6f} '
+          f'std={std:.6f} | min={t_min:.6f} '
+          f'max={t_max:.6f}')
     q = torch.tensor([0.01, 0.1, 0.5, 0.9, 0.99])
     try:
-        if all_vals.numel() > 10_000_000:
-            # Subsample for large tensors to avoid torch.quantile crash
-            indices = torch.randperm(all_vals.numel())[:10_000_000]
-            quants = torch.quantile(all_vals[indices], q)
-        else:
-            quants = torch.quantile(all_vals, q)
+        all_vals = torch.cat(sample)
+        quants = torch.quantile(all_vals, q)
+        st['tensors']['quantiles'] = [(round(qi * 100), float(qv)) for qi, qv in zip(q.tolist(), quants.tolist())]
         print('  quantiles: ' + '  '.join(f'Q{qi * 100:3.0f}={qv:.6f}'
                                            for qi, qv in zip(q.tolist(), quants.tolist())))
     except Exception:
         pass
-    print(f'  NaN: {int(torch.isnan(all_vals).sum())}  Inf: {int(torch.isinf(all_vals).sum())}')
+    print(f'  NaN: {n_nan}  Inf: {n_inf}')
 
     print('\nALL PARAMETERS (grouped по шаблону имени — ВСЕ, вкл. новые):')
     for g in _grouped_param_stats(model):
@@ -168,11 +257,16 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
 
     if model.explicit_reasoning:
         g = getattr(model, '_reasoning_gates', None)
+        st['reasoning'] = {'enabled_step': model.reasoning_enabled_step,
+                           'scale': float(model.reasoning_scale),
+                           'gates': [round(float(x), 4) for x in g] if g is not None else []}
         print(f'\nREASONING: enabled_step={model.reasoning_enabled_step} '
               f'scale={model.reasoning_scale:.4f}  last gates={g}')
 
     if model.layers[0].mirror._has_private_mem:
-        run_inspector(model)
+        st['inspector'] = run_inspector(model)
+
+    return st
 
 
 # ─────────────────────────── INSPECTOR (private memory) ───────────────────────────
@@ -180,28 +274,44 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
 def run_inspector(model):
     m0 = model.layers[0].mirror
     w = torch.softmax(m0._signal_log_weights, dim=0)
+    sig = {'temp': float(w[0].item()), 'pred': float(w[1].item()),
+           'smooth': float(w[2].item()), 'sym': float(w[3].item()),
+           'help': float(w[4].item())}
+    insp = {'signals': sig, 'w_help': float(torch.sigmoid(m0.w_help).mean().item()),
+            'w_contra': float(m0.w_contra.mean().item()),
+            'concept_sim': None, 'behavior_div': None, 'trust': None,
+            'dominance': None, 'isolation': None, 'contra_expert': None,
+            'pm_step': None}
     print('\nINSPECTOR (private memory):')
-    print(f'  signals: ' + '  '.join(f'{n}={w[i].item():.3f}'
-                                     for i, n in enumerate(['temp', 'pred', 'smooth', 'sym', 'help'])))
+    print(f'  signals: ' + '  '.join(f'{n}={v:.3f}' for n, v in sig.items()))
     print(f'  w_help(sigmoid)={torch.sigmoid(m0.w_help).mean().item():.3f}  '
           f'w_contra={m0.w_contra.mean().item():.4f}')
     if m0._concept_sim_ema is not None:
         cs = m0._concept_sim_ema
+        insp['concept_sim'] = {'mean': float(cs.mean().item()), 'std': float(cs.std().item()),
+                               'diag': float(cs.diag().mean().item())}
         print(f'  concept_sim: mean={cs.mean().item():.4f} std={cs.std().item():.4f} '
               f'diag={cs.diag().mean().item():.4f}')
     if m0._behavior_div_ema is not None:
+        insp['behavior_div'] = float(m0._behavior_div_ema.mean().item())
         print(f'  behavior_div: {m0._behavior_div_ema.mean().item():.4f}')
     if m0._trust_matrix is not None:
         tr = m0._trust_matrix
+        insp['trust'] = {'mean': float(tr.mean().item()), 'diag': float(tr.diag().mean().item())}
         print(f'  trust: mean={tr.mean().item():.4f} diag={tr.diag().mean().item():.4f}')
     if m0._cached_dominance is not None:
+        insp['dominance'] = [round(float(x), 3) for x in m0._cached_dominance.tolist()]
         print(f'  dominance: {[round(x, 3) for x in m0._cached_dominance.tolist()]}')
     if m0._cached_isolation is not None:
+        insp['isolation'] = [round(float(x), 3) for x in m0._cached_isolation.tolist()]
         print(f'  isolation: {[round(x, 3) for x in m0._cached_isolation.tolist()]}')
     if m0._cached_contra_expert is not None:
+        insp['contra_expert'] = [round(float(x), 3) for x in m0._cached_contra_expert.tolist()]
         print(f'  contra_expert: {[round(x, 3) for x in m0._cached_contra_expert.tolist()]}')
-    if hasattr(m0, '_pm_step'):
+    if hasattr(m0, '_pm_write_delay') and hasattr(m0, '_pm_step'):
+        insp['pm_step'] = int(m0._pm_step.item())
         print(f'  pm_step: {int(m0._pm_step.item())}/{m0._pm_write_delay}')
+    return insp
 
 
 def _grouped_param_stats(model):
@@ -396,6 +506,7 @@ def run_wake(model, ckpt):
 
 # ─────────────────────────── LIVE ───────────────────────────
 
+@torch.no_grad()
 def run_live(model, cfg, batch=1, seq=128, gradinfo=True):
     device = 'cpu'
     model.to(device)
@@ -495,7 +606,7 @@ def run_live(model, cfg, batch=1, seq=128, gradinfo=True):
     grad_info = None
     if gradinfo:
         try:
-            grad_info = run_grad_info(model, ls, aux)
+            grad_info = run_grad_info(model, cfg, seq=min(seq, 16))
         except Exception as e:
             print(f'  [warn] grad info: {e}')
 
@@ -743,62 +854,97 @@ def run_anomaly(live, wake, ckpt):
 
 # ─────────────────────────── GRAD INFO ───────────────────────────
 
-def _grad_cos(params, map_a, map_b):
-    """Proper cosine similarity of two gradient sets, computed over the params
-    that have BOTH gradients (None entries from ``allow_unused`` are skipped).
-
-    Returns ``(cos, ||a||, ||b||, <a,b>)`` where ``<a,b> = Σ_p g_a·g_b`` is the
-    true dot product (NOT a sum of squared norms)."""
-    a2 = b2 = dot = 0.0
+def _chunk_params(params, max_bytes=96 * 1024 * 1024):
+    chunks, cur, acc = [], [], 0
     for p in params:
-        ga = map_a.get(id(p))
-        gb = map_b.get(id(p))
-        if ga is None or gb is None:
-            continue
-        ga = ga.flatten().float()
-        gb = gb.flatten().float()
-        a2 += float((ga * ga).sum())
-        b2 += float((gb * gb).sum())
-        dot += float((ga * gb).sum())
-    na, nb = math.sqrt(a2), math.sqrt(b2)
-    return (dot / (na * nb)) if na > 0 and nb > 0 else 0.0, na, nb, dot
+        sz = p.numel() * p.element_size()
+        if cur and acc + sz > max_bytes:
+            chunks.append(cur)
+            cur, acc = [], 0
+        cur.append(p)
+        acc += sz
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
-def run_grad_info(model, ce_loss, aux):
+def run_grad_info(model, cfg, seq=16):
+    """GRAD INFO на крошечном forward (SEQ мал и память-лёгкий).
+
+    Основной forward анализатора идёт ВНЕ автограда (no_grad), поэтому
+    здесь делаем отдельный grad-прогон на seq<=16 токенов. Градиенты CE и
+    diversity считаются по ОДНОМУ графу и накапливаются попараметно по чанкам:
+    пиковая память ~ граф + 1 чанк градиентов вместо двух полных наборов
+    (2×723M×4B ≈ 5.8GB). Автограф по всем 24 слоям всё равно нужен, но при
+    seq=16 он мизерный."""
+    import gc
     sec('GRAD INFO: dead_pred + cos_sim(diversity, CE)')
     info = {'dead_pred': None, 'cos_global': None, 'cos_l16': None,
             'scale': None, 'n_ce': None, 'n_div': None}
-    pred = aux.get('pred')
-    if pred is None:
-        info['dead_pred'] = True
-        print('  pred: МЁРТВЫЙ — отсутствует в aux (pred_k/hp детачатся в _pred_cache), '
-              'градиента НЕ даёт')
-    else:
-        dead = not (isinstance(pred, torch.Tensor) and pred.requires_grad)
-        info['dead_pred'] = dead
-        print(f'  pred: aux={pred.item():.4f} requires_grad={pred.requires_grad}'
-              + (' → БЕЗ ГРАДИЕНТА (dead)' if dead else ''))
+    try:
+        # run_live вызывается под @torch.no_grad(); тут возвращаем градиенты,
+        # чтобы forward и autograd.grad считали настоящие градиенты.
+        with torch.enable_grad():
+            params = list(model.parameters())
+            x = torch.randint(0, cfg.vocab, (1, seq), device='cpu')
+            tgt = torch.randint(1, cfg.vocab, (1, seq), device='cpu')
+            h = model.embed_tokens(x)
+            h_out, _, _, _ = model(h, tokens=x)
+            ls, aux = model.compute_losses(h_out[:, :-1], tgt[:, 1:])
 
-    div = aux.get('diversity')
-    if isinstance(div, torch.Tensor) and div.requires_grad:
-        div_grads = torch.autograd.grad(div, model.parameters(), retain_graph=True,
-                                        allow_unused=True)
-        ce_grads = torch.autograd.grad(ce_loss, model.parameters(), allow_unused=True)
-        map_ce = {id(p): g for p, g in zip(model.parameters(), ce_grads)}
-        map_div = {id(p): g for p, g in zip(model.parameters(), div_grads)}
-        cos, n_ce, n_div, dot = _grad_cos(model.parameters(), map_ce, map_div)
-        cos16, n_ce16, n_div16, _ = _grad_cos(model.layers[16].parameters(), map_ce, map_div)
-        scale = max(0.0, min(10.0, cos)) * n_ce / max(n_div, 1e-8)
-        info.update(cos_global=cos, cos_l16=cos16, scale=scale,
-                    n_ce=n_ce, n_div=n_div, diversity_aux=div.item())
-        print(f'  diversity aux={div.item():.3f}')
-        print(f'  ||gCE||={n_ce:.3e}  ||gDIV||={n_div:.3e}')
-        print(f'  cos_sim(diversity, CE): global={cos:.4f}  L16={cos16:.4f}')
-        print(f'  scale(align) = cos·||CE||/||DIV|| = {scale:.4f} (cap 10)')
-        if cos < 0.2:
-            print('  [WATCH] diversity слабо выровнен с CE — её градиент почти не добавляется')
-    else:
-        print('  diversity: не требует градиента или отсутствует — пропущено')
+        pred = aux.get('pred')
+        if pred is None:
+            info['dead_pred'] = True
+            print('  pred: МЁРТВЫЙ — отсутствует в aux (pred_k/hp детачатся в _pred_cache), '
+                  'градиента НЕ даёт')
+        else:
+            dead = not (isinstance(pred, torch.Tensor) and pred.requires_grad)
+            info['dead_pred'] = dead
+            print(f'  pred: aux={pred.item():.4f} requires_grad={pred.requires_grad}'
+                  + (' → БЕЗ ГРАДИЕНТА (dead)' if dead else ''))
+
+        div = aux.get('diversity')
+        if isinstance(div, torch.Tensor) and div.requires_grad:
+            l16_set = set(id(p) for p in model.layers[16].parameters()) \
+                if len(model.layers) > 16 else None
+            a2 = b2 = dot = 0.0
+            a2l = b2l = dotl = 0.0
+            chunks = _chunk_params(params)
+            for k, grp in enumerate(chunks):
+                keep = k < len(chunks) - 1
+                gce = torch.autograd.grad(ls, grp, retain_graph=keep, allow_unused=True)
+                gdv = torch.autograd.grad(div, grp, retain_graph=keep, allow_unused=True)
+                for p, g1, g2 in zip(grp, gce, gdv):
+                    if g1 is None or g2 is None:
+                        continue
+                    f1 = g1.flatten().float()
+                    f2 = g2.flatten().float()
+                    a2 += float((f1 * f1).sum())
+                    b2 += float((f2 * f2).sum())
+                    dot += float((f1 * f2).sum())
+                    if l16_set is not None and id(p) in l16_set:
+                        a2l += float((f1 * f1).sum())
+                        b2l += float((f2 * f2).sum())
+                        dotl += float((f1 * f2).sum())
+                del gce, gdv
+            del x, tgt, h, h_out, ls
+            gc.collect()
+            n_ce, n_div = math.sqrt(a2), math.sqrt(b2)
+            cos = (dot / (n_ce * n_div)) if n_ce > 0 and n_div > 0 else 0.0
+            cos16 = (dotl / (a2l ** 0.5 * b2l ** 0.5)) if a2l > 0 and b2l > 0 else 0.0
+            scale = max(0.0, min(10.0, cos)) * n_ce / max(n_div, 1e-8)
+            info.update(cos_global=cos, cos_l16=cos16, scale=scale,
+                        n_ce=n_ce, n_div=n_div, diversity_aux=div.item())
+            print(f'  diversity aux={div.item():.3f}')
+            print(f'  ||gCE||={n_ce:.3e}  ||gDIV||={n_div:.3e}')
+            print(f'  cos_sim(diversity, CE): global={cos:.4f}  L16={cos16:.4f}')
+            print(f'  scale(align) = cos·||CE||/||DIV|| = {scale:.4f} (cap 10)')
+            if cos < 0.2:
+                print('  [WATCH] diversity слабо выровнен с CE — её градиент почти не добавляется')
+        else:
+            print('  diversity: не требует градиента или отсутствует — пропущено')
+    except Exception as e:
+        print(f'  [warn] grad info: {e}')
     return info
 
 
@@ -814,8 +960,9 @@ def run_bridge(model, cfg, batch=1, seq=128):
         return None
     model.train()
     x = torch.randint(0, cfg.vocab, (batch, seq), device='cpu')
-    h = model.embed_tokens(x)
-    out, _, _, _ = model(h)                       # заполняет _intent_stream, _last_bus
+    with torch.no_grad():
+        h = model.embed_tokens(x)
+        out, _, _, _ = model(h)                   # заполняет _intent_stream, _last_bus
     B, L, D = out.shape
 
     # --- Salience из РЕАЛЬНОГО выхода головы ---
@@ -1190,7 +1337,8 @@ def _hue(v, vmin, vmax):
     return 120 * (1.0 - t)
 
 
-def save_html_report(ckpt, cfg, model, wake, live, head, anomaly=None, bridge=None, metacog=None):
+def save_html_report(ckpt, cfg, model, wake, live, head, anomaly=None, bridge=None, metacog=None,
+                     static=None):
     import html as H
     path = ckpt.get('_path', '?')
     step = ckpt.get('step', '?')
@@ -1219,6 +1367,7 @@ def save_html_report(ckpt, cfg, model, wake, live, head, anomaly=None, bridge=No
     ch.append('<title>EVA report step ' + str(step) + '</title><style>')
     ch.append('''body{background:#0d1117;color:#c9d1d9;font:14px/1.5 Consolas,monospace;margin:24px}
 h1{font-size:20px;color:#f0f6fc}h2{font-size:16px;color:#79c0ff;border-bottom:1px solid #30363d;padding-bottom:4px;margin-top:28px}
+h3{font-size:13px;color:#79c0ff;margin-top:16px;margin-bottom:4px}
 .cards{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 14px;min-width:110px}
 .card b{display:block;font-size:18px;color:#f0f6fc}.card span{font-size:11px;color:#8b949e;text-transform:uppercase}
@@ -1274,6 +1423,104 @@ td:first-child,th:first-child{text-align:left}
         ch.append(f'<div class="card"><b>{bridge["stencil_w_norm"]:.4f}</b><span>stencil ‖W‖</span></div>')
         ch.append(f'<div class="card"><b>{bridge["alpha"][-1]:.4f}</b><span>intent α[-1]</span></div>')
     ch.append('</div>')
+
+    if static is not None:
+        ch.append('<h2>STATIC</h2>')
+        ch.append(f'<div class="dim">file={H.escape(static.get("file", "?"))} &nbsp; '
+                  f'step={static.get("step", "?")} &nbsp; best_val={static.get("best_val", "?")} '
+                  f'&nbsp; missing={len(static.get("missing", []))} '
+                  f'unexpected={len(static.get("unexpected", []))}</div>')
+        if static.get('config'):
+            ch.append('<h3>CONFIG</h3><table><tr><th>param</th><th>value</th></tr>')
+            for k, v in static['config']:
+                ch.append(f'<tr><td>{H.escape(str(k))}</td><td>{H.escape(str(v))}</td></tr>')
+            ch.append('</table>')
+        if static.get('param_groups'):
+            ch.append('<h3>PARAM GROUPS (LR multipliers)</h3>')
+            ch.append('<table><tr><th>lr</th><th>wd</th><th>n_params</th></tr>')
+            for g in static['param_groups']:
+                ch.append(f'<tr><td>{g["lr"]:.6f}</td><td>{g["wd"]:.4f}</td><td>{g["n"]}</td></tr>')
+            ch.append('</table>')
+        if static.get('per_layer'):
+            ch.append('<h3>PER-LAYER (params, без forward)</h3>')
+            ch.append('<table><tr><th>L</th><th>alpha</th><th>|1-a|</th><th>ls_std</th>'
+                      '<th>w_help</th><th>skip</th><th>scale_w</th><th>conv_std</th>'
+                      '<th>pm_norm</th></tr>')
+            for r in static['per_layer']:
+                ch.append(f'<tr><td>{r["layer"]}</td><td>{r["alpha"]:.4f}</td>'
+                          f'<td>{r["a1"]:.4f}</td><td>{r["ls_std"]:.4f}</td>'
+                          f'<td>{r["w_help"]:.4f}</td><td>{r["skip"]:.4f}</td>'
+                          f'<td>{r["scale_w"]:.4f}</td><td>{r["conv_std"]:.4f}</td>'
+                          f'<td>{r["pm_norm"]:.3f}</td></tr>')
+            ch.append('</table>')
+        if static.get('vsatau'):
+            vt = static['vsatau']
+            ch.append('<h3>VSA TAU</h3><div class="dim">'
+                      f'tau[0]={vt["tau0"]:.2f} &nbsp; tau[-1]={vt["taun"]:.2f} &nbsp; '
+                      f'ratio={vt["ratio"]:.1f}x &nbsp; tau_l_dev={vt["tau_l_dev"]:.4f} '
+                      f'(std {vt["tau_l_std"]:.4f})')
+            if vt.get('b_d'):
+                b = vt['b_d']
+                ch.append(f'<br>b_d: mean={b[0]:.4f} range=[{b[1]:.4f}, {b[2]:.4f}]')
+            if vt.get('b_i'):
+                b = vt['b_i']
+                ch.append(f'<br>b_i: mean={b[0]:.4f} range=[{b[1]:.4f}, {b[2]:.4f}]')
+            ch.append('</div>')
+        if static.get('mirror'):
+            ch.append('<h3>MIRROR INTERNALS (L0, mid, last) — ВСЕ параметры зеркала</h3>')
+            for row in static['mirror']:
+                ch.append(f'<div class="dim">L{row["layer"]}:</div>')
+                ch.append('<table><tr><th>param</th><th>shape</th><th>mean</th><th>std</th>'
+                          '<th>min</th><th>max</th></tr>')
+                for p in row['params']:
+                    ch.append(f'<tr><td>{H.escape(p["name"])}</td><td>{p["shape"]}</td>'
+                              f'<td>{p["mean"]:.4f}</td><td>{p["std"]:.4f}</td>'
+                              f'<td>{p["min"]:.4f}</td><td>{p["max"]:.4f}</td></tr>')
+                ch.append('</table>')
+        if static.get('lm_head'):
+            ch.append('<h3>LM HEAD</h3>')
+            ch.append('<table><tr><th>name</th><th>shape</th><th>mean</th><th>std</th></tr>')
+            for p in static['lm_head']:
+                ch.append(f'<tr><td>{H.escape(p["name"])}</td><td>{p["shape"]}</td>'
+                          f'<td>{p["mean"]:.6f}</td><td>{p["std"]:.6f}</td></tr>')
+            ch.append('</table>')
+        if static.get('tensors'):
+            t = static['tensors']
+            ch.append('<h3>TENSORS</h3><div class="dim">'
+                      f'{t["numel"]} scalars &nbsp; mean={t["mean"]:.6f} &nbsp; '
+                      f'std={t["std"]:.6f} &nbsp; min={t["min"]:.6f} &nbsp; '
+                      f'max={t["max"]:.6f} &nbsp; NaN={t["nan"]} &nbsp; Inf={t["inf"]}</div>')
+            if t.get('quantiles'):
+                ch.append('<div class="dim">' + '  '.join(
+                    f'Q{q}={v:.6f}' for q, v in t['quantiles']) + '</div>')
+        if static.get('reasoning'):
+            r = static['reasoning']
+            ch.append('<h3>REASONING</h3><div class="dim">'
+                      f'enabled_step={r["enabled_step"]} &nbsp; scale={r["scale"]:.4f} &nbsp; '
+                      f'last gates={r["gates"]}</div>')
+        if static.get('inspector'):
+            ins = static['inspector']
+            ch.append('<h3>INSPECTOR (private memory)</h3>')
+            ch.append('<div class="dim">signals: ' + '  '.join(
+                f'{n}={v:.3f}' for n, v in ins['signals'].items()) + '</div>')
+            ch.append(f'<div class="dim">w_help(sigmoid)={ins["w_help"]:.3f} &nbsp; '
+                      f'w_contra={ins["w_contra"]:.4f}</div>')
+            if ins.get('concept_sim'):
+                cs = ins['concept_sim']
+                ch.append(f'<div class="dim">concept_sim: mean={cs["mean"]:.4f} '
+                          f'std={cs["std"]:.4f} diag={cs["diag"]:.4f}</div>')
+            if ins.get('behavior_div') is not None:
+                ch.append(f'<div class="dim">behavior_div: {ins["behavior_div"]:.4f}</div>')
+            if ins.get('trust'):
+                tr = ins['trust']
+                ch.append(f'<div class="dim">trust: mean={tr["mean"]:.4f} '
+                          f'diag={tr["diag"]:.4f}</div>')
+            for key, label in (('dominance', 'dominance'), ('isolation', 'isolation'),
+                               ('contra_expert', 'contra_expert')):
+                if ins.get(key):
+                    ch.append(f'<div class="dim">{label}: {ins[key]}</div>')
+            if ins.get('pm_step') is not None:
+                ch.append(f'<div class="dim">pm_step: {ins["pm_step"]}</div>')
 
     ch.append('<h2>WAKE DETECTOR</h2>')
     for line in wake['report']:
@@ -1528,7 +1775,7 @@ def main():
     tok = None
     if not args.no_head and not args.quick:
         try:
-            from generate import load_russian_tokenizer
+            from scripts.generate import load_russian_tokenizer
             tok = load_russian_tokenizer()
         except Exception as e:
             print(f'[warn] токенизатор недоступен ({e}), head-анализ пропущен')
@@ -1544,8 +1791,9 @@ def main():
             continue
         ckpt['_path'] = path
         models[path] = (model, ckpt)
+        static_data = None
         try:
-            run_static(ckpt, cfg, model, missing, unexpected, tok)
+            static_data = run_static(ckpt, cfg, model, missing, unexpected, tok)
         except Exception as e:
             print(f'[error] static: {e}')
         try:
@@ -1586,7 +1834,8 @@ def main():
                 metacog = None
             try:
                 save_html_report(ckpt, cfg, model, wake_data, live_data, head_data,
-                                 anomaly_data, bridge_data, metacog=metacog)
+                                 anomaly_data, bridge_data, metacog=metacog,
+                                 static=static_data)
             except Exception as e:
                 print(f'[error] html: {e}')
 
