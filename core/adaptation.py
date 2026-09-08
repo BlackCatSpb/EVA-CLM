@@ -479,7 +479,10 @@ class GradientClipper:
             # Skip near-zero-init params (‖θ‖≈0): AGC would otherwise set
             # g ← g·(c·‖θ‖/(‖g‖+eps)) = 0, permanently killing zero-init modules
             # (Intent Bridge w_intent/b_intent/w_sal, _tau_l_dev).
-            # These can't explode, so they need no clipping until they grow.
+            # NOTE: zero-init params CAN explode once they grow past eps (run A2:
+            # ‖w_intent‖→62k → gate blow-up, loss 3.8e22). They are now bounded
+            # in-core: mirror.py uses weight-normalized w_intent/(1+‖w_intent‖_row)
+            # with a τ-tied amplitude, so skipping AGC here is safe for them.
             if p_norm < self.eps:
                 continue
             if g_norm > c_eff * p_norm:

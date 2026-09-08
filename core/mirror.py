@@ -693,7 +693,22 @@ class GroupedCognitiveMirror(nn.Module):
         if intent is not None and self._intent_bridge:
             # intent is the per-head stream already in (…,G,k) expert space.
             ik = intent
-            intent_gate = torch.einsum('blgk,gk->blg', hp - ik, self.w_intent) + self.b_intent
+            # U-τ: bounded + τ-tied intent authority (fix for w_intent runaway).
+            # Raw w_intent is zero-init and excluded from AGC while ‖w‖<eps, so
+            # nothing bounded it: gate→output→hp→gate positive feedback drove
+            # ‖w_intent‖ to ~62k and gate_logits to blow up (loss 3.8e22, A2).
+            #   1) weight-norm bound w_intent → w/(1+‖w‖_row): contribution ~
+            #      O(‖hp−ik‖) at ALL magnitudes; ≈ w·(hp−ik) while small (init
+            #      behaviour unchanged), saturates as ‖w‖ grows; gradient alive.
+            #   2) b_intent bounded the same way (bias could saturate the sigmoid).
+            #   3) τ-tied amplitude: intent authority scales with the layer's
+            #      τ-field, same form as intent_alpha/LBG tau; floor 0.25 keeps
+            #      gradient flowing even on shallow (τ_norm→0) layers.
+            wn = self.w_intent / (1.0 + self.w_intent.norm(dim=1, keepdim=True))
+            bb = self.b_intent / (1.0 + self.b_intent.abs().max())
+            intent_gate = torch.einsum('blgk,gk->blg', hp - ik, wn) + bb
+            if self._tau_norm_layer is not None:
+                intent_gate = intent_gate * (0.25 + 0.75 * self._tau_norm_layer)
             gate_logits = gate_logits + intent_gate
         # Salience (word importance from output) -> per-expert gate bias.
         if salience is not None and self._intent_bridge:
@@ -711,7 +726,9 @@ class GroupedCognitiveMirror(nn.Module):
                     reps = Lg - salience.shape[1]
                     last = salience[:, -1:, :].expand(-1, reps, -1)
                     salience = torch.cat([salience, last], dim=1)
-            gate_logits = gate_logits + salience * self.w_sal.view(1, 1, -1)
+            # U-τ: w_sal bounded the same way (zero-init, second unbounded door).
+            ws = self.w_sal / (1.0 + self.w_sal.abs().max())
+            gate_logits = gate_logits + salience * ws.view(1, 1, -1)
         # Contradiction signal: expert vs collective disagreement opens gate (arbiter)
         if self._has_private_mem:
             gate_logits = gate_logits + disagreement * self.w_contra.unsqueeze(0).unsqueeze(0)
