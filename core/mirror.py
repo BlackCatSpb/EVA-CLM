@@ -156,6 +156,11 @@ class GroupedCognitiveMirror(nn.Module):
         # self._intent_alpha = 1 − exp(−τ_l / τ_min)).
         self.register_buffer('_ig_norm_ema', torch.ones(G), persistent=False)
         self.register_buffer('_ctr_norm_ema', torch.ones(G), persistent=False)
+        # Behavioural-divergence tracker + its self-reference: feeds the τ-aware
+        # differentiation signal (mirror_lstats) with a live, gradient-driven
+        # metric even when log_scale is frozen.
+        self.register_buffer('_div_run', torch.zeros(1), persistent=False)
+        self.register_buffer('_div_run_rec', torch.ones(1), persistent=False)
         if expert_asymmetry and G > 1:
             ls_vals = [math.log(0.05 * (1.5 ** g)) for g in range(G)]
             ls_base: torch.Tensor = torch.tensor(ls_vals).unsqueeze(1).expand(G, self.d)
@@ -483,6 +488,10 @@ class GroupedCognitiveMirror(nn.Module):
                 behavior_sim = hp_n @ hp_n.T
                 behavior_div = 1.0 - behavior_sim
                 self._behavior_div_ema.mul_(0.99).add_(behavior_div, alpha=0.01)
+                self._div_run.mul_(0.99).add_(self._behavior_div_ema.mean().detach(), alpha=0.01)
+                rec = self._div_run_rec.item()
+                self._div_run_rec.mul_(0.99).add_(
+                    (self._behavior_div_ema.mean() / max(rec, 1e-8)).detach(), alpha=0.01)
                 trust_weights = attn.mean(dim=(0, 1))
                 if self._meta_trust and self._has_private_mem:
                     self._prev_trust_matrix.copy_(self._trust_matrix)
@@ -738,6 +747,11 @@ class GroupedCognitiveMirror(nn.Module):
                     rms = ig.pow(2).mean(dim=(0, 1)).sqrt()          # (G,)
                     self._ig_norm_ema.mul_(0.99).add_(rms, alpha=0.01)
             ig = ig / (self._ig_norm_ema.unsqueeze(0).unsqueeze(0) + 1e-8)
+            # Effective gate amplitude (measurement, not a control): ~1.0 healthy,
+            # insensitive to the raw ‖w_intent‖ growth — replaces intent_w as the
+            # actionable stability metric.
+            with torch.no_grad():
+                self._cached_ig_eff = float(ig.abs().mean().item() * self._intent_alpha)
             gate_logits = gate_logits + ig * self._intent_alpha
         # Contradiction signal: expert vs collective disagreement opens gate.
         # Same pattern as the intent bridge: running-RMS normalization + τ-authority

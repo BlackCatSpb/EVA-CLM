@@ -339,104 +339,13 @@ class LRController:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Failure detector — statistical divergence (replaces ce > 15.0)
+# Failure detection & loss balancing live in core/training_control.py:
+#   - `FailureDetector` — multi-signal statistical SPC k·sigma rule
+#     (CE + diversity + gate_mean + mlp_out + effective gate amplitude),
+#     live after the EMA half-life bootstrap (not a hand-picked warmup).
+#   - `LossBalancer` — spectral alignment (PCGrad) with NO align_cap:
+#     the cos-projection already bounds the aux gradient by ||g_CE||.
 # ─────────────────────────────────────────────────────────────────────────────
-
-class FailureDetector:
-    """Roll back to ``best.pt`` + fresh Adam + LR rewind on a *statistical*
-    CE explosion (SPC 3σ rule)."""
-
-    def __init__(self, model: torch.nn.Module, lr_controller: LRController,
-                 make_optimizer_fn: Callable[[float], torch.optim.Optimizer],
-                 best_path: str,
-                 base_lr: float, k_sigma: float = 3.0, warmup: int = 2000,
-                 recover_max: int = 20, cooldown: int = 50,
-                 min_consecutive: int = 3) -> None:
-        self.model: torch.nn.Module = model
-        self.lr_controller: LRController = lr_controller
-        self.make_optimizer_fn: Callable[[float], torch.optim.Optimizer] = make_optimizer_fn
-        self.best_path: str = best_path
-        self.base_lr: float = float(base_lr)
-        self.k_sigma: float = float(k_sigma)
-        self.warmup: int = int(warmup)
-        self.recover_max: int = int(recover_max)
-        self.cooldown: int = int(cooldown)
-        self.min_consecutive: int = int(min_consecutive)
-        self._cooldown: int = 0
-        self._ce_ema: Optional[float] = None
-        self._ce_var: Optional[float] = None
-        self._prev_ce: Optional[float] = None
-        self._viol: int = 0
-        self.recover_count: int = 0
-        self.optimizer: Optional[torch.optim.Optimizer] = None
-
-    def check(self, ce: float, step: int) -> bool:
-        ce = float(ce)
-        if self._ce_ema is None:
-            self._ce_ema = ce
-            self._ce_var = 0.0
-            self._prev_ce = ce
-            return False
-        # short-memory EMA (CE is noisy per-step): ~100-step half-life.
-        a = 0.99
-        self._ce_ema = a * self._ce_ema + (1 - a) * ce
-        self._ce_var = a * self._ce_var + (1 - a) * (ce - self._ce_ema) ** 2
-        std = math.sqrt(self._ce_var) + 1e-8
-        rising = ce > (self._prev_ce if self._prev_ce is not None else ce)
-        self._prev_ce = ce
-
-        if step < self.warmup or self._cooldown > 0:
-            if self._cooldown > 0:
-                self._cooldown -= 1
-            return False
-
-        # A single blip is normal early-training noise.  Require a *sustained*
-        # rise: a genuine divergence (e.g. the 12.4 -> 13.1 -> 15.9 -> 35.7
-        # monotonic climb we observed) trips the bound on several consecutive
-        # steps, whereas noise does not.  The bound is a relative outlier test
-        # (cf. Tukey fence): ce must exceed the recent mean by at least
-        # max(k_sigma*sigma, rel_margin*|mean|) so a real jump is caught even
-        # when the EMA variance is still small early on.
-        rel_margin = 0.15
-        bound = self._ce_ema + max(self.k_sigma * std, rel_margin * abs(self._ce_ema))
-        violation = (ce > bound) and rising
-        self._viol = self._viol + 1 if violation else 0
-        if self._viol < self.min_consecutive:
-            return False
-
-        # Genuine divergence confirmed: far above the running mean AND still climbing.
-        if ce > bound and rising:
-            if not os.path.exists(self.best_path):
-                print(f'  [FailureDetector] ce={ce:.2f} spike but no best.pt yet — skipping')
-                self._cooldown = self.cooldown
-                return False
-            bound = self._ce_ema + self.k_sigma * std
-            print(f'  [FailureDetector] CE EXPLOSION ce={ce:.2f} > '
-                  f'mean+{self.k_sigma:.0f}σ={bound:.2f} '
-                  f'at step {step} -> rollback to {self.best_path}')
-            ckpt = torch.load(self.best_path, map_location='cpu')
-            self.model.load_state_dict(ckpt['model'], strict=False)
-            if getattr(self.model, '_active_depth', None) is not None:
-                set_active_depth(self.model, self.model._active_depth)
-            self.recover_count += 1
-            new_opt = self.make_optimizer_fn(self.base_lr)  # fresh Adam (no momentum)
-            self.optimizer = new_opt
-            self.lr_controller.optimizer = new_opt
-            self.lr_controller.rewind()
-            # R6: Invalidate cache on LR-reset (stale cache from old weights)
-            if hasattr(self.model, 'reset_cache'):
-                self.model.reset_cache()
-            del ckpt
-            gc.collect()
-            torch.cuda.empty_cache()
-            self._cooldown = self.cooldown
-            if self.recover_count > self.recover_max:
-                raise RuntimeError(
-                    f'FailureDetector: {self.recover_count} recoveries exceeded '
-                    f'max {self.recover_max}; aborting')
-            return True
-        return False
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Gradient clipping — Adaptive Gradient Clipping (AGC)
@@ -481,144 +390,21 @@ class GradientClipper:
             # (Intent Bridge w_intent/b_intent/w_sal, _tau_l_dev).
             # NOTE: zero-init params CAN explode once they grow past eps (run A2:
             # ‖w_intent‖→62k → gate blow-up, loss 3.8e22). They are now bounded
-            # in-core: mirror.py uses weight-normalized w_intent/(1+‖w_intent‖_row)
-            # with a τ-tied amplitude, so skipping AGC here is safe for them.
+            # in-core: mirror.py divides the gate contribution by a running-RMS
+            # EMA (ig/_ig_norm_ema) and scales it by the τ-tied amplitude
+            # intent_alpha, so a growing ‖w_intent‖ never reaches gate_logits;
+            # skipping AGC here is safe for them.
             if p_norm < self.eps:
                 continue
             if g_norm > c_eff * p_norm:
                 p.grad.mul_(c_eff * p_norm / (g_norm + self.eps))
 
 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Loss balancing — spectral alignment (default) / magnitude balance
+# Re-export (single adaptive module: core/training_control.py)
 # ─────────────────────────────────────────────────────────────────────────────
-
-class LossBalancer:
-    """Combine CE with auxiliary losses WITHOUT per-loss magic weights.
-
-    ``mode='align'`` (default, recommended): spectral gradient projection.
-        aux_total = Σ aux_i  (raw, unweighted)
-        g_aux      = ∇ aux_total
-        cos        = ⟨g_CE, g_aux⟩ / (||g_CE||·||g_aux||)
-        scale      = clamp(cos, 0, cap) · ||g_CE|| / (||g_aux|| + ε)
-        g_final    = g_CE + scale · g_aux
-      Adding aux only along the CE direction, and only when cos>0, *bounds* the
-      aux contribution by ||g_CE|| — aux losses can never hijack the update.
-      This is gradient surgery
-      (PCGrad/Yu et al. 2020); the combined-aux variant keeps it O(1) backward.
-
-    ``mode='balance'``: dimensionless per-aux normalisation by a running EMA of
-      |aux_i|, scaled by an adaptive budget so the aux block tracks |CE|
-      (Kendall & Gal 2018 / GradNorm-style scale invariance).  Returns a scalar
-      loss for a normal ``loss.backward()``.
-    """
-
-    def __init__(self, align: bool = True, align_cap: float = 10.0,
-                 eval_interval: int = 1000) -> None:
-        self.align: bool = bool(align)
-        self.align_cap: float = float(align_cap)
-        self.eval_interval: int = int(eval_interval)
-        # magnitude-balance state
-        self.ema_ce: Optional[float] = None
-        self.ema_aux: Dict[str, float] = {}
-        self.ema_A: Optional[float] = None
-
-    def set_stats(self, eval_interval: int = 1000) -> None:
-        self.eval_interval = int(eval_interval)
-
-    # ---- magnitude-balance helpers ---------------------------------------
-    def _ema_decay(self) -> float:
-        return 1.0 - 1.0 / max(self.eval_interval, 100)
-
-    def _update_balance(self, ce_loss: Any, aux_dict: Dict[str, Any]) -> None:
-        d = self._ema_decay()
-        ce = float(ce_loss.detach().item()) if isinstance(ce_loss, torch.Tensor) else float(ce_loss)
-        if self.ema_ce is None:
-            self.ema_ce = abs(ce) + 1e-8
-        else:
-            self.ema_ce = d * self.ema_ce + (1 - d) * abs(ce)
-        A = 0.0
-        for k, v in aux_dict.items():
-            if not isinstance(v, torch.Tensor):
-                continue
-            val = float(v.detach().item())
-            e = self.ema_aux.get(k)
-            e = abs(val) + 1e-8 if e is None else d * e + (1 - d) * abs(val)
-            self.ema_aux[k] = e
-            A += val / e
-        A = abs(A) + 1e-8
-        if self.ema_A is None:
-            self.ema_A = A
-        else:
-            self.ema_A = d * self.ema_A + (1 - d) * A
-
-    def loss(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any]) -> torch.Tensor:
-        """Scalar loss for logging / ``mode='balance'`` backward."""
-        self._update_balance(ce_loss, aux_dict)
-        total = ce_loss
-        if self.align:
-            return total + sum(v for v in aux_dict.values()
-                               if isinstance(v, torch.Tensor))
-        beta = self.ema_ce / self.ema_A
-        for k, v in aux_dict.items():
-            if not isinstance(v, torch.Tensor):
-                continue
-            total = total + beta * (v / self.ema_aux.get(k, 1e-8))
-        return total
-
-    # ---- spectral-alignment backward -------------------------------------
-    def backward(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any],
-                 parameters: Iterable[torch.nn.Parameter],
-                 retain_graph: bool = False) -> None:
-        """Set ``p.grad`` = g_CE + scale·g_aux (PCGrad-style projection).
-
-        ``parameters``: iterable of model parameters.  Caller must NOT also call
-        ``loss.backward()``.
-        """
-        # Only differentiate w.r.t. parameters that actually require grad.
-        # Progressive unfreezing freezes deep blocks (requires_grad=False);
-        # passing them to autograd.grad as inputs raises
-        # "One of the differentiated Tensors does not require grad".
-        params = [p for p in parameters if p.requires_grad]
-        if not params:
-            ce_loss.backward(retain_graph=retain_graph)
-            return
-        ce_grads = torch.autograd.grad(ce_loss, params, retain_graph=True,
-                                       allow_unused=True)
-        aux_tensors = [v for v in aux_dict.values() if isinstance(v, torch.Tensor)]
-        if not aux_tensors:
-            for p, g in zip(params, ce_grads):
-                p.grad = g.clone() if g is not None else None
-            return
-
-        aux_total = sum(aux_tensors)
-        aux_grads = torch.autograd.grad(aux_total, params, retain_graph=retain_graph,
-                                        allow_unused=True)
-
-        ce_flat, aux_flat = [], []
-        for gce, gau in zip(ce_grads, aux_grads):
-            if gce is not None and gau is not None:
-                ce_flat.append(gce.flatten())
-                aux_flat.append(gau.flatten())
-        if ce_flat:
-            ce_flat = torch.cat(ce_flat)
-            aux_flat = torch.cat(aux_flat)
-            cos = torch.nn.functional.cosine_similarity(
-                ce_flat.unsqueeze(0), aux_flat.unsqueeze(0)).clamp(min=0.0, max=1.0)
-            scale = min(cos.item() * self.align_cap, 1.0) * ce_flat.norm() / (aux_flat.norm() + 1e-8)
-        else:
-            scale = 0.0
-
-        with torch.no_grad():
-            for p, gce, gau in zip(params, ce_grads, aux_grads):
-                if gce is not None:
-                    p.grad = gce.clone()
-                elif gau is not None:
-                    p.grad = torch.zeros_like(p)
-                else:
-                    p.grad = None
-                if gau is not None and scale > 0:
-                    if p.grad is None:
-                        p.grad = gau * scale
-                    else:
-                        p.grad.add_(gau, alpha=scale)
+from .training_control import (   # noqa: F401,E402
+    FailureDetector, LossBalancer, apply_tau_lr, layer_tau_ctx, mirror_lstats,
+)

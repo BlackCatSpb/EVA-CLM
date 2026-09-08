@@ -6,21 +6,20 @@
 - Gate temperatures (diversity vs precision)
 - Intent alpha ladder (свежий vs перенесённый контекст)
 - Memory bank temperatures (L1=быстрый, L3=медленный)
-- LLRD (learning rate по глубине)
+- LLRD (learning rate по глубине) — потребляется apply_tau_lr (training_control)
 
-Формула (v2 — исправлены: dead zone, intent_alpha, tau_norm):
-  log_tau = log(tau_min) + log(tau_max/tau_min) * (lf * (1 + 0.3 * dev) + 0.05)
-  lf(l)  = l / (n_layers - 1)  ∈ [0, 1]
-  dev(l) = tanh(_tau_dev[l])   ∈ [-1, +1]
-  tau_l  = exp(log_tau)
+Производящая формула (накопительная, гарантированная монотонность):
+  inc[l]   = base_inc · softplus(dev[l]) / softplus(0),   base_inc = log(τmax/τmin)/(n−1)
+  logτ_l   = log(τmin) + cumsum(inc)[l],                  τ_l = exp(logτ_l)
+  dev[l]   = _tau_dev[l]  (learnable, через cumsum → τ монотонно растёт)
 
-Из tau_l выводятся ВСЕ остальные τ-зависимые величины:
-  tau_norm_l = (log(tau_l) - log(tau_min)) / (log(tau_max) - log(tau_min))
-  mat_delay_l = T0 + (1 - tau_norm_l) * T_delay
-  gate_tau_l  = tau_max_gate * (tau_min_gate / tau_max_gate) ^ mat_gate_l
-  alpha_l     = 1 - exp(-tau_l / tau_min)   (покрывает [0,1] при tau_min~8)
-  lr_mult_l   = (tau_l / tau_ref) ^ (-gamma)
-  mem_tau_l   = percentiles(tau_l) для memory bank temperatures
+Из τ_l выводятся ВСЕ остальные τ-зависимые величины:
+  tau_norm_l = (log(τ_l) − log(τ_min)) / (log(τ_max) − log(τ_min))   ∈ [0,1]
+  mat_delay_l = T0 + (1 − tau_norm_l) · T_delay
+  gate_tau_l  = exp(log τ_max_gate + (log τ_min_gate − log τ_max_gate) · mat_gate_l)
+  alpha_l     = 1 − exp(−τ_l / τ_min)
+  lr_mult_l   = (τ_l / τ_ref) ^ (−gamma)
+  mem_tau     = перцентили τ_l для memory bank температур
 """
 
 from __future__ import annotations
@@ -29,14 +28,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# Deviation coupling coefficient: how much tanh(dev) modulates log-space increments.
-# With cumsum parameterization: coupling=0.4, dev_max=0.3 → tau range ~8→512 (64x).
-_DEV_COUPLING: float = 0.4
-
-# Additive floor for lf: prevents dead zone at shallow layers.
-# τ_ladder(lf=0) = tau_min * base^(0.05) ≈ tau_min * 1.03 → every layer has gradient.
-_LF_FLOOR: float = 0.05
 
 
 class TauConfig(nn.Module):

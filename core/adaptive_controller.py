@@ -4,6 +4,8 @@ import math
 import torch
 from typing import List, Optional, Tuple
 
+from .training_control import mirror_lstats
+
 
 class AdaptiveController:
     """
@@ -56,12 +58,17 @@ class AdaptiveController:
     """
     @staticmethod
     def layer_stats(layer, expl_thresh: float = 0.296, diff_thresh: float = 0.087) -> Tuple[float, float]:
-        """Per-layer (exploration, differentiation) from a single block."""
-        m = layer.mirror
-        ls = m.log_scale.data
-        var = ls.var().item()
-        mag = m._last_magnitude.item()
-        return min(1.0, mag / expl_thresh), min(1.0, var / diff_thresh)
+        """Per-layer (exploration, differentiation) from a single block.
+
+        Live τ-aware signals (core.training_control.mirror_lstats):
+          exploration      = min(1, |mirror| / λ⁻²)
+          differentiation  = behavioural divergence / its own running mean
+                             (self-referenced, saturating) — replaces the old
+                             var(log_scale)/λ⁻⁴, which froze at 0 whenever
+                             log_scale stopped moving, pinning all per-layer
+                             gains to their conservative bound forever.
+        """
+        return mirror_lstats(layer)
 
     @staticmethod
     def stats(blocks, expl_thresh: float = 0.296, diff_thresh: float = 0.087) -> Tuple[float, float]:
