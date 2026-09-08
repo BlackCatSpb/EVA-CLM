@@ -135,8 +135,19 @@ class FailureDetector:
     baseline (a_slow, half-life ~700):
 
         viol  = value > slow_ema·(1 + rel_margin)   AND   value ≥ prev
+        AND   value ≥ floor          (per-signal healthy-band floor)
 
-    CE additionally under a ``ce_armed`` flag: the run's first ~1k steps show a
+    ``margins``/``floors`` widen the test per signal. Diagnostic magnitudes
+    (mlp_ratio, ig_eff, diversity) are NOT steady independent variables: they
+    ride a healthy ramp across the whole early training (mlp_ratio 1.0→1.9,
+    ig_eff 0.2→1.0) whose trailing slow-EMA lags the current level — a pure
+    relative rule would fire on every leg of the ramp. The floor is the healthy
+    band's ceiling: mlp_ratio>2.0 (safe range tops ~1.9), ig_eff>1.0 (unity =
+    balanced gate use; below it the gate is still calibrating), diversity>0.5.
+    A *runaway* is a value OUTSIDE the band (the polygon sabotage: ig_eff 1.8).
+    The absolute floor double-checks the relative test by discarding
+    pre-calibration levels; CE itself needs no floor (armed post-eval).
+    CE additionally sits under a ``ce_armed`` flag: the run's first ~1k steps show a
     *known benign transient* (CE 66→29→11 across 3 healthy restarts); rolling
     back inside it thrashes the LR. CE joins the watch only after the first
     val eval (the notebook arms it), while protective magnitudes are armed from
@@ -159,7 +170,9 @@ class FailureDetector:
                  best_path: str, base_lr: float, k_sigma: float = 3.0,
                  warmup: int = 2000, recover_max: int = 20,
                  cooldown: int = 50, min_consecutive: int = 3,
-                 ema_decay: float = 0.99) -> None:
+                 ema_decay: float = 0.99,
+                 margins: Optional[Dict[str, float]] = None,
+                 floors: Optional[Dict[str, float]] = None) -> None:
         self.model = model
         self.lr_controller = lr_controller
         self.make_optimizer_fn = make_optimizer_fn
@@ -174,7 +187,10 @@ class FailureDetector:
         self.a_slow = max(self.a, 1.0 - (1.0 - self.a) / 10.0)  # half-life ~700
         self._min_samples = max(3, int(round(1.0 / (1.0 - self.a))))
         self.rel_margin = 0.15  # relative-outlier floor (CE's own; same for all signals)
+        self.margins = dict(margins or {})  # per-signal tighter/looser margins
+        self.floors = dict(floors or {})    # per-signal healthy-band floor (see docstring)
         self.ce_armed = False  # CE joins the watch after the first val eval
+        self._last_viol_name = None  # debug: which signal fired the last viol
         self._cooldown = 0
         self._viol: Dict[str, int] = {}  # consecutive violations per signal
         self.recover_count = 0
@@ -204,13 +220,17 @@ class FailureDetector:
             s[0], s[1], s[2], s[3] = fast, value, n, slow
             return False
         rising = value >= prev  # plateau at a new level is still a sustained shift
-        viol = (value > slow * (1.0 + self.rel_margin)) and rising
+        margin = self.margins.get(name, self.rel_margin)
+        floor = self.floors.get(name, float('-inf'))
+        viol = (value > slow * (1.0 + margin)) and rising and value >= floor
         s[0] = self.a * fast + (1 - self.a) * value
         s[1] = value
         s[2] = n
         s[3] = self.a_slow * slow + (1 - self.a_slow) * value
         if name == 'ce' and not self.ce_armed:
             return False  # stats still warm; CE joins the watch once armed
+        if viol:
+            self._last_viol_name = name
         return viol
 
     def check(self, ce: float, step: int,

@@ -102,6 +102,14 @@ class EVAStack(nn.Module):
         # U8: τ-modulated intent bridge alpha
         self._w_alpha_expert = nn.Parameter(torch.zeros(self._n_experts))
         self._last_bus = None
+        # U12: running-RMS of the bus, fed to the ZERO-INIT head stencil. A raw bus
+        # whose magnitude grows with content (healthy bus_max 240..1300 in the first
+        # ~20 steps of the polygon run) makes `bus_head_proj`'s FIRST Adam step
+        # (per-coordinate ~±lr from a zero start) dominate the head gate logits ->
+        # CE 6.9 -> 86 in one step. Normalizing the (detached) stencil input by its
+        # own fast-EMA RMS decouples the stencil's scale from bus growth; a linear
+        # module reaches the same readout bias on an O(1) input with stable gradients.
+        self.register_buffer('_bus_rms', torch.zeros(1))
         # ─── Semantic Bridge (in-pipeline per-layer) ───
         # Runs INSIDE the forward (train + inference). At every layer a shared
         # probe emits a semantic vector, a persistent cross-layer stream is
@@ -427,7 +435,13 @@ class EVAStack(nn.Module):
                 _bus_running = _bus_running + fresh_i
                 _bus_le_carried = _bus_le_carried + _bus_carried[i]
                 bus_i = (_bus_running + (_bus_sum - _bus_le_carried)) / n_layers  # (1,1,G,Kmax)
-                _last_bus = bus_i
+                with torch.no_grad():
+                    _bus_rms = bus_i.detach().pow(2).mean().sqrt()
+                    if self._bus_rms.item() == 0.0:  # cold-start: baseline = first level
+                        self._bus_rms.copy_(_bus_rms)
+                    else:
+                        self._bus_rms.mul_(0.99).add_(_bus_rms, alpha=0.01)
+                _last_bus = bus_i / self._bus_rms.clamp_min(1e-6)  # stencil reads a normalized bus
                 intent_i = bus_i[..., :_ki]            # truncate to layer k
                 # NB: mat_gate НЕ масштабирует intent_i — зеркало уже управляет
                 # зрелостью через bridge_glu_net(delta)*maturity и expert_gate.
@@ -926,6 +940,13 @@ class EVAStack(nn.Module):
         """Clear the logit cache (for new sequence)."""
         if self.logit_cache is not None:
             self.logit_cache.cache.clear()
+        # Restore = a fresh healthy state: the mlp-scale observer must re-warm
+        # from the restored weights, not carry a pre-rollback baseline.
+        for l in self.layers:
+            if getattr(l, '_mlp_cnt', None) is not None and l._mlp_cnt.item() != 0:
+                l._mlp_cnt.zero_()
+                l._mlp_now_ema.zero_()
+                l._mlp_base_ema.zero_()
 
     def cache_size_mb(self) -> float:
         """Get current cache size in MB."""
