@@ -14,7 +14,7 @@ class WideBindConfig:
     n_layers: int = 32
     bind_K: int = 64
     vocab: int = 50000
-    seq_len: int = 128
+    seq_len: int = 256
     batch_size: int = 2
     lr: float = 3e-4
     warmup_steps: int = 1000
@@ -190,6 +190,7 @@ class WideBindConfig:
     # Optimizer
     gate_lr_mult: float = 5.0
     lambda_lr_hierarchy: bool = True  # True = LR mult по степеням λ_d^p
+    optimizer: str = "adamw"          # 'adamw' | 'eva' (EVAAdamW) | 'eva_proj' (EVAAdamW + AdamP-projection)
 
     # Optimizer hardening / progressive unfreeze (anti-collapse guard)
     llrd: float = 0.9              # DEPRECATED: index-based LR decay (replaced by tau_llrd_gamma)

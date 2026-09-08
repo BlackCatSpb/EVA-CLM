@@ -193,7 +193,8 @@ def train(cfg=None, resume_path=None):
 
     def _make_opt(lr):
         return build_optimizer(model, lr, llrd_decay=cfg.llrd,
-                               weight_decay=cfg.weight_decay, betas=(0.9, 0.95))
+                               weight_decay=cfg.weight_decay, betas=(0.9, 0.95),
+                               optimizer=getattr(cfg, 'optimizer', 'adamw'))
 
     optimizer = _make_opt(cfg.lr)
     # LR controller: linear warmup + mirror-adaptive multiplier + plateau damping.
@@ -505,6 +506,15 @@ def train(cfg=None, resume_path=None):
                 scaler.step(optimizer)
                 scaler.update()
             else:
+                if getattr(cfg, 'optimizer', 'adamw') in ('eva', 'eva_proj'):
+                    _t = {}
+                    if model.bridge is not None:
+                        _t["bridge"] = float(model.bridge.readiness())
+                    if model.maturation is not None:
+                        _rm = abs(float(model.maturation.gate.float().mean()))
+                        _t["intent"] = _rm
+                        _t["mem"] = _rm
+                    optimizer.set_trust(_t)
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
@@ -558,7 +568,7 @@ def train(cfg=None, resume_path=None):
                         'step': step,
                         'model': model.state_dict(),
                         'optimizer': optimizer.state_dict() if not args.no_save_optimizer else None,
-                        'param_names': _opt_param_names(model) if not args.no_save_optimizer else None,
+                        'param_names': _opt_param_names(model, optimizer) if not args.no_save_optimizer else None,
                         'scheduler': scheduler.state_dict(),
                         'best_val_loss': best_val_loss,
                         'cfg': cfg,
@@ -611,7 +621,7 @@ if __name__ == '__main__':
     parser.add_argument('--data-dir', type=str, required=True)
     parser.add_argument('--save-dir', type=str, default='checkpoints')
     parser.add_argument('--batch-size', type=int, default=2)
-    parser.add_argument('--seq-len', type=int, default=128)
+    parser.add_argument('--seq-len', type=int, default=256)
     parser.add_argument('--n-layers', type=int, default=24)
     parser.add_argument('--D', type=int, default=4096, help='model width')
     parser.add_argument('--vocab', type=int, default=50000)

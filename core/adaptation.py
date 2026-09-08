@@ -192,12 +192,18 @@ def _role_lr_mult(name: str, lam: Any) -> float:
 def build_optimizer(model: torch.nn.Module, base_lr: float,
                     llrd_decay: float = 0.9, weight_decay: float = 0.01,
                     betas: Tuple[float, float] = (0.9, 0.95),
-                    lam: Any = None) -> torch.optim.AdamW:
-    """AdamW with Layer-wise LR Decay (LLRD): lr = base_lr · role_mult · (llrd**depth).
+                    lam: Any = None, optimizer: str = "adamw",
+                    eva_kwargs: Optional[Dict] = None) -> torch.optim.Optimizer:
+    """AdamW or EVA-AdamW with Layer-wise LR Decay (LLRD).
 
     LLRD (Devlin et al., 2019) damps the residual-stream growth of deep blocks,
     which is the mechanism behind the ~step-1000 logit blow-up.  Frozen blocks
     have ``requires_grad=False`` and are simply skipped by the optimizer.
+
+    When ``optimizer`` is ``'eva'``/``'eva_proj'`` the same groups are passed to
+    ``EVAAdamW`` (core.eva_optim): ``'eva_proj'`` additionally enables
+    AdamP-projected weight decay (Gram–Schmidt + norm-preserving rescale) on
+    every dim>=2 group that carries weight decay.
     """
     if lam is None:
         from .lambda_utils import lambda_d
@@ -215,6 +221,43 @@ def build_optimizer(model: torch.nn.Module, base_lr: float,
             g = {'params': [], 'lr': lr, 'weight_decay': wd}
             groups[key] = g
         g['params'].append(p)
+
+    # Для EVA один проход: роль (по реальным именам архитектуры) определяет
+    # wd/trust/cap, lr остаётся LLRD (role_mult · llrd**depth). Это гарантирует,
+    # что bridge/intent/mem/zero_init/scale_inv/tau попадают в свои группы
+    # независимо от того, попал ли параметр в LLRD-разбиение.
+    if optimizer in ("eva", "eva_proj"):
+        from .eva_optim import EVAAdamW, _resolve_role
+        mk = dict(eva_kwargs or {})
+        if optimizer == "eva_proj":
+            mk.setdefault("projected_wd", True)
+        by_role = {}
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            r = _resolve_role(name, p.dim())
+            li = _layer_index_of(name)
+            role_mult = _role_lr_mult(name, lam)
+            depth_mult = llrd_decay ** max(li, 0)
+            lr = base_lr * role_mult * depth_mult
+            wd = weight_decay if r["wd"] else 0.0
+            key = (round(role_mult, 4), round(depth_mult, 6), r["role"],
+                   r["wd"], r["trust"], r["cap"])
+            g = by_role.get(key)
+            if g is None:
+                g = {"params": [], "lr": lr, "weight_decay": wd,
+                     "wd_enabled": r["wd"], "role": r["role"],
+                     "trust_key": r["trust"], "update_cap": r["cap"]}
+                by_role[key] = g
+            g["params"].append(p)
+        opt = EVAAdamW(list(by_role.values()), lr=base_lr, betas=betas,
+                       weight_decay=weight_decay, mode=optimizer,
+                       **{k: v for k, v in mk.items()
+                          if k in ("cautious", "slow_ema", "beta_slow",
+                                   "slow_mix", "trust_enabled",
+                                   "trust_floor", "projected_wd", "debug")})
+        return opt
+
     return torch.optim.AdamW([g for g in groups.values() if g['params']],
                              betas=betas)
 
