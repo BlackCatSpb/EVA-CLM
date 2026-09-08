@@ -278,12 +278,21 @@ class GroupedCognitiveMirror(nn.Module):
         # and τ-tied gate amplitude authority (intent_alpha = 1 − exp(−τ_l/τ_min)).
         self._tau_norm_layer = None
         self._intent_alpha = 1.0
+        self._tau_gate_min = 1.0
+        self._tau_gate_max = 5.0
         if tau_config is not None and hasattr(tau_config, 'tau_norm'):
             with torch.no_grad():
                 self._tau_norm_layer = tau_config.tau_norm[layer_idx].item()
             if hasattr(tau_config, 'intent_alpha'):
                 with torch.no_grad():
                     self._intent_alpha = tau_config.intent_alpha[layer_idx].item()
+            if hasattr(tau_config, 'gate_tau_min'):
+                self._tau_gate_min = float(tau_config.gate_tau_min)
+                self._tau_gate_max = float(tau_config.gate_tau_max)
+        # No τ-field (legacy standalone use): fall back to the mirror's own depth
+        # coordinate φ (log-depth ∈ [0,1]) as the per-layer monotone axis.
+        if self._tau_norm_layer is None:
+            self._tau_norm_layer = float(self.phi.item())
 
         
         # ─── Self-organizing usefulness predictor (competitive) ───
@@ -567,12 +576,11 @@ class GroupedCognitiveMirror(nn.Module):
             signals_normed.append(s_norm)
         
         # ─── Learnable signal weights (sigmoid + Fibonacci self-organization) ───
-        # U5: τ-scheduled signal temperature
+        # U5: τ-scheduled signal temperature — bounds taken from the τ-field
+        # (tau_config.gate_tau_min/max), not hardcoded 0.3/5.0.
         if self._tau_norm_layer is not None:
-            tau_min_gate = 0.3
-            tau_max_gate = 5.0
             tau_norm = self._tau_norm_layer
-            tau_signal = tau_min_gate * (tau_max_gate / tau_min_gate) ** (1 - tau_norm)
+            tau_signal = self._tau_gate_min * (self._tau_gate_max / self._tau_gate_min) ** (1 - tau_norm)
             tau_signal = max(tau_signal, 0.01)
             w = torch.sigmoid(self._signal_log_weights / tau_signal)
         else:
@@ -744,7 +752,13 @@ class GroupedCognitiveMirror(nn.Module):
             spec = spec / (spec.max() + 1e-10)                    # norm to [0, 1]
             cons = self._concept_sim_ema.mean(dim=-1)             # (G,) — avg similarity per expert
             cons = cons / (cons.max() + 1e-10)                    # norm to [0, 1]
-            ctr = ctr + (spec * 0.5 + cons * 0.5) * self.w_contra * 0.1
+            # Soft routing overlay: specialization (deep) vs consensus (shallow),
+            # weights from the layer's own τ-coordinate (sum to 1, no magic 0.5/0.5).
+            w_spec = self._tau_norm_layer
+            w_cons = 1.0 - w_spec
+            # Overlay authority: complement of intent_alpha = exp(−τ_l/τ_min).
+            # Fast (shallow) layers rely more on soft routing, mature layers on intent.
+            ctr = ctr + (spec * w_spec + cons * w_cons) * self.w_contra * (1.0 - self._intent_alpha)
             if self.training:
                 with torch.no_grad():
                     rms = ctr.pow(2).mean(dim=(0, 1)).sqrt()      # (G,)
@@ -753,13 +767,18 @@ class GroupedCognitiveMirror(nn.Module):
             gate_logits = gate_logits + ctr * self._intent_alpha
         if self._meta_trust and self._has_private_mem:
             p = self._meta_private_mem.unsqueeze(0).unsqueeze(0)
-            gate_logits = gate_logits - 0.5 * p
+            # Meta-pressure authority = complement of intent_alpha (fast/memory
+            # suppression is a shallow-layer mechanism; deep layers rely on intent).
+            gate_logits = gate_logits - (1.0 - self._intent_alpha) * p
         if self.training:
             ls = self.log_scale
             ls_dev = ls.mean(dim=-1) - ls.mean()
             ls_var = ls.var().item()
             if ls_var < 0.05:
-                boost = 1.0 * torch.sigmoid(3.0 * ls_dev)
+                # Anti-collapse governor: bump gate when log-scale flattens.
+                # Amplitude = τ-authority (intent_alpha); 0.05/3.0 are degenerate-bypass
+                # guards, not tunable scales (fires only under log-scale collapse).
+                boost = self._intent_alpha * torch.sigmoid(3.0 * ls_dev)
                 gate_logits = gate_logits + boost.unsqueeze(0).unsqueeze(0)
         
         expert_gate = torch.sigmoid(gate_logits)  # (B, L, G)
@@ -805,10 +824,8 @@ class GroupedCognitiveMirror(nn.Module):
         info['w_contra'] = self.w_contra.mean().item()
         # U5: τ-scheduled signal temperature (consistent with forward)
         if self._tau_norm_layer is not None:
-            tau_min_gate = 0.3
-            tau_max_gate = 5.0
             tau_norm = self._tau_norm_layer
-            tau_signal = tau_min_gate * (tau_max_gate / tau_min_gate) ** (1 - tau_norm)
+            tau_signal = self._tau_gate_min * (self._tau_gate_max / self._tau_gate_min) ** (1 - tau_norm)
             tau_signal = max(tau_signal, 0.01)
             w = torch.sigmoid(self._signal_log_weights / tau_signal)
         else:
