@@ -130,6 +130,104 @@ def test_cognitive_head_2d_path():
     assert (g > 0).all(), 'cognitive head: dead positions in CE'
 
 
+# ── M2.1 bridge injection must be LINEAR in maturity (was M² — double apply) ─
+def test_bridge_maturity_linear():
+    from core.bridge import SemanticBridge
+    torch.manual_seed(2)
+    br = SemanticBridge(D=64, n_layers=2, bridge_dim=16)
+    with torch.no_grad():
+        br.bridge_stream.normal_()
+        # stream_log_scale inits to 0 (tanh→0 = zero injection at birth);
+        # the LINEARITY test needs a live scale.
+        br.stream_log_scale.fill_(0.4)
+    h = torch.zeros(1, 1, 64)
+    def delta(m):
+        with torch.no_grad():
+            out = br.inject_layer(1, h.clone(), maturity=torch.tensor(float(m)),
+                                  tau_norm=torch.tensor(0.5))
+        return float(out.norm())
+    d1, d05 = delta(1.0), delta(0.5)
+    assert d05 > 0.0, 'zero injection: scale not live in test setup'
+    ratio = d1 / (d05 + 1e-12)
+    assert abs(ratio - 2.0) < 0.1, f'injection scales as M^{math.log(ratio)/math.log(2):.2f}, expected linear'
+
+
+# ── M2.2 diagnostics entropy: mean per position, no B·L scale explosion ──────
+def test_lbg_entropy_normalized():
+    import types
+    from core.layer_bridge_gate import LayerBridgeGate
+    lbg = LayerBridgeGate(n_layers=1, health_features=6)
+    def feat(B, L, seed):
+        torch.manual_seed(seed)
+        hp = torch.randn(B, L, 8)
+        layer = types.SimpleNamespace(mirror=types.SimpleNamespace(
+            _cached_pred_error_norm=None, _cached_gate_l1=None,
+            _cached_pred_k=None, _cached_hp=hp))
+        return float(lbg.layer_diagnostics(layer, None)[4])
+    a, b = feat(1, 4, 3), feat(8, 32, 3)
+    assert abs(a - b) < 0.15, f'entropy feature scales with batch ({a} vs {b})'
+    assert 0.0 < a < 1.0
+
+
+# ── M2.3 feature 3 = live bridge contribution (was pinned 0.5 in stack) ──────
+def test_lbg_bridge_contribution_live():
+    m = _stack()
+    if m.bridge is None:
+        import pytest
+        pytest.skip('bridge disabled')
+    torch.manual_seed(4)
+    x = torch.randint(1, m.cfg.vocab, (1, 6))
+    with torch.no_grad():
+        m.embed_tokens(x)  # not the real path; do a real forward below
+    h = torch.randn(1, 1, m.cfg.D)
+    with torch.no_grad():
+        br = m.bridge
+        br.bridge_stream.normal_()
+        br.stream_log_scale.fill_(0.4)   # live scale (inits to 0 = no injection)
+        out = br.inject_layer(0, torch.zeros(1, 4, m.cfg.D),
+                              maturity=torch.tensor(0.7), tau_norm=torch.tensor(0.5))
+        assert torch.isfinite(br.inj_ratio[0]), 'no injection ratio recorded'
+        assert float(br.inj_ratio[0]) > 0.0
+        lbg = m.layer_bridge_gate
+        import types
+        layer = types.SimpleNamespace(mirror=types.SimpleNamespace(
+            _cached_pred_error_norm=None, _cached_gate_l1=None,
+            _cached_pred_k=None, _cached_hp=None))
+        d = lbg.layer_diagnostics(layer, bridge_contrib=br.inj_ratio[0])
+        assert float(d[3]) == float(br.inj_ratio[0]), 'feature 3 not wired to contribution'
+
+
+# ── M2.4 layer_gate: uniform-before-ready, SpectrumGate after ────────────────
+def test_lbg_layer_gate_paths():
+    from core.layer_bridge_gate import LayerBridgeGate
+    torch.manual_seed(5)
+    lbg = LayerBridgeGate(n_layers=2, health_features=6)
+    health = torch.rand(6)
+    mat = torch.tensor(0.4)
+    g_off = lbg.layer_gate(0, health, mat, global_ready=False)
+    assert torch.allclose(g_off, mat), 'pre-ready gate must equal maturation'
+    g_on = lbg.layer_gate(0, health, mat, global_ready=True,
+                          tau_external=torch.tensor(1.0))
+    assert 0.0 <= float(g_on.detach()) <= 2.0 and float(g_on.detach()) != float(g_off.detach())
+    # NaN health must not poison the gate
+    health_nan = health.clone(); health_nan[0] = float('nan')
+    g_nan = lbg.layer_gate(0, health_nan, mat, global_ready=True,
+                           tau_external=torch.tensor(1.0))
+    assert torch.isfinite(g_nan)
+
+
+# ── M2.5 tau ladder of the gate is GEOMETRIC and reads the τ-field ───────────
+def test_lbg_effective_tau_geometric():
+    from core.layer_bridge_gate import LayerBridgeGate
+    lbg = LayerBridgeGate(n_layers=2, health_features=6,
+                          tau_min=0.3, tau_max=5.0)
+    t0 = float(lbg._effective_tau(torch.tensor(0.0)))
+    t1 = float(lbg._effective_tau(torch.tensor(1.0)))
+    tm = float(lbg._effective_tau(torch.tensor(0.5)))
+    assert abs(t0 - 5.0) < 1e-4 and abs(t1 - 0.3) < 1e-4
+    assert abs(tm - math.sqrt(5.0 * 0.3)) < 1e-3, 'linear midpoint — must be geometric (τ-field convention)'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

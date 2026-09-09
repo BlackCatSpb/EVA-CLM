@@ -128,6 +128,8 @@ class EVAStack(nn.Module):
         self.layer_bridge_gate = LayerBridgeGate(
             cfg.n_layers,
             health_features=6,
+            tau_min=getattr(cfg, 'gate_tau_min', 0.3),
+            tau_max=getattr(cfg, 'gate_tau_max', 5.0),
         ) if getattr(cfg, 'bridge_conn', 0.0) > 0.0 else None
         # ─── Unified τ-field (TauConfig) ───
         # (already created above, before layers, for U1/U3 block initialization)
@@ -467,21 +469,16 @@ class EVAStack(nn.Module):
                 # gradient path. The gate still gets its gradient from the main CE.
                 # ─── Layer Bridge Gate: scale probe input by per-layer health ───
                 # Before global_ready: simple maturation gating (no SpectrumGate).
-                # After global_ready: full per-layer SpectrumGate with tau-driven diversity.
+                # After global_ready: full per-layer SpectrumGate with tau-driven
+                # diversity. Single source: LayerBridgeGate.layer_gate, fed by the
+                # LIVE τ-field gate ladder (audit M2: the stack's inline copy
+                # diverged and re-derived tau from its own literals).
                 if self.layer_bridge_gate is not None and i in self._layer_diagnostics:
-                    _h_det = h.detach()
-                    _tau_i = mat_gate[i] if mat_gate is not None else torch.ones(1, device=h.device)
-                    if _global_ready:
-                        # Full SpectrumGate: maturation tau drives diversity/precision
-                        _health = self._layer_diagnostics[i]  # (6,)
-                        _mat_tau = self.layer_bridge_gate._effective_tau(_tau_i)
-                        _gated = self.layer_bridge_gate.gates[i](_health, tau_external=_mat_tau)
-                        _gate_i = _gated.mean() * _tau_i
-                    else:
-                        # Simple maturation gating: just scale by maturity
-                        _gate_i = _tau_i
-                    _gate_i = torch.clamp(_gate_i, min=0.0, max=2.0)
-                    _h_det = _h_det * _gate_i.view(1, 1, 1)
+                    _tau_i = mat_gate[i] if mat_gate is not None else torch.ones((), device=h.device)
+                    _gate_i = self.layer_bridge_gate.layer_gate(
+                        i, self._layer_diagnostics[i], _tau_i, _global_ready,
+                        tau_external=self.tau_config.gate_tau[i])
+                    _h_det = h.detach() * _gate_i.reshape(1, 1, 1)
                     _s_l = self.bridge.probe_layer(_h_det)
                 else:
                     _s_l = self.bridge.probe_layer(h.detach())

@@ -61,7 +61,9 @@ class LayerBridgeGate(nn.Module):
     - Immature layers (mat≈0) → tau→∞ → diversity (all diagnostics active)
     - Mature layers (mat≈1) → tau→0 → precision (top diagnostics dominate)
     
-    Formula: effective_tau = tau_max * (1 - maturation) + tau_min * maturation
+    Formula: effective_tau = tau_max * (tau_min/tau_max)^maturation  (geometric,
+    identical to TauConfig._compute_gate_tau — the live ladder is passed in as
+    tau_external by EVAStack; this is the standalone fallback)
     
     Diagnostic features (per layer):
     0. pred_error_norm: предсказание зеркала (низкая = хорошо)
@@ -91,16 +93,79 @@ class LayerBridgeGate(nn.Module):
         self._max_nan: int = 10
     
     def _effective_tau(self, maturation: torch.Tensor) -> torch.Tensor:
-        """Compute effective tau from maturation.
-        
+        """Compute effective tau from maturation — GEOMETRIC ladder, identical
+        to the τ-field's own formula (``TauConfig._compute_gate_tau``), so the
+        standalone fallback agrees with the live `tau_config.gate_tau[l]` the
+        stack passes in (audit M2: linear interpolation disagreed in the
+        middle of the ladder).
+
         Args:
             maturation: (n_layers,) or scalar — maturation gate values in [0, 1]
-            
+
         Returns:
-            effective_tau: same shape — tau for each layer
+            effective_tau: same shape — tau for each layer (mat=0 → tau_max,
+            mat=1 → tau_min, geometric in between)
         """
-        return self.tau_max * (1.0 - maturation) + self.tau_min * maturation
-    
+        log_min, log_max = math.log(self.tau_min), math.log(self.tau_max)
+        return torch.exp(log_max + (log_min - log_max) * maturation)
+
+    # ─── Single-source per-layer paths (used by EVAStack.forward) ───────────
+    def layer_gate(self, i: int, health: torch.Tensor, maturation: torch.Tensor,
+                   global_ready: bool = False,
+                   tau_external: torch.Tensor | None = None) -> torch.Tensor:
+        """Per-layer scalar gate — THE implementation (stack used to inline a
+        duplicate, audit M2).
+
+        Pre-ready: pure maturation coupling (uniform policy, docstring §
+        GLOBAL READINESS). Ready: SpectrumGate(health)·maturation with the
+        live τ-field temperature. NaN/explosion-controlled like forward().
+        """
+        if not global_ready:
+            return maturation
+        health = torch.nan_to_num(health.float(), nan=0.0, posinf=1.0,
+                                  neginf=0.0).to(maturation.dtype)
+        tau = tau_external if tau_external is not None else self._effective_tau(maturation)
+        gated = self.gates[i](health, tau_external=tau)
+        gate = gated.mean() * maturation
+        gate = torch.where(torch.isfinite(gate), gate, torch.zeros_like(gate))
+        return torch.clamp(gate, min=0.0, max=2.0)
+
+    def layer_diagnostics(self, layer, bridge_contrib: torch.Tensor | None = None,
+                          device: torch.device | None = None) -> torch.Tensor:
+        """(health_features,) diagnostic vector for ONE layer — THE builder
+        (stack inlined a divergent copy with feature 3 pinned to 0.5 and a
+        B·L-unnormalized entropy that saturated the [0,1] clamp, audit M2)."""
+        if device is None:
+            device = self.gates[0].log_tau.device
+        diag = torch.zeros(self.health_features, device=device)
+        mir = getattr(layer, 'mirror', layer)
+
+        pe = getattr(mir, '_cached_pred_error_norm', None)
+        if pe is not None:
+            diag[0] = pe.detach().float().mean().clamp(0.0, 1.0)
+        gl = getattr(mir, '_cached_gate_l1', None)
+        if gl is not None:
+            diag[1] = gl.detach().float().clamp(0.0, 1.0)
+        mp = getattr(mir, '_cached_pred_k', None)
+        if mp is not None:
+            diag[2] = (mp.detach().float().norm() / 1000.0).clamp(0.0, 1.0)
+        if bridge_contrib is not None:
+            diag[3] = bridge_contrib.detach().float().clamp(0.0, 1.0)
+        hp = getattr(mir, '_cached_hp', None)
+        if hp is not None:
+            hp_det = hp.detach().float()
+            p = torch.sigmoid(hp_det)
+            p = p / p.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+            # per-POSITION entropy normalized by log(n), then mean over B·L —
+            # the old all-axis .sum() grew with batch*seq and pinned the
+            # clamp(0,1) output at 1.0 for any real batch size.
+            ent = -(p * p.clamp_min(1e-9).log()).sum(dim=-1)
+            diag[4] = (ent.mean() / math.log(max(p.shape[-1], 2))).clamp(0.0, 1.0)
+        gl2 = getattr(mir, '_cached_gate_l1', None)
+        if gl2 is not None:
+            diag[5] = (1.0 - gl2.detach().float()).clamp(0.0, 1.0)
+        return diag
+
     def forward(
         self,
         layer_outputs: torch.Tensor,  # (n_layers, B, D)
@@ -168,13 +233,11 @@ class LayerBridgeGate(nn.Module):
         gates = torch.where(torch.isnan(gates), torch.zeros_like(gates), gates)
         gates = torch.clamp(gates, min=0.0, max=2.0)
         
-        # 5. Weighted average normalization
+        # 5. Weighted average normalization with REACHABLE uniform fallback
+        #    (audit M2: the old code clamped gate_sum to min=1e-6 before the
+        #    `< 1e-6` check, so the NaN-recovery branch could never run).
         gate_sum = gates.sum()
-        gate_sum = torch.clamp(gate_sum, min=1e-6)
-        normalized_gates = gates / gate_sum  # (n_layers,)
-        
-        # 6. Fallback: if all gates are zero, use equal weights
-        if gate_sum < 1e-6:
+        if not (gate_sum > 1e-6):
             normalized_gates = torch.ones_like(gates) / n_layers
             self._nan_count += 1
             if self._nan_count > self._max_nan:
@@ -184,6 +247,7 @@ class LayerBridgeGate(nn.Module):
                 self._nan_count = 0
         else:
             self._nan_count = 0
+            normalized_gates = gates / gate_sum
         
         # 7. Weighted sum of layer outputs
         weighted = normalized_gates.unsqueeze(-1).unsqueeze(-1) * layer_outputs
@@ -205,44 +269,11 @@ class LayerBridgeGate(nn.Module):
         layers: nn.ModuleList,
         bridge_contribution: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Extract per-layer diagnostics from model state."""
-        n = self.n_layers
-        device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype
-        
-        diagnostics = torch.zeros(n, self.health_features, device=device, dtype=dtype)
-        
-        for l in range(n):
-            layer = layers[l]
-            mir = layer.mirror
-            
-            pe = getattr(mir, '_cached_pred_error_norm', None)
-            if pe is not None:
-                diagnostics[l, 0] = pe.detach().mean().clamp(0.0, 1.0)
-            
-            gl = getattr(mir, '_cached_gate_l1', None)
-            if gl is not None:
-                diagnostics[l, 1] = gl.detach().clamp(0.0, 1.0)
-            
-            mp = getattr(mir, '_cached_pred_k', None)
-            if mp is not None:
-                mn = mp.detach().norm()
-                diagnostics[l, 2] = (mn / 1000.0).clamp(0.0, 1.0)
-            
-            if bridge_contribution is not None:
-                diagnostics[l, 3] = bridge_contribution[l].clamp(0.0, 1.0)
-            
-            hp = getattr(mir, '_cached_hp', None)
-            if hp is not None:
-                hp_det = hp.detach()
-                hp_norm = torch.sigmoid(hp_det)
-                hp_norm = hp_norm / hp_norm.sum(dim=-1, keepdim=True).clamp(min=1e-6)
-                entropy = -(hp_norm * hp_norm.clamp_min(1e-9).log()).sum()
-                max_entropy = math.log(hp_det.shape[-1])
-                diagnostics[l, 4] = (entropy / max_entropy).clamp(0.0, 1.0)
-            
-            gate_l1 = getattr(mir, '_cached_gate_l1', None)
-            if gate_l1 is not None:
-                diagnostics[l, 5] = (1.0 - gate_l1).clamp(0.0, 1.0)
-        
-        return diagnostics
+        """Stack of per-layer diagnostics — delegates to ``layer_diagnostics``
+        (single source, audit M2)."""
+        device = self.gates[0].log_tau.device
+        out = torch.zeros(self.n_layers, self.health_features, device=device)
+        for l in range(min(self.n_layers, len(layers))):
+            bc = None if bridge_contribution is None else bridge_contribution[l]
+            out[l] = self.layer_diagnostics(layers[l], bridge_contrib=bc, device=device)
+        return out

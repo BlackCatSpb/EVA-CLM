@@ -79,6 +79,10 @@ class SemanticBridge(nn.Module):
         self.register_buffer(
             "bridge_stream", torch.zeros(n_layers, bridge_dim), persistent=True
         )
+        # Per-forward injection share ‖inj‖/‖h‖ — LIVE feature 3 of the
+        # LayerBridgeGate diagnostics (was pinned to a 0.5 constant in the
+        # stack's inline duplicate, audit M2).
+        self.register_buffer("inj_ratio", torch.zeros(n_layers), persistent=False)
         self._preds: Optional[list[torch.Tensor]] = None
 
     @torch.no_grad()
@@ -139,12 +143,17 @@ class SemanticBridge(nn.Module):
         else:
             inj_strength = torch.ones(1, device=h_l.device, dtype=h_l.dtype)
         scale: torch.Tensor = torch.tanh(self.stream_log_scale)
+        # Audit M2: maturity was applied TWICE here (before and after
+        # inj_strength), so injection scaled as M² instead of the designed
+        # linear M-coupling (U4 / README §18) — at mat≈0.3 the branch was
+        # injected ~3.3x weaker than intended through the whole wake-up.
         if maturity is not None:
             scale = scale * maturity
         scale = scale * inj_strength
-        if maturity is not None:
-            scale = scale * maturity
         inj: torch.Tensor = scale * self.stream_proj(combined)
+        with torch.no_grad():
+            r = inj.detach().norm() / (h_l.detach().norm() + 1e-8)
+            self.inj_ratio[i] = r.clamp(0.0, 1.0)
         return h_l + inj.view(1, 1, self.D)
 
     @torch.no_grad()
