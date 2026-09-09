@@ -18,20 +18,35 @@ from .vsa_utils import dct_basis, fib_sigmoid_init
 
 _EPS_SCAN = 1e-6
 
+def pen_decay_factor(pen: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """Prediction-error modulation of the decay gate, CENTERED at 1.0 (audit
+    M3): the old form 1 − 0.5·σ(pen+w) applied ≈0.75 to EVERY channel already
+    at zero prediction error (σ(0)=0.5), silently shrinking the whole τ ladder
+    ~3-5x at init. Now: 1 at pen=0, monotonically down to the 0.5 asymptote
+    as pen grows; w_d_pen stays the learnable sensitivity/offset.
+    """
+    return 1.0 - (torch.sigmoid(pen + w) - torch.sigmoid(w))
+
+
 def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Parallel chunk scan from zero state.
     Returns intra-chunk VSA (B, chunk_len, S*D), final state (B, 1, S*D),
     cumulative decay (B, chunk_len, S*D).
-    """
-    log_a = torch.log(d_chunk.clamp(min=_EPS_SCAN))
+
+    fp64 internally (audit M3, A1+A2): with cum_decay ≥ 0.01^32 ≈ 1e-64 the
+    1/cum_decay reciprocals fit double exactly; the old fp32 scan had to
+    clamp them at 1e6, which silently zeroed even the CURRENT token's own
+    contribution in the back half of every chunk for fast scales. Matches
+    vsa_utils.vsa_prefix_scan numerics (locked by test_scan_exactness)."""
+    log_a = torch.log(d_chunk.double().clamp(min=_EPS_SCAN))
     log_cum = torch.cumsum(log_a, dim=1)
     cum_decay = torch.exp(log_cum)
-    inv_cum = (1.0 / cum_decay.clamp(min=_EPS_SCAN)).clamp(max=1e6)
-    weighted = b_chunk * inv_cum
+    weighted = b_chunk.double() / cum_decay
     cum_w = torch.cumsum(weighted, dim=1)
-    intra = cum_decay * cum_w
+    intra_d = cum_decay * cum_w
+    intra = intra_d.to(b_chunk.dtype)
     final = intra[:, -1:]
-    return intra, final, cum_decay
+    return intra, final, cum_decay.to(b_chunk.dtype)
 
 def _combine_chunks(chunk_data: list, initial_state: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """2nd-level: cross-chunk prefix scan over K chunk states.
@@ -197,14 +212,21 @@ class EVABlock(nn.Module):
         # Linear decay across layers: shallow → short memory, deep → long
         # Per-channel (D,) — can differentiate via gradient when vsa_b_d_smooth < 1.0
         layer_frac = layer_idx / max(cfg.n_layers - 1, 1)
-        b_d_init = 2.0 + 3.0 * layer_frac  # L0: τ≈7, L23: τ≈63, L31: τ≈150
+        # sigmoid bias of the content decay modulation decay=exp(−1/τ_s)·σ(h·w_d+b_d)
+        # (L0: σ≈0.88, L23: σ≈0.993 — the τ≈exp(b_d) reading was fictional, audit M3)
+        b_d_init = 2.0 + 3.0 * layer_frac
         self.b_i = nn.Parameter(torch.full((cfg.D,), -2.5))   # i_gate ~0.08 init
         self.b_d = nn.Parameter(torch.full((cfg.D,), b_d_init))
-        # Surprisal-gated write coefficient γ_l: растёт с τ
-        # γ_l = γ_max · σ((ln τ_l - ln 32) / 1.0)
-        tau_l = math.exp(b_d_init)
+        # Surprisal-gated write coefficient γ_l: растёт с τ. Derived from the
+        # REAL τ-ladder position (dev=0 → geometric interpolation τ_min..τ_max)
+        # around its geometric center τ_mid=√(τ_min·τ_max) — replaces the
+        # fictional τ=e^{b_d} and the magic ln 32 (audit M3).
+        _tau_min = float(getattr(cfg, 'tau_min', 8.0))
+        _tau_max = float(getattr(cfg, 'tau_max', 512.0))
+        _tau_l = _tau_min * (_tau_max / _tau_min) ** layer_frac
+        _tau_mid = math.sqrt(_tau_min * _tau_max)
         gamma_max = 0.5
-        gamma_init = gamma_max * (1.0 / (1.0 + math.exp(-(math.log(tau_l) - math.log(32.0)))))
+        gamma_init = gamma_max / (1.0 + math.exp(-(math.log(_tau_l) - math.log(_tau_mid))))
         self.gamma_surprisal = nn.Parameter(torch.full((), gamma_init))
         # Когерентность спиралей → запись в VSA-память (опорные точки скрещивания фаз)
         self.bind_coh_gate = nn.Parameter(torch.tensor(0.5))
@@ -342,9 +364,11 @@ class EVABlock(nn.Module):
             noise = 1.0 + noise_scale * torch.randn_like(i_gate)
             i_gate = i_gate * noise
 
-        # Prediction-error-aware decay modulation (before decay expansion)
+        # Prediction-error-aware decay modulation (before decay expansion).
+        # Centered: pen=0 → factor 1.0 (memory untouched), pen↑ → toward 0.5.
         if pen is not None:
-            d_pen_factor = 1.0 - 0.5 * torch.sigmoid(pen.unsqueeze(-1) + self.w_d_pen.unsqueeze(0).unsqueeze(0))
+            d_pen_factor = pen_decay_factor(
+                pen.unsqueeze(-1), self.w_d_pen.unsqueeze(0).unsqueeze(0))
             d_mod = (d_mod.reshape(B, L, self.mirror.G, self.mirror.d) * d_pen_factor.to(d_mod.dtype).unsqueeze(-1)).reshape(B, L, D)
 
         # Vectorize over S scales: (B, L, S, D) — expand-views, no materialized copies
@@ -395,8 +419,13 @@ class EVABlock(nn.Module):
         w = torch.sigmoid(self.scale_w)  # (S, D)
         mem_all = (mem_all_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (B, L, D)
         mem_leaf = (mem_leaf_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (B, L, D) — без кросс-чанк контекста
-        # Dual read: leaf (within-chunk, 100% покрытие) + context (cross-chunk)
-        mem_read = mem_all * self.w_q + mem_leaf * self.w_q_leaf + mem_all * self.w_q_ctx
+        # Dual read: leaf = within-chunk state, ctx = CROSS-chunk state only.
+        # Audit M3: the old form multiplied mem_all by both w_q and w_q_ctx —
+        # the two paths were parametrically indistinguishable (only their sum
+        # mattered) and 'context read' was a fiction. mem_all − mem_leaf is
+        # exactly the carried-in cross-chunk component.
+        mem_read = (mem_all * self.w_q + mem_leaf * self.w_q_leaf
+                    + (mem_all - mem_leaf) * self.w_q_ctx)
         mem_state_out = mem_state_out_vec.reshape(B, S * D)
         
         # First moment (same multi-scale decay, scaled input)

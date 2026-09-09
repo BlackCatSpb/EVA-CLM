@@ -9,6 +9,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .config import EVAConfig
 from .vsa_utils import fib_sigmoid_init, dct_basis
+
+
+def prefix_mean(x: torch.Tensor, dim: int = 1) -> torch.Tensor:
+    """Causal running mean along `dim`: out[t] = mean(x[0..t]).
+
+    Vectorized (cumsum / counts), O(L). Used for the mirror window centroid
+    so predictions at position t cannot see the future (audit M3).
+    """
+    n = x.shape[dim]
+    cnt = torch.arange(1, n + 1, device=x.device, dtype=x.dtype)
+    shape = [1] * x.dim()
+    shape[dim] = n
+    return x.cumsum(dim=dim) / cnt.view(shape)
 from .adaptive_gate import AdaptiveGate
 
 class BridgeGLU(nn.Module):
@@ -351,7 +364,11 @@ class GroupedCognitiveMirror(nn.Module):
         # Split into subspaces
         h_g = h.reshape(B, L, G, d)           # (B, L, G, d)
         mem_g = mem_all.reshape(B, L, G, d)
-        mc_g = mem_g.mean(dim=1, keepdim=True)  # (B, 1, G, d)
+        # CAUSAL window centroid: prefix mean over positions (audit M3: the
+        # full-window mean(dim=1) let FUTURE positions leak into temp_k of
+        # early ones during teacher forcing, and at L=1 during streaming it
+        # degenerated to the trivial self-mean — train↔inference mismatch).
+        mc_g = prefix_mean(mem_g, dim=1)      # (B, L, G, d)
         
         # Project each group to its K-space
         hp = torch.einsum('blgd,gdk->blgk', h_g, self.W_proj)    # (B, L, G, k)

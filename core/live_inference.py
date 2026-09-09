@@ -14,6 +14,7 @@ MirrorMonitor:  Non-invasive tracer. After each forward, reads per-expert gates,
 from __future__ import annotations
 
 from typing import Any, Optional
+import math
 
 import torch
 
@@ -74,8 +75,10 @@ class MirrorMonitor:
             h_mean_d = mir._last_h_pool.reshape(-1).detach()  # (D,)
             gate_logits = h_mean_d * layer.w_i + layer.b_i
             i_gates[i] = torch.nn.functional.softplus(gate_logits).mean().item()
-            # Tau from b_d: tau = exp(b_d)
-            taus[i] = torch.exp(layer.b_d).mean().item()
+            # Effective content-gate time constant: the decay is
+            # d=exp(−1/τ_s)·σ(h·w_d+b_d); exp(b_d) was NOT a τ (audit M3).
+            d_bar = float(torch.sigmoid(layer.b_d.detach()).mean().clamp(1e-6, 1 - 1e-9))
+            taus[i] = -1.0 / math.log(d_bar)
 
         expl_val, _ = AdaptiveController.stats(m.layers)
 

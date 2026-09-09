@@ -228,6 +228,63 @@ def test_lbg_effective_tau_geometric():
     assert abs(tm - math.sqrt(5.0 * 0.3)) < 1e-3, 'linear midpoint — must be geometric (τ-field convention)'
 
 
+# ── M3.1 chunked VSA scan must equal the naive recurrence at adversarial decay
+def test_scan_exactness_adversarial_decay():
+    from core.block import _scan_chunk, _combine_chunks
+    torch.manual_seed(6)
+    B, L, C = 1, 64, 32
+    b = torch.randn(B, L, C)
+    d = (0.2 + 0.5 * torch.rand(B, L, C))            # fast scales (τ~1-2 regime)
+    chunks = [_scan_chunk(b[:, s:s+32], d[:, s:s+32]) for s in range(0, L, 32)]
+    mem, _, _ = _combine_chunks(chunks, None)
+    naive = torch.zeros_like(b)
+    s = torch.zeros(B, C)
+    for t in range(L):
+        s = d[:, t] * s + b[:, t]
+        naive[:, t] = s
+    err = (mem - naive).abs().max().item() / naive.abs().max().item()
+    assert err < 1e-4, f'chunk scan diverges from naive recurrence: rel {err:.3e}'
+
+
+# ── M3.2 surprisal decay factor must be NEUTRAL at zero prediction error ─────
+def test_pen_decay_neutral_at_zero():
+    from core.block import pen_decay_factor
+    w = torch.zeros(4)
+    f0 = pen_decay_factor(torch.zeros(1, 1, 4), w)
+    assert torch.allclose(f0, torch.ones(1, 1, 4), atol=1e-6), \
+        f'pen=0 must leave decay untouched, got {f0.flatten().tolist()}'
+    f1 = pen_decay_factor(torch.ones(1, 1, 4) * 10.0, w)
+    assert (f1 < f0).all() and (f1 >= 0.5 - 1e-6).all(), 'pen↑ must shorten memory toward 0.5'
+
+
+# ── M3.3 mirror window-mean must be CAUSAL (prefix mean, no future leak) ─────
+def test_mirror_prefix_mean_causal():
+    from core.mirror import prefix_mean
+    torch.manual_seed(7)
+    x = torch.randn(2, 8, 3, 5)
+    m = prefix_mean(x, dim=1)
+    ref = x.cumsum(1) / torch.arange(1, 9, dtype=x.dtype).view(1, 8, 1, 1)
+    assert torch.allclose(m, ref, atol=1e-6)
+    y = x.clone(); y[:, 5:] += 100.0                  # change the FUTURE only
+    assert torch.allclose(prefix_mean(y, dim=1)[:, :5], m[:, :5], atol=1e-5), \
+        'future positions leak into past window mean'
+
+
+# ── M3.4 γ_surprisal init from the REAL τ ladder (geometric center), not ln32 ─
+def test_gamma_init_from_tau_ladder():
+    from core.block import EVABlock
+    cfg = EVAConfig(**{**SMALL, 'n_layers': 4})
+    tau_min, tau_max = cfg.tau_min, cfg.tau_max
+    tau_mid = math.sqrt(tau_min * tau_max)
+    for li in range(cfg.n_layers):
+        blk = EVABlock(cfg, li)
+        frac = li / max(cfg.n_layers - 1, 1)
+        tau_l = tau_min * (tau_max / tau_min) ** frac
+        want = 0.5 / (1.0 + math.exp(-(math.log(tau_l) - math.log(tau_mid))))
+        got = float(blk.gamma_surprisal.detach())
+        assert abs(got - want) < 1e-4, f'L{li}: gamma_init {got:.4f} vs ladder-derived {want:.4f}'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0
