@@ -114,9 +114,12 @@ class ReasoningGate(nn.Module):
     the gate falls below `stop_threshold` (adaptive depth per token).
 
     Critical property: the gates are initialized so that the FIRST step is
-    fully on (bias[0]=+4 → α≈0.98) and the REST are off (bias=-8 → α≈0.0003).
-    This makes an adaptive model resume from a checkpoint trained with the
-    old single-step reasoning EXACTLY as before.
+    fully on (bias[0]=+10 → tanh≈1.0) and the REST are off (bias=0 with
+    zero-weight projections → tanh(0)=0). This makes an adaptive model resume
+    from a checkpoint trained with the old single-step reasoning EXACTLY as
+    before; the +10 saturation intentionally freezes gate-0 at ON early on
+    (its gradient through tanh is ~0; the stop decision is carried by the
+    later gates and by the STE path in EVAStack._adaptive_reasoning).
 
     Args:
         D: Hidden dimension.

@@ -720,7 +720,7 @@ class EVAStack(nn.Module):
         reasoning state, so depth adapts to knowledge gaps (uncertainty).
         Sequential gating: step i executes only if the gate of step i-1 stayed
         open, so an OFF gate still receives gradient (via the executed previous
-        step) and can open later. On resume the first gate is ~1 (bias +4) and
+        step) and can open later. On resume the first gate is ~1 (bias +10, tanh-saturated) and
         later gates ~0 (bias -8): the loop executes one full step plus one
         ~zero-contribution step — output matches the old single-step path.
         Static-graph form: the loop always executes K iterations, but the
@@ -737,7 +737,7 @@ class EVAStack(nn.Module):
         conf_base = know[:, 0]  # head confidence on the raw h (B,)
         h_acc = h
         weighted = None   # Σ a_i·r_i — взвешенные знаками вклады (разность pos/neg)
-        denom_accum = 0.0 # Σ |a_i| — нормировка (стабильность масштаба)
+        denom_accum = 0.0 # Σ взятых (положительных) весов, floor 0.5 (см. accum ниже)
         gates = []
         buf = reasoning_buffer
         count = reasoning_count
@@ -813,10 +813,13 @@ class EVAStack(nn.Module):
             weighted = contrib if weighted is None else weighted + contrib
             denom_accum = denom_accum + w_i
             # Средневзвешенное с учётом разности положительного и
-            # отрицательного: нормировка по Σ|w_i| (фактические веса вкладов,
-            # с учётом валидации) держит масштаб стабильным при любом числе
-            # шагов; сегментированный шаг (w_soft→0) не ослабляет остальные.
-            accum = weighted / (denom_accum + 1e-6)
+            # отрицательного: знаменатель — Σ взятых (положительных) весов
+            # (антизнание не разбавляет нормировку), НО с floor 0.5 — половиной
+            # веса одного полнооткрытого шага (a_i∈(−1,1), w_soft≤1 ⇒ шаг weigh-
+            # ит ≤1; floor — вывод из диапазона весов, не подбор). Без floor
+            # все-отрицательные гейты давали |accum| ≈ |Σneg·r|/1e-6 — взрыв
+            # h_acc на 6 порядков (audit M9; accum остаётся ≤ 2·max|r_i|).
+            accum = weighted / denom_accum.clamp(min=0.5)
             h_acc = h + s * accum
             prev_open = a_i.detach().mean()
             gates.append(a_i.detach().mean() * w_soft * run.float())
@@ -1204,18 +1207,18 @@ if __name__ == '__main__':
     import torch
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    cfg = EVAConfig(n_layers=24, D=896, bottleneck=896, bind_K=32, mlp_groups=8)
+    cfg = EVAConfig(n_layers=24, D=896, bind_K=32, mlp_groups=8)
     model = EVAStack(cfg).to(device)
     n = model.param_count()
     print(f'  D=896 G=8: params={n:,} ({n/1e6:.2f}M)')
     
     print()
-    cfg = EVAConfig(n_layers=4, D=896, bottleneck=896, bind_K=32)
+    cfg = EVAConfig(n_layers=4, D=896, bind_K=32)
     model = EVAStack(cfg).to(device)
     
     x = torch.randint(0, cfg.vocab, (2, 16), device=device)
     h = model.embed_tokens(x)
-    out, state, _ = model(h)
+    out, state, _, _ = model(h)
     loss = model.compute_loss(out[:, :-1], x[:, 1:])
     loss.backward()
     

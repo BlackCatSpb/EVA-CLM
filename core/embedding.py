@@ -106,7 +106,20 @@ class PartitionedEmbedding(nn.Module):
     
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         # Защита от токенов ≥ vocab (device-side assert в gather): фон-клип
-        tokens = tokens.clamp(0, self.codes.shape[0] - 1)
+        max_id = self.codes.shape[0] - 1
+        if not bool(getattr(self, '_oor_warned', False)) and tokens.numel() > 0:
+            # Audit M9: ReasoningTokens.THINK..END (65536+) are ≥ vocab and
+            # used to collapse onto the last real token SILENTLY. Report the
+            # first occurrence loudly (one-time; the clamp stays as guard).
+            if bool((tokens > max_id).any().item()):
+                self._oor_warned = True
+                import warnings
+                warnings.warn(
+                    'token ids ≥ vocab detected — they are clamped to the last '
+                    'vocabulary entry (reserved reasoning tokens are NOT wired '
+                    'to any embedding row; check your data/tokenizer)',
+                    RuntimeWarning, stacklevel=2)
+        tokens = tokens.clamp(0, max_id)
         codes: torch.Tensor = self.codes[tokens]  # (B, L, K), sparse binary
         # Dense mixing: sigmoid(scale · M · codes) → каждый бит влияет на все сегменты
         codes = torch.sigmoid(codes @ self.embed_mix * self._mix_scale)

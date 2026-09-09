@@ -685,6 +685,41 @@ def test_tokenstream_wrapped(tmp_path=None):
     assert off == 16 or off > 0  # read from 0 after wrap
 
 
+# ── M9.1 reasoning weighted-average must stay bounded when all gates close ───
+def test_reasoning_negative_gates_bounded():
+    m = _stack(explicit_reasoning=True, reasoning_adaptive=True)
+    assert m.reasoning_gate is not None, 'adaptive reasoning gate not built'
+    D = m.cfg.D
+    h = torch.randn(2, 5, D)
+
+    class _NegGate(torch.nn.Module):
+        # every step fully negative (anti-knowledge) → positive-weight
+        # denominator collapses; the floor must keep |accum| bounded (M9)
+        def logits(self, h_acc, know, r):
+            return torch.full((h_acc.shape[0], h_acc.shape[1], 8), -5.0)
+    m.reasoning_gate = _NegGate()
+    m._knowledge_signal = lambda x: torch.zeros(x.shape[0], 8)
+    m._last_conf = lambda x: torch.full((x.shape[0],), 0.5)
+    m._tau_norm_reasoning = 1.0
+    h_acc = m._adaptive_reasoning(h, s=1.0, state=None,
+                                  reasoning_buffer=None, reasoning_count=None)
+    assert torch.isfinite(h_acc).all(), 'h_acc has NaN/Inf'
+    # bounded: the delta over h cannot exceed a few × the unit-normalized
+    # step contributions (was ~1e-6 denominator → orders-of-magnitude blowup)
+    ratio = float(((h_acc - h).norm(dim=-1).mean() / h.norm(dim=-1).mean()).detach())
+    assert ratio < 5.0, f'reasoning contribution explodes when gates close: ratio={ratio:.1e}'
+
+
+# ── M9.2 ReasoningGate init: first gate ON (tanh≈1), rest OFF (≈0) ──────────
+def test_reasoning_gate_init():
+    from core.reasoning import ReasoningGate
+    g = ReasoningGate(D=64, max_steps=8)
+    with torch.no_grad():
+        out = g(torch.randn(1, 3, 64))
+    assert abs(float(out[..., 0].mean()) - 1.0) < 0.05, 'step-0 gate should start ≈ON'
+    assert abs(float(out[..., 1:].mean())) < 0.3, 'later gates start near 0'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0
