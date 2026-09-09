@@ -63,10 +63,13 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             ce_loss = ce.sum() / mask.sum().clamp(min=1)
     pred_loss = 0.0
     n_pred = 0
-    cache = getattr(stack, '_pred_cache', [])
-    for pred_k, hp in cache:
-        pred_loss = pred_loss + F.mse_loss(pred_k, hp.detach())
-        n_pred = n_pred + 1
+    # Live per-layer self-prediction scalars (audit M5: the old _pred_cache
+    # stored pre-detached tensors → 'pred' had zero gradient by construction).
+    for layer in stack.layers:
+        _pt = getattr(layer.mirror, '_pred_loss_term', None)
+        if _pt is not None:
+            pred_loss = pred_loss + _pt
+            n_pred = n_pred + 1
     if n_pred > 0:
         pred_loss = pred_loss / n_pred
     
@@ -167,7 +170,10 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
                 tau_mid_t = (stack.tau_config.tau_l[0].detach() * stack.tau_config.tau_l[-1].detach()).sqrt()
                 target = getattr(stack.cfg, 'w_m2v_hierarchy_target', 1.0)
                 target_m2v = target / (1.0 + torch.exp(-(tau_l_t.log() - tau_mid_t.log())))
-                w_m2v_loss = w_m2v_loss + (wm.mean().detach() - target_m2v).pow(2)
+                # audit M5: the parameter side was .detach()ed too → the loss
+                # could never move w_mem2v (dead decoration). Target stays
+                # detached (no co-adaptation), parameter side is live.
+                w_m2v_loss = w_m2v_loss + (wm.mean() - target_m2v).pow(2)
                 n_m2v = n_m2v + 1
         if n_m2v > 0:
             w_m2v_loss = w_m2v_loss / n_m2v
@@ -178,10 +184,14 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         tau_mid_t = (stack.tau_config.tau_l[0].detach() * stack.tau_config.tau_l[-1].detach()).sqrt()
         c_ema_t = (1.0 / math.sqrt(stack.cfg.D)) * tau_mid_t
         for i in range(len(stack.layers)):
-            tau_intent_l = stack.tau_config.tau_l[i].detach()
+            # audit M5: BOTH sides were detached → the regularizer could not
+            # shape the τ-ladder it claims to regulate (dead decoration).
+            # Actual side is live (gradient flows to tau_config._tau_dev);
+            # the target keeps detached τ (no co-adaptation, per comment).
+            tau_intent_l = stack.tau_config.tau_l[i]
             actual_alpha = torch.clamp(1.0 - c_ema_t / tau_intent_l, min=0.0)
             tgt = getattr(stack.cfg, 'intent_tau_hierarchy_target', 0.3)
-            target_alpha = tgt / (1.0 + torch.exp(-(tau_intent_l.log() - tau_mid_t.log())))
+            target_alpha = tgt / (1.0 + torch.exp(-(tau_intent_l.detach().log() - tau_mid_t.log())))
             intent_tau_loss = intent_tau_loss + (actual_alpha - target_alpha).pow(2)
             n_it += 1
         if n_it > 0:
@@ -209,10 +219,42 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     for layer in stack.layers:
         w = torch.sigmoid(layer.mirror._signal_log_weights)
         p = w / (w.sum() + 1e-10)  # normalize for entropy
-        signal_entropy = signal_entropy - (p * torch.log(p + 1e-10)).sum()
+        # MINIMIZE −H ⇒ MAXIMIZE signal entropy (all mirror signals stay
+        # in play). The old sign (+H) actively pushed the 5 learnable signal
+        # weights toward one-hot collapse — opposite to gate_repulse/branch,
+        # which use the −entropy convention (audit M5).
+        signal_entropy = signal_entropy + (p * torch.log(p + 1e-10)).sum()
         n_sig = n_sig + 1
     if n_sig > 0:
         signal_entropy = signal_entropy / n_sig
+
+    # ─── gradalign: gradient-reactive governance loss (AGENT_BRIEF §4) ───
+    # Target: per-expert ‖∂CE/∂mlp_out‖ captured by a backward hook in the
+    # block (free — audit M5: the loops recomputed it with an extra full
+    # autograd.grad per step). Model: the per-expert MLP gate mean, mapped
+    # through its own max so both sides are relative distributions. Weight
+    # cfg.gradalign_weight is a REAL strength now (was on/off only), and the
+    # term BYPASSES spectral alignment downstream (LossBalancer.BYPASS_AUX):
+    # its purpose is a direct teaching signal for the gate path — zeroing it
+    # when the summed aux gradient happens orthogonal to CE would delete the
+    # mechanism the brief built it to fix.
+    gradalign_term = 0.0
+    _gaw = float(getattr(stack.cfg, 'gradalign_weight', 0.0) or 0.0)
+    if _gaw > 0 and stack.training:
+        _ga_sum, _ga_n = 0.0, 0
+        for layer in stack.layers:
+            _tgt = getattr(layer, '_gradalign_tgt', None)
+            _mod = getattr(layer, '_cache_mlp_mod', None)
+            if _tgt is None or _mod is None or not _mod.requires_grad:
+                continue
+            _gt = _tgt.float()
+            _mt = _mod.float().mean(dim=(0, 1))
+            _gtn = (_gt / (_gt.max() + 1e-8)).detach()
+            _mtn = _mt / (_mt.max().detach() + 1e-8)
+            _ga_sum = _ga_sum + (_mtn - _gtn).pow(2).mean()
+            _ga_n += 1
+        if _ga_n > 0:
+            gradalign_term = _gaw * _ga_sum / _ga_n
     
     log_scale_reg = 0.0
     n_ls = 0
@@ -403,6 +445,8 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         aux_dict['decorr'] = decorr_loss
     if n_sig > 0:
         aux_dict['signal_ent'] = signal_entropy
+    if isinstance(gradalign_term, torch.Tensor):
+        aux_dict['gradalign'] = gradalign_term
     if log_scale_reg != 0:
         aux_dict['ls_reg'] = log_scale_reg
     # ─── Memory bank log_tau: regularize toward prior + enforce L1 < L2 < L3 ───

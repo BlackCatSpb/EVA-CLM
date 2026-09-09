@@ -396,33 +396,13 @@ def train(cfg=None, resume_path=None):
                 model.zero_grad(set_to_none=True)
                 continue
 
-            # ── Gradient-reactive governance loss (prototype) ──────────────
-            # Open the MLP gate where the MLP output actually changes the CE loss:
-            # align per-expert mlp_mod to g_target = ||∂CE/∂mlp_out|| over (B,L,d).
-            # g_target is DETACHED (target/observation) → no 2nd-order gradient.
-            # Added as a bypass aux loss (directly into grads, no spectral scaling).
-            ga_w = float(getattr(cfg, 'gradalign_weight', 0.0))
-            if ga_w > 0 and not use_amp:
-                _outs = [getattr(l, '_cache_mlp_out', None) for l in model.layers]
-                _mods = [getattr(l, '_cache_mlp_mod', None) for l in model.layers]
-                if all(o is not None for o in _outs) and all(m is not None for m in _mods):
-                    _g = torch.autograd.grad(ce_loss, _outs, retain_graph=True,
-                                             allow_unused=True)
-                    _ga = torch.zeros((), device=ce_loss.device)
-                    for _gi, _mi in zip(_g, _mods):
-                        if _gi is None or _mi is None:
-                            continue
-                        _B, _L = _mi.shape[0], _mi.shape[1]
-                        _G = _mi.shape[-1]
-                        _d = _gi.shape[-1] // _G
-                        _gt = _gi.reshape(_B, _L, _G, _d).pow(2).sum(dim=(0, 1, -1)).sqrt()  # (G,)
-                        _gt_n = _gt / (_gt.max().detach() + 1e-8)
-                        _m = _mi.mean(dim=(0, 1))                               # (G,)
-                        _m_n = _m / (_m.max().detach() + 1e-8)
-                        _ga = _ga + ((_m_n - _gt_n) ** 2).mean()
-                    aux_dict['gradalign'] = _ga
-            elif ga_w > 0 and use_amp:
-                print('  WARN: gradalign_weight>0 ignored under AMP (needs fp32 graph)')
+            # ── Gradient-reactive governance loss ─────────────────────────
+            # Moved into core.losses.compute_losses (audit M5): the target
+            # ‖∂CE/∂mlp_out‖ per expert is captured by a backward HOOK in the
+            # block during the regular pass (no extra autograd.grad = no
+            # second backward per step), the term carries its real
+            # cfg.gradalign_weight and BYPASSES spectral alignment via
+            # LossBalancer.BYPASS_AUX. aux_dict['gradalign'] is already set.
 
             # NaN guard
             if torch.isnan(ce_loss) or torch.isinf(ce_loss):

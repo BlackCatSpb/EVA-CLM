@@ -329,7 +329,16 @@ class LossBalancer:
     ``mode='balance'``: dimensionless per-aux normalisation by a running EMA of
     |aux_i|, scaled so the aux block tracks |CE| (Kendall & Gal / GradNorm
     style). Returns a scalar loss for normal backward.
+
+    Bypass (audit M5): terms in BYPASS_AUX (gradalign) are removed from the
+    spectral alignment and backwarded DIRECTLY after the align pass — their
+    purpose is a local teaching signal for the gate path; the single global
+    cos-gate would otherwise zero the whole aux block (including them) on
+    steps where the summed aux gradient happens orthogonal to CE. The cos
+    value itself is now logged on ``self.last_cos`` (was invisible).
     """
+
+    BYPASS_AUX = ('gradalign',)
 
     def __init__(self, align: bool = True, align_cap: Optional[float] = None,
                  eval_interval: int = 1000) -> None:
@@ -339,6 +348,7 @@ class LossBalancer:
         self.ema_ce: Optional[float] = None
         self.ema_aux: Dict[str, float] = {}
         self.ema_A: Optional[float] = None
+        self.last_cos: Optional[float] = None   # cos(g_CE, g_aux) of last backward
 
     def set_stats(self, eval_interval: int = 1000) -> None:
         self.eval_interval = int(eval_interval)
@@ -382,8 +392,16 @@ class LossBalancer:
                  parameters: Iterable[torch.nn.Parameter],
                  retain_graph: bool = False) -> None:
         params = [p for p in parameters if p.requires_grad]
+        bypass: Dict[str, Any] = {}
+        aux_dict = dict(aux_dict)   # never mutate the caller's dict (logging)
+        for _k in self.BYPASS_AUX:
+            _v = aux_dict.get(_k)
+            if isinstance(_v, torch.Tensor) and _v.requires_grad:
+                bypass[_k] = aux_dict.pop(_k)
         if not params:
             ce_loss.backward(retain_graph=retain_graph)
+            if bypass:
+                sum(bypass.values()).backward()
             return
         ce_grads = torch.autograd.grad(ce_loss, params, retain_graph=True,
                                        allow_unused=True)
@@ -394,10 +412,13 @@ class LossBalancer:
                 # просмотры внутренних буферов движка — их нельзя мутировать
                 # в grad-mode (AGC делает p.grad.mul_ in-place).
                 p.grad = g.clone() if g is not None else None
+            if bypass:
+                sum(bypass.values()).backward()
             return
 
         aux_total = sum(aux_tensors)
-        aux_grads = torch.autograd.grad(aux_total, params, retain_graph=retain_graph,
+        aux_grads = torch.autograd.grad(aux_total, params,
+                                        retain_graph=retain_graph or bool(bypass),
                                         allow_unused=True)
 
         # Поток без полно-модельных flat-копий (аудит VRAM 2026-09): cos и нормы
@@ -420,6 +441,7 @@ class LossBalancer:
             na = float(den_a.sqrt())
             nb = float(den_b.sqrt()) + 1e-8
             cos = float(num) / (na * nb + 1e-8)
+            self.last_cos = cos          # raw alignment diagnostic (audit M5)
             scale = min(1.0, max(0.0, cos)) * na / nb
 
         with torch.no_grad():
@@ -435,3 +457,7 @@ class LossBalancer:
                         p.grad = gau * scale
                     else:
                         p.grad.add_(gau, alpha=scale)
+
+        if bypass:
+            # direct teaching signal (not cos-gated) — final pass frees the graph
+            sum(bypass.values()).backward()

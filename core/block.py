@@ -525,6 +525,18 @@ class EVABlock(nn.Module):
         # Старый пост-множитель h_mlp *= mlp_mod убран (двойное гейтирование).
         h_mlp = self.mlp(h, mirror_gate=mlp_mod)
         self._cache_mlp_out = h_mlp  # raw MLP output (gradalign target source)
+        if self.training and h_mlp.requires_grad:
+            # gradalign target = ‖∂CE/∂mlp_out‖ per expert, captured by a
+            # backward HOOK during the regular CE pass (audit M5: the loop
+            # computed it with an EXTRA torch.autograd.grad over the whole
+            # network each step ≈ second backward; the hook gets it for free).
+            # One-step-stale by design — same streaming convention as
+            # _prev_grad_norm in the mirror.
+            def _ga_hook(grad, _blk=self):
+                _m = _blk.mirror
+                gg = grad.detach().float().reshape(grad.shape[0], grad.shape[1], _m.G, -1)
+                _blk._gradalign_tgt = gg.pow(2).sum(dim=(0, 1, 3)).sqrt()
+            h_mlp.register_hook(_ga_hook)
         if _chk(h_mlp, 'mlp_out'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         with torch.no_grad():
             _mrms = torch.norm(h_mlp.detach().reshape(-1)).float()

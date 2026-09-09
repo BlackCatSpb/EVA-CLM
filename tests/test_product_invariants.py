@@ -19,7 +19,8 @@ SMALL = dict(n_layers=1, D=512, mlp_groups=4, code_dim=16, code_sparsity=4, voca
 
 
 def _stack(**kw):
-    cfg = EVAConfig(**{**SMALL, **kw})
+    # n_layers=2: cross-layer var()/std() terms in aux losses need ≥2 layers
+    cfg = EVAConfig(**{**SMALL, 'n_layers': 2, **kw})
     torch.manual_seed(0)
     return EVAStack(cfg).to(device).train()
 
@@ -341,6 +342,108 @@ def test_governor_eval_parity():
         m(h, step=1, tokens=x)
         g_on = float(lay._last_gates.mean())
     assert g_on > g_off, 'governor dead at eval (train-only branch, audit M4)'
+
+
+# ── M5.1 pred aux trains alpha (both operands were detached before) ──────────
+def test_pred_loss_differentiable():
+    m = _stack()
+    x = torch.randint(1, m.cfg.vocab, (1, 6))
+    h = m.embed_tokens(x)
+    out, st, gs, _ = m(h, step=5, tokens=x)
+    ce, aux = m.compute_losses(out, x, h_emb=h)
+    assert 'pred' in aux and isinstance(aux['pred'], torch.Tensor) \
+        and aux['pred'].requires_grad, 'pred has no graph'
+    (ce + aux['pred']).backward()
+    g = m.layers[0].mirror.alpha_diag.grad
+    assert g is not None and float(g.abs().sum()) > 0, 'pred loss dead for alpha'
+
+
+# ── M5.2 w_m2v regularizer moves the parameter (param side was detached) ─────
+def test_wm2v_regularizer_live():
+    m = _stack(w_m2v_hierarchy_weight=1.0)
+    x = torch.randint(1, m.cfg.vocab, (1, 6))
+    h = m.embed_tokens(x)
+    out, st, gs, _ = m(h, step=5, tokens=x)
+    ce, aux = m.compute_losses(out, x, h_emb=h)
+    assert 'w_m2v' in aux and aux['w_m2v'].requires_grad
+    (ce + aux['w_m2v']).backward()
+    g = m.layers[0].w_mem2v.grad
+    assert g is not None and float(g.abs().sum()) > 0
+
+
+# ── M5.3 intent_tau shapes the τ-field (actual side was detached) ────────────
+def test_intent_tau_live():
+    m = _stack(intent_bridge=True, intent_tau_hierarchy_weight=1.0)
+    if not getattr(m, 'intent_bridge', False):
+        import pytest
+        pytest.skip('intent bridge not built in this config')
+    x = torch.randint(1, m.cfg.vocab, (1, 6))
+    h = m.embed_tokens(x)
+    out, st, gs, _ = m(h, step=5, tokens=x)
+    ce, aux = m.compute_losses(out, x, h_emb=h)
+    assert 'intent_tau' in aux and aux['intent_tau'].requires_grad
+    (ce + aux['intent_tau']).backward()
+    g = m.tau_config._tau_dev.grad
+    assert g is not None and float(g.abs().sum()) > 0, 'intent_tau cannot shape τ'
+
+
+# ── M5.4 signal_ent direction: uniform weights are the MINIMUM of the loss ────
+def test_signal_ent_pushes_toward_uniform():
+    def ent_term(w_val):
+        m = _stack()
+        for layer in m.layers:
+            with torch.no_grad():
+                lay = layer.mirror._signal_log_weights
+                lay.zero_(); lay[0] = w_val
+        x = torch.randint(1, m.cfg.vocab, (1, 4))
+        h = m.embed_tokens(x)
+        out, st, gs, _ = m(h, step=3, tokens=x)
+        _, aux = m.compute_losses(out, x, h_emb=h)
+        return float(aux['signal_ent'].detach())
+    near_uniform = ent_term(0.0)
+    collapsed = ent_term(20.0)
+    assert near_uniform < collapsed, 'signal_ent rewards collapse (wrong sign)'
+
+
+# ── M5.5 gradalign: hook target feeds a weighted term that trains the anchor ─
+def test_gradalign_hook_anchor_bypass():
+    from core.adaptation import LossBalancer
+    m = _stack(gradalign_weight=0.3)
+    opt = torch.optim.SGD(m.parameters(), lr=0.0)
+    x = torch.randint(1, m.cfg.vocab, (1, 6))
+    bal = LossBalancer(align=True)
+    term_seen = None
+    for it in range(3):                       # step1 fills hook targets
+        h = m.embed_tokens(x)
+        out, st, gs, _ = m(h, step=5 + it, tokens=x, intent_state=None)
+        ce, aux = m.compute_losses(out, x, h_emb=h)
+        if 'gradalign' in aux:
+            term_seen = aux['gradalign']
+        bal.backward(ce, aux, list(m.parameters()))
+        opt.zero_grad(set_to_none=True)
+    assert term_seen is not None and term_seen.requires_grad, 'no live gradalign'
+    assert float(term_seen.detach()) > 0
+    for layer in m.layers:
+        assert getattr(layer, '_gradalign_tgt', None) is not None, 'hook never fired'
+    h = m.embed_tokens(x)
+    out, st, gs, _ = m(h, step=8, tokens=x)
+    ce, aux = m.compute_losses(out, x, h_emb=h)
+    bal.backward(ce, aux, list(m.parameters()))
+    ms = m.layers[0].mirror.mod_scale_mlp
+    assert ms.grad is not None and float(ms.grad.abs().sum()) > 0, \
+        'gradalign bypass did not reach the mlp_mod anchor'
+
+
+# ── M5.6 mlp_mod anchored to mod_scale_mlp: identity at init, live on grad ────
+def test_mlp_mod_anchor_identity():
+    from core.mirror import GroupedCognitiveMirror
+    import math as _m
+    mir = GroupedCognitiveMirror(D=64, G=4, k=4, layer_idx=0, n_layers=1,
+                                 expert_asymmetry=True, bridge_glu=True)
+    assert abs(float(torch.sigmoid(mir.mod_scale_mlp[0]).item()) - 2.0 / 3.0) < 1e-6
+    # σ(m)/σ(ln2) == 1 at init exactly → anchor does not alter the init path
+    coef = 1.5 * torch.sigmoid(mir.mod_scale_mlp)
+    assert torch.allclose(coef, torch.ones_like(coef), atol=1e-6)
 
 
 if __name__ == '__main__':

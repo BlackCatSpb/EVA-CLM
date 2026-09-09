@@ -345,7 +345,6 @@ class EVAStack(nn.Module):
             else:
                 self._gs_velocity = self._gs_velocity.to(global_state.device)
         new_state = []
-        self._pred_cache = []
         pred_errs = []  # per-layer pred_error_norm means for the maturation controller
         # ─── Cross-layer bus scratch (intent bridge) ───
         # Carried streams are the previous step's gist (detached). The bus is
@@ -603,9 +602,10 @@ class EVAStack(nn.Module):
                 self._last_bus = _last_bus.detach() if _last_bus is not None else None
             if adaptive:
                 mir = layer.mirror
-                if mir._cached_pred_k is not None and mir._cached_hp is not None:
-                    self._pred_cache.append((mir._cached_pred_k, mir._cached_hp))
-        
+                # (pred aux now travels as a LIVE per-layer scalar
+                #  mir._pred_loss_term consumed by losses.compute_losses —
+                #  the old _pred_cache of detached tensors was a dead path.)
+                
         # ─── Update maturation controller from this step's per-layer pred-error ───
         if self.maturation is not None and step is not None and len(pred_errs) == n_layers:
             self.maturation.update(step, torch.stack(pred_errs))

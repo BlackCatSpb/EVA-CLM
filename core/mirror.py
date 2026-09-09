@@ -481,10 +481,19 @@ class GroupedCognitiveMirror(nn.Module):
                         self.alpha_diag.data.clamp_(0.01, 0.99)
         pred_error_norm = (raw_pred_error / hp_norm).norm(dim=(-2, -1))  # (B, L)
         if self.training:
+            # pred aux must train the self-prediction path (alpha_diag/W_proj):
+            # the OLD cache detached BOTH operands, making 'pred' a pure
+            # display number with zero gradient (audit M5). The live scalar is
+            # computed in-place on the undamped prediction vs a detached
+            # target (hp.detach() stays — the target must not chase itself).
+            self._pred_loss_term = (
+                F.mse_loss(_pred_k_aux, hp.detach()) if _pred_k_aux is not None else None)
             self._cached_pred_k = _pred_k_aux.detach() if _pred_k_aux is not None else None
             self._cached_hp = hp.detach()
             self._cached_pred_error_norm = pred_error_norm.detach()
         else:
+            self._pred_loss_term = None   # eval: never hold a training graph
+        if self.training:
             if self._cached_hp_buf.shape[0] != B:
                 _seq_max = self._cached_hp_buf.shape[1]
                 self._cached_hp_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
@@ -734,9 +743,16 @@ class GroupedCognitiveMirror(nn.Module):
                 # Maturation gate: live modulation is SCALED by layer maturity, so
                 # untrained experts cannot perturb the trunk at step 0 (rho(J_l) ~ 1).
                 live = live * maturity
-            mlp_mod = base * (1.0 + self.bridge_glu_beta * live)
+            # Anchor to the proven-stable capacity baseline σ(mod_scale_mlp)
+            # (init ln 2 → σ=2/3 → coefficient exactly 1.0): the hybrid gate
+            # MODULATES the learnable scale instead of replacing it — mirroring
+            # the mem_mod anchor below. audit M5: mod_scale_mlp was orphaned
+            # (no gradient, gradalign story monitored an inert parameter).
+            mlp_mod = base * (1.5 * torch.sigmoid(self.mod_scale_mlp)).view(1, 1, self.G) \
+                * (1.0 + self.bridge_glu_beta * live)
         else:
-            mlp_mod = self.hybrid_gate(usefulness_logits)         # (B, L, G)
+            mlp_mod = self.hybrid_gate(usefulness_logits) \
+                * (1.5 * torch.sigmoid(self.mod_scale_mlp)).view(1, 1, self.G)
         mem_mod = usefulness * torch.sigmoid(self.mod_scale_mem).view(1, 1, G)
         self._last_mlp_mod = mlp_mod.detach()                      # for diagnostics (gate spread / aliveness)
 
