@@ -862,23 +862,6 @@ class EVAStack(nn.Module):
         ce_loss, _ = self.compute_losses(h, targets, pred_weight=pred_weight, h_emb=h_emb)
         return ce_loss
 
-    def _finalize_ce(self, ce, targets):
-        """Mask PAD (0) и опционально EOS (2) + surprisal-weighting — единый хвост CE."""
-        mask = targets.reshape(-1) != 0
-        if getattr(self.cfg, 'mask_eos', True):
-            mask = mask & (targets.reshape(-1) != 2)
-        ce_m = ce * mask.float()
-        sw = getattr(self.cfg, 'surprisal_weight', 0.0)
-        if self.training and sw > 0:
-            with torch.no_grad():
-                ce_ratio = ce_m / (ce_m.mean() + 1e-8)
-                w = torch.sigmoid(2.0 * (ce_ratio - 1.0))
-            ce_loss = (ce_m * w).sum() / mask.sum().clamp(min=1)
-        else:
-            ce_loss = ce_m.sum() / mask.sum().clamp(min=1)
-        return ce_loss
-
-    @torch.no_grad()
     def compute_salience(self, logits):
         # Word importance from the head's output field (head_mode='sigmoid_coded'):
         # how strongly / confidently the model responds at each position. Now fed
@@ -939,6 +922,34 @@ class EVAStack(nn.Module):
                 l._mlp_cnt.zero_()
                 l._mlp_now_ema.zero_()
                 l._mlp_base_ema.zero_()
+        # Audit M8: rollback restores weights, but the NON-persistent runtime
+        # EMAs (bus RMS, ig norms, delta-var, scheduler temps …) survive the
+        # load — a NaN-poisoned EMA after rollback means an instant NaN zombie
+        # (the skip-step loop never recovers). Scrub any non-finite buffer.
+        with torch.no_grad():
+            for b in self.buffers():
+                if b.is_floating_point() and not torch.isfinite(b).all():
+                    b.nan_to_num_(nan=0.0, posinf=1e4, neginf=-1e4)
+
+    def snapshot_runtime_buffers(self) -> dict:
+        """Detached copies of EVERY buffer (incl. persistent=False).
+
+        Eval-isolation contract (audit M8): forward mutates streaming state
+        (memory banks, intent bus, EMAs). Validation passes run a FULL forward
+        on val documents — without this snapshot/restore pair around eval,
+        validation sentences are consolidated into the TRAINING working
+        memory (and vice versa), cross-contaminating the VSA 'document state'.
+        Parameters are not touched by eval (no optimizer step) → buffers only.
+        """
+        return {k: v.detach().clone() for k, v in self.named_buffers()}
+
+    def restore_runtime_buffers(self, snap: dict) -> None:
+        own = dict(self.named_buffers())
+        with torch.no_grad():
+            for k, v in snap.items():
+                buf = own.get(k)
+                if buf is not None and buf.shape == v.shape:
+                    buf.copy_(v)
 
     def cache_size_mb(self) -> float:
         """Get current cache size in MB."""

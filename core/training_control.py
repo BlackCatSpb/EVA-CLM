@@ -255,15 +255,23 @@ class FailureDetector:
                 signals[k] = float(v)
 
         trigger = False
-        for name, value in signals.items():
-            if self._observe(name, value):
-                c = self._viol.get(name, 0) + 1
-            else:
-                c = 0
-            self._viol[name] = c
-            if c >= self.min_consecutive:
-                trigger = True
-                break
+        if not math.isfinite(ce):
+            # Non-finite CE is divergence BY DEFINITION (audit M8): the
+            # relative chain can never confirm it (NaN comparisons are False),
+            # so without this bypass the run NaN-zombies, skipping every step.
+            trigger = True
+            self._last_viol_name = 'ce:non-finite'
+            print(f'  [FailureDetector] non-finite CE at step {step} -> forced rollback')
+        else:
+            for name, value in signals.items():
+                if self._observe(name, value):
+                    c = self._viol.get(name, 0) + 1
+                else:
+                    c = 0
+                self._viol[name] = c
+                if c >= self.min_consecutive:
+                    trigger = True
+                    break
 
         if not trigger:
             return False
@@ -271,6 +279,10 @@ class FailureDetector:
         # Genuine divergence confirmed on some signal.
         if not os.path.exists(self.best_path):
             print(f'  [FailureDetector] signal spike but no best.pt yet — skipping')
+            # Still scrub runtime buffers: a non-finite spike with no restore
+            # target must not leave NaN EMAs behind to poison later steps (M8).
+            if hasattr(self.model, 'reset_cache'):
+                self.model.reset_cache()
             self._cooldown = self.cooldown
             self._viol = {}
             return False

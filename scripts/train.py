@@ -47,16 +47,22 @@ class TokenStream:
         self.len = len(self.data)
     def get_batch(self, seq_len, batch_size, offset, vocab=50000):
         needed = batch_size * seq_len + 1
-        if offset + needed > self.len:
+        wrapped = offset + needed > self.len
+        if wrapped:
             offset = 0
         chunk = self.data[offset:offset + needed]
         if vocab is not None:
-            # uint16-С„Р°Р№Р»С‹ РјРѕРіСѓС‚ СЃРѕРґРµСЂР¶Р°С‚СЊ С‚РѕРєРµРЅС‹ в‰Ґ vocab в†’ device-side assert
-            # РІ codes[tokens] (index out of bounds); РєР»РёРїР°РµРј РґРѕ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё.
+            # uint16-файлы могут содержать токены ≥ vocab → device-side assert
+            # в codes[tokens] (index out of bounds); клипим до безопасности.
             chunk = np.clip(chunk, 0, vocab - 1)
         x = torch.from_numpy(chunk[:batch_size * seq_len].reshape(batch_size, seq_len).copy())
         y = torch.from_numpy(chunk[1:batch_size * seq_len + 1].reshape(batch_size, seq_len).copy())
-        return x.long(), y.long(), offset + batch_size * seq_len
+        # Audit M8: return an explicit `wrapped` flag. The old 3-tuple made the
+        # caller's `if offset == 0` rotation branch unreachable (get_batch
+        # already rewound internally and returned bs*seq ≠ 0), so mixed-stream
+        # sampling ran exactly ONE stream for the whole run and never reset the
+        # VSA/bridge/reasoning document state at boundaries.
+        return x.long(), y.long(), offset + batch_size * seq_len, wrapped
 
 
 def _opt_param_names(model, optimizer):
@@ -338,19 +344,10 @@ def train(cfg=None, resume_path=None):
             if model.explicit_reasoning:
                 model.reasoning_enabled_step = reasoning_enabled_step
             
-            # в”Ђв”Ђв”Ђ Mixed stream sampling: pick a random position in a random stream в”Ђв”Ђв”Ђ
-            # When offset reaches end of current stream, randomly pick next stream
-            # This keeps state continuity within a stream while mixing genres
-            # at stream boundaries (FANTASY~82%, ADVENTUR~18% of batches)
-            if offset == 0:
-                stream_idx = torch.randint(0, len(streams), (1,), generator=rng).item()
-                offset = 0
-                state = None  # reset state on stream switch (document boundary)
-                gs = None
-                if model.bridge is not None:
-                    model.bridge.bridge_stream.zero_()  # reset bridge memory at document boundary
-                if model.explicit_reasoning:
-                    model.reset_reasoning()  # new document: new chain
+            # (document-boundary rotation moved to the read below, after
+            # seq_len is chosen — audit M8: the old pre-curriculum
+            # `if offset == 0` block was unreachable after step 0.)
+            
             
             # в”Ђв”Ђв”Ђ Multi-scale seq curriculum: С‡РµСЂРµРґРѕРІР°РЅРёРµ РґР»РёРЅС‹ Р±Р°С‚С‡Р° РїРѕ РѕРєС‚Р°РІР°Рј П„ в”Ђв”Ђв”Ђ
             # L=64 (П„в‰¤32, РѕРєС‚Р°РІС‹ 0вЂ“13): 7/9 С€Р°РіРѕРІ
@@ -371,27 +368,72 @@ def train(cfg=None, resume_path=None):
             seq_pool = [s for s in [64, 128, 256, 512] if s <= seq_max]
             seq_len = seq_pool[step % len(seq_pool)]
             
+            # ─── Mixed stream sampling: document-boundary rotation (audit M8) ───
+            # The OLD `if offset == 0` rotation was unreachable after step 0
+            # (get_batch wrapped internally and returned a non-zero offset), so
+            # one stream served the entire run and the streaming document state
+            # (VSA memory, bridge, reasoning) never reset at boundaries.
+            # Rotation now happens HERE, before the read: when the next batch
+            # does not fit, switch to a random stream and reset state.
+            _need = cfg.batch_size * seq_len + 1
+            if offset == 0 or offset + _need > streams[stream_idx].len:
+                # holdout: the LAST stream belongs to evaluate() (audit M8) —
+                # the old sampler could pick it, so 'val' was in-train data.
+                stream_idx = torch.randint(0, max(len(streams) - 1, 1), (1,), generator=rng).item()
+                offset = 0
+                state = None  # reset state on stream switch (document boundary)
+                gs = None
+                if model.bridge is not None:
+                    model.bridge.bridge_stream.zero_()  # reset bridge memory at document boundary
+                if getattr(model, 'memory_bank', None) is not None:
+                    model.memory_bank.reset()  # reset streaming banks at document boundary
+                if model.explicit_reasoning:
+                    model.reset_reasoning()  # new document: new chain
             stream = streams[stream_idx]
-            x, y, offset = stream.get_batch(seq_len, cfg.batch_size, offset, cfg.vocab)
-            if offset == 0:
-                continue  # retry with new random stream
+            x, y, offset, _wrapped = stream.get_batch(seq_len, cfg.batch_size, offset, cfg.vocab)
             
             x, y = x.to(device), y.to(device)
             
-            # в”Ђв”Ђв”Ђ Forward (with optional AMP) в”Ђв”Ђв”Ђ
+            # ─── Forward (with optional AMP) ───
             with autocast('cuda', enabled=use_amp):
                 h = model.embed_tokens(x)
             out, state, gs, _ = model(h, state, global_state=gs, step=step, tokens=x)
-            model.observe_output(out)  # salience of THIS step -> next step's intent
+            # Salience must come from the HEAD logits (same contract as the
+            # Colab loop & the stack docstring); passing the raw hidden state
+            # silently fed non-logit values into the salience stats (audit M8).
+            model.observe_output(model.lm_head(out))  # salience of THIS step -> next step's intent
             ce_loss, aux_dict = model.compute_losses(out, y, h_emb=h)
 
             ce_val = ce_loss.item()
             # Progressive unfreeze (validation-plateau driven)
             depth.update(step)
-            # Statistical watchdog: CE explosion -> rollback + fresh Adam + LR rewind
-            if watchdog.check(ce_val, step):
+            # Statistical watchdog: CE explosion -> rollback + fresh Adam + LR rewind.
+            # Audit M8: train.py never passed the protective metrics and never
+            # armed CE (watchdog.ce_armed stays False) — the Colab loop has both;
+            # here the watchdog was decoration. Metrics mirror the notebook.
+            _mets = {}
+            try:
+                _dv = aux_dict.get('diversity')
+                if _dv is not None and isinstance(_dv, torch.Tensor):
+                    _mets['diversity'] = float(_dv.abs().item())
+                _gl = aux_dict.get('gate_l1')
+                if _gl is not None and isinstance(_gl, torch.Tensor):
+                    _mets['gate_l1'] = float(_gl.item())
+                with torch.no_grad():
+                    _rr = [getattr(l, '_mlp_ratio', None) for l in model.layers]
+                    if _rr and all(v is not None for v in _rr):
+                        _mets['mlp_ratio'] = float(max(_rr))
+                    _ige = [getattr(l.mirror, '_cached_ig_eff', None) for l in model.layers]
+                    if _ige and all(v is not None for v in _ige):
+                        _mets['ig_eff'] = float(sum(_ige) / len(_ige))
+            except Exception:
+                pass
+            if watchdog.check(ce_val, step, _mets):
                 optimizer = watchdog.optimizer
                 cfg.lr = watchdog.base_lr
+                state = None
+                gs = None
+                model.reset_cache()   # scrub NaN-poisoned runtime EMAs too (M8)
                 optimizer.zero_grad(set_to_none=True)
                 model.zero_grad(set_to_none=True)
                 continue
@@ -541,6 +583,7 @@ def train(cfg=None, resume_path=None):
                     torch.cuda.empty_cache()
                 scheduler.report_val_loss(val_loss)
                 depth.update(step, val_loss)
+                watchdog.ce_armed = True  # CE joins the watch once val is trusted (M8)
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -571,27 +614,34 @@ def train(cfg=None, resume_path=None):
 @torch.no_grad()
 def evaluate(model, streams, cfg, device):
     model.eval()
+    # Audit M8: (a) `len(stream)` crashed — TokenStream exposes `.len` only,
+    # so train.py died at its FIRST eval (eval_interval≈233); (b) val
+    # forwards mutate the streaming runtime buffers (memory banks, intent bus,
+    # EMAs) — snapshot/restore isolates validation documents from the training
+    # working memory; (c) adaptive=False matches the notebook (controller
+    # buffers must not learn from val); (d) fresh state per batch.
+    _rt_snap = model.snapshot_runtime_buffers()
     if getattr(model, 'explicit_reasoning', False):
         model.reset_reasoning()
     total_loss = 0.0
     total_steps = 0
-    state = None
     
-    # Use last stream for eval (hold-out, not used in training)
+    # Use last stream for eval (hold-out, excluded from the train sampler)
     stream = streams[-1]
-    offset = max(len(stream) // 2, cfg.batch_size * cfg.seq_len + 1)
+    offset = max(stream.len // 2, cfg.batch_size * cfg.seq_len + 1)
     
     for _ in range(min(100, stream.len // (cfg.batch_size * cfg.seq_len))):
-        x, y, offset = stream.get_batch(cfg.seq_len, cfg.batch_size, offset, cfg.vocab)
-        if offset == 0:
-            break
+        x, y, offset, wrapped = stream.get_batch(cfg.seq_len, cfg.batch_size, offset, cfg.vocab)
+        if wrapped:
+            break  # end of the hold-out document region — no wrapped re-read
         x, y = x.to(device), y.to(device)
         h = model.embed_tokens(x)
-        out, state, _, _ = model(h, state, tokens=x)
+        out, _, _, _ = model(h, None, adaptive=False, tokens=x)
         loss = model.compute_loss(out, y, h_emb=h)
         total_loss += loss.item()
         total_steps += 1
     
+    model.restore_runtime_buffers(_rt_snap)
     model.train()
     return total_loss / max(total_steps, 1)
 

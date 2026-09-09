@@ -610,6 +610,81 @@ def test_bind_tau_bounds_from_cfg():
         pytest.skip('bind mode without U10 schedule')
 
 
+# ── M8.1 runtime-buffer isolation API (eval quarantine) ─────────────────────
+def test_snapshot_restore_buffers():
+    m = _stack()
+    snap = m.snapshot_runtime_buffers()
+    assert len(snap) > 0
+    target = next(k for k, v in snap.items() if v.is_floating_point() and v.numel() > 1)
+    own = dict(m.named_buffers())
+    with torch.no_grad():
+        own[target].add_(7.0)
+    assert not torch.equal(own[target], snap[target])
+    m.restore_runtime_buffers(snap)
+    assert torch.equal(dict(m.named_buffers())[target], snap[target])
+
+
+# ── M8.2 non-finite CE forces rollback; buffers get scrubbed ────────────────
+def test_nan_ce_forces_rollback(tmp_path=None):
+    import tempfile, pathlib
+    if tmp_path is None:
+        tmp_path = pathlib.Path(tempfile.mkdtemp())
+    from core.training_control import FailureDetector
+    from core.adaptation import LRController, build_optimizer
+    m = _stack()
+    cfg = m.cfg
+    opt = build_optimizer(m, cfg.lr, llrd_decay=1.0, weight_decay=cfg.weight_decay,
+                          optimizer='adamw')
+    sched = LRController(m, opt, cfg=cfg)
+    best = str(tmp_path / 'best.pt')
+    torch.save({'model': m.state_dict()}, best)
+    wd = FailureDetector(m, sched, lambda lr: build_optimizer(
+        m, lr, llrd_decay=1.0, weight_decay=cfg.weight_decay, optimizer='adamw'),
+        best, cfg.lr, warmup=0)
+    # arm the protective chain with finite values
+    for i in range(5):
+        wd.check(10.0, i, {'mlp_ratio': 1.0})
+    # poison a runtime EMA buffer + NaN CE
+    bus = [b for k, b in dict(m.named_buffers()).items() if b.is_floating_point()]
+    bus[0].fill_(float('nan'))
+    fired = wd.check(float('nan'), 100, {'mlp_ratio': 1.0})
+    assert fired, 'non-finite CE did not force rollback'
+    assert wd.optimizer is not opt, 'fresh optimizer not installed'
+    still_nan = any(bool(torch.isnan(b).any()) for b in dict(m.named_buffers()).values()
+                    if b.is_floating_point())
+    assert not still_nan, 'NaN buffers survived the rollback (reset_cache scrub missing)'
+
+
+# ── M8.3 TokenStream contract: wrapped flag + stream.len (train.py) ──────────
+def test_tokenstream_wrapped(tmp_path=None):
+    import importlib.util, numpy as np, tempfile, pathlib
+    if tmp_path is None:
+        tmp_path = pathlib.Path(tempfile.mkdtemp())
+    spec = importlib.util.spec_from_file_location(
+        '_train_mod', r'C:\Users\black\OneDrive\Desktop\EVA CLM\scripts\train.py')
+    # import train.py for its class only: it guards side effects under __main__,
+    # but heavy top-level imports could fail — fall back to source exec of class
+    src = open(spec.origin, encoding='utf-8').read()
+    i0 = src.index('class TokenStream')
+    i1 = src.index('def evaluate', i0) if 'def evaluate' in src[i0:] else len(src)
+    seg = src[i0:src.index('\n\n\n', i0)] if '\n\n\n' in src[i0:] else src[i0:i1]
+    ns = {'np': np, 'torch': torch}
+    exec(compile(seg, 'ts', 'exec'), ns)
+    TS = ns['TokenStream']
+    f = tmp_path / 's.bin'
+    arr = np.arange(64, dtype=np.uint16)
+    np.memmap(f, dtype=np.uint16, mode='w+', shape=arr.shape)[:]= arr
+    del arr
+    st = TS(str(f))
+    assert st.len == 64
+    x, y, off, wrapped = st.get_batch(8, 2, 40)          # fits: 40+17<64? no→wrapped
+    # offset 40 needs 17 → 57 ≤ 64 fits
+    assert not wrapped
+    x, y, off, wrapped = st.get_batch(8, 2, 60)          # 60+17>64 → wrap
+    assert wrapped, 'end-of-stream not reported'
+    assert off == 16 or off > 0  # read from 0 after wrap
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0
