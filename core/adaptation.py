@@ -289,8 +289,24 @@ class LRController:
         self._inner: Any = MirrorLRScheduler(model, optimizer, base_lr=base_lr,
                                              warmup=warmup, cfg=cfg)
         self.model: torch.nn.Module = model
-        self.optimizer: torch.optim.Optimizer = optimizer
         self.cfg: Any = cfg
+
+    # ── re-binding after rollback ───────────────────────────────────────────
+    # ``FailureDetector.check`` does ``lr_controller.optimizer = new_opt``.
+    # That MUST propagate into the wrapped MirrorLRScheduler — it anneals
+    # ``_inner.optimizer.param_groups`` from ``_inner._orig_lrs``; assigning
+    # only the wrapper attribute left the fresh optimizer unscheduled (no
+    # re-warmup, full base LR) while the dead one was annealed. Audit 2026-09.
+    @property
+    def optimizer(self) -> Any:
+        return self._inner.optimizer
+
+    @optimizer.setter
+    def optimizer(self, opt: Any) -> None:
+        self._inner.optimizer = opt
+        # re-snapshot base lrs: a freshly built optimizer carries
+        # lr = base·role_mult·depth_mult (pre-scheduler values)
+        self._inner._orig_lrs = [pg['lr'] for pg in opt.param_groups]
 
     def step(self) -> None:
         self._inner.step()
@@ -336,6 +352,11 @@ class LRController:
         self._inner._tau_mag = None
         self._inner._tau_1malpha = None
         self._inner._tau_gate_var = None
+        # per-layer ls-EMA baselines must re-bootstrap too (else the restored
+        # model is judged against pre-crash log_scale variance)
+        self._inner._ls_fast = None
+        self._inner._ls_slow = None
+        self._inner._ls_mult = None
         for attr in ('_best_val_loss', '_loss_ema', '_loss_lr_factor'):
             if hasattr(self._inner, attr):
                 delattr(self._inner, attr)

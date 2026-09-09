@@ -37,7 +37,6 @@ class TauConfig(nn.Module):
         n_layers: количество слоёв
         tau_min: минимальный τ (самый быстрый слой, shallow)
         tau_max: максимальный τ (самый медленный слой, deep)
-        tau_init_spread: начальный разброс τ по слоям (fraction of log range)
         dev_max: максимальное отклонение dev (clip range)
         T0: базовая задержка созревания (steps)
         T_delay: дополнительная задержка для shallow слоёв (steps)
@@ -46,6 +45,10 @@ class TauConfig(nn.Module):
         gate_tau_max: максимальная температура гейтов
         mem_tau_ref: референсный τ для memory bank temperatures
         llrd_gamma: показатель степени для LLRD (∝ τ^{-gamma})
+
+    Начальная лестница — равномерная в log-пространстве (_tau_dev=0 ⇒
+    inc=base_inc); отдельного «начального разброса» нет (мёртвый knob
+    tau_init_spread удалён после аудита 2026-09).
     """
 
     def __init__(
@@ -53,7 +56,6 @@ class TauConfig(nn.Module):
         n_layers: int = 24,
         tau_min: float = 8.0,
         tau_max: float = 512.0,
-        tau_init_spread: float = 0.5,
         dev_max: float = 0.3,
         T0: float = 8000.0,
         T_delay: float = 8000.0,

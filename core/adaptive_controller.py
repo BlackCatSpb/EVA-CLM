@@ -61,14 +61,18 @@ class AdaptiveController:
         """Per-layer (exploration, differentiation) from a single block.
 
         Live τ-aware signals (core.training_control.mirror_lstats):
-          exploration      = min(1, |mirror| / λ⁻²)
+          exploration      = min(1, |mirror| / expl_thresh)   [λ⁻² of the
+                             hierarchy — the passed cfg value is USED; the
+                             0.296 default is λ₃⁻²]
           differentiation  = behavioural divergence / its own running mean
                              (self-referenced, saturating) — replaces the old
                              var(log_scale)/λ⁻⁴, which froze at 0 whenever
                              log_scale stopped moving, pinning all per-layer
                              gains to their conservative bound forever.
+        ``diff_thresh`` is a legacy signature knob: the self-referenced diff
+        signal needs no absolute threshold and does not use it.
         """
-        return mirror_lstats(layer)
+        return mirror_lstats(layer, expl_thresh=expl_thresh)
 
     @staticmethod
     def stats(blocks, expl_thresh: float = 0.296, diff_thresh: float = 0.087) -> Tuple[float, float]:

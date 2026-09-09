@@ -715,19 +715,31 @@ class TestInterconnections:
             assert layer._tau_norm is not None
 
     def test_tau_config_feeds_mirror_when_passed(self):
-        """Mirror gets tau_norm_layer ONLY when tau_config is passed in block.__init__.
-        FINDING: block.py does NOT pass tau_config to mirror — it's only passed
-        when GroupedCognitiveMirror is constructed with tau_config kwarg directly.
-        This is an architectural observation, not a bug — the mirror uses
-        a fixed tau_signal=1.0 as fallback."""
+        """Mirror gets tau_norm_layer from tau_config when passed; otherwise it
+        falls back to its own log-depth coordinate φ (monotone axis, not None —
+        design note 2026-09: the τ-signal ladder stays defined for standalone
+        mirrors). Either way the U5 signal temperature is identity at init
+        (_tau_signal_log=0 ⇒ pure geometric ladder)."""
         tc = TauConfig(n_layers=4)
         tc.update()
-        # When tau_config IS passed to mirror directly:
+        # When tau_config IS passed to mirror directly: ladder value.
         mirror = GroupedCognitiveMirror(D=512, G=4, k=16, layer_idx=0, n_layers=4, tau_config=tc)
         assert mirror._tau_norm_layer is not None
-        # When NOT passed (default):
+        assert abs(mirror._tau_norm_layer - float(tc.tau_norm[0].detach())) < 1e-6
+        # When NOT passed: φ fallback (NOT None, but a float in [0,1]).
         mirror_no_tc = GroupedCognitiveMirror(D=512, G=4, k=16, layer_idx=0, n_layers=4)
-        assert mirror_no_tc._tau_norm_layer is None
+        assert mirror_no_tc._tau_norm_layer is not None
+        assert 0.0 <= float(mirror_no_tc._tau_norm_layer) <= 1.0
+        # U5 semantics: temperature = ladder * exp(_tau_signal_log) — identity
+        # at init (offset 0), and offset ln2 doubles it.
+        assert float(mirror._tau_signal_log.detach()) == 0.0
+        import math as _m
+        tn = mirror._tau_norm_layer
+        ladder = mirror._tau_gate_min * (mirror._tau_gate_max / mirror._tau_gate_min) ** (1 - tn)
+        with torch.no_grad():
+            mirror._tau_signal_log.fill_(_m.log(2.0))
+        temp = (ladder + 0.0) * mirror._tau_signal_log.exp()
+        assert torch.allclose(temp, torch.tensor(2 * ladder), rtol=1e-5)
 
     def test_global_state_propagation(self):
         """global_state[i] is updated from layer i's memory via intent_alpha.
@@ -777,7 +789,9 @@ class TestDeadParameterAudit:
     """Verify which parameters have gradient paths and which are dead.
 
     AUDIT FINDINGS (2026-09-05):
-    - mirror._tau_signal_log: DEAD — defined but forward uses float _tau_norm_layer
+    - mirror._tau_signal_log: LIVE since the 2026-09 audit — wired as U5's
+      learnable LOG-SPACE offset to the geometric τ-signal-temperature ladder
+      (0 ⇒ identity at init). Was DEAD before (formula used only the ladder).
     - mirror.mod_scale_mlp: LIVE via BridgeGLU path when maturity > 0.3
     - mirror.mod_scale_mem: LIVE via memory mod when maturity > 0.3
     - mirror.w_sal: DEAD — only used if external salience provided via observe_output
@@ -820,6 +834,7 @@ class TestDeadParameterAudit:
                  'mirror.log_grad_mod_scale', 'mirror.grad_mod_bias',
                  'mirror.usefulness_predictor', 'mirror.hybrid_gate',
                  'mirror.log_scale', 'mirror.tanh_bias',
+                 'mirror._signal_log_weights', 'mirror._tau_signal_log',
                  ]
         for key in _live:
             matches = [n for n, g in grads.items() if key in n and g]
@@ -838,8 +853,7 @@ class TestDeadParameterAudit:
         x = torch.randint(0, cfg.vocab, (1, 8), device=device)
         grads = self._get_grad_status(model, x)
         # These are architecturally dead in single-step:
-        _dead = ['mirror._tau_signal_log',  # not wired in forward (uses float _tau_norm_layer)
-                 'mirror.w_sal',             # needs external salience (never passed in normal forward)
+        _dead = ['mirror.w_sal',             # needs external salience (never passed in normal forward)
                  ]
         for key in _dead:
             matches = [n for n, g in grads.items() if key in n]

@@ -9,7 +9,7 @@ from core.compression import FCF_CPR
 from core import EVAConfig, EVAStack
 
 
-def test_inference(ckpt_path, prompt_len=16, gen_len=128, device='cuda'):
+def run_inference(ckpt_path, prompt_len=16, gen_len=128, device='cuda'):
     print(f'Loading: {ckpt_path} ({os.path.getsize(ckpt_path)/1e6:.0f} MB)')
     
     # Load compressed
@@ -77,7 +77,7 @@ if __name__ == '__main__':
     print(f'Device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"})')
     print()
     
-    test_inference(
+    run_inference(
         r'C:\Users\black\OneDrive\Desktop\WideBind\checkpoints\step_15000_infer.pt',
         prompt_len=16, gen_len=128, device=device
     )

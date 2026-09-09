@@ -6,16 +6,27 @@ from typing import Any, Dict, List, Optional
 class MirrorLRScheduler:
     """LR scheduler modulated by cognitive mirror state dynamics.
 
-    Growth-ratio multipliers (neutral at growth=1):
-      var/alpha/gate growth  →  LR up when specialization grows, down when stalled
-    mag_factor (cap): |mirror| above threshold → LR reduced (counter-cyclical)
-    Loss damping (persistent): val_loss regression >2% → _loss_lr_factor halved
-      (ReduceLROnPlateau semantics; resets to 1.0 on new best).
+    Live mechanism (do not confuse with the legacy knobs below):
+      warmup+blend: linear ramp of pg lr (and the mirror alpha-override/temp
+      schedules) for `warmup` steps;
+      growth-ratio multipliers (neutral at growth=1): var/alpha/gate fast/slow
+      EMA ratios → LR up when specialization grows, down when stalled;
+      mag_factor (cap): |mirror| rising above its own EMA → LR reduced
+      (counter-cyclical); boost >1 only while val is on a downtrend;
+      Loss damping (persistent): val regression >lr_regress_rel → factor ×0.5,
+      restored by lr_improve_thresh or a τ-gated warm-restart.
+
+    `target_var`, `mag_threshold`, `lr_min_ratio`, `max_decay_steps`,
+    `var_min_for_lr_decay` are the OLD λ-tied decay-knob API, still accepted
+    (config parity with LambdaConfig self-check) but INERT since the EMA-
+    relative redesign — the live thresholds are all self-referencing EMAs.
     """
     def __init__(self, model, optimizer, base_lr=None, warmup=1000,
                  target_var=0.161, mag_threshold=0.296, lr_min_ratio=0.026,
                  max_decay_steps=2584, var_min_for_lr_decay=0.008,
                  cfg=None):
+        # legacy decay knobs: intentionally NOT stored (see docstring)
+        del target_var, mag_threshold, lr_min_ratio, max_decay_steps, var_min_for_lr_decay
         self.cfg = cfg
         if cfg is not None:
             base_lr = base_lr or cfg.lr
@@ -285,12 +296,3 @@ class MirrorLRScheduler:
         if self._ls_enabled:
             self._ls_fast = sd.get('ls_fast')
             self._ls_slow = sd.get('ls_slow')
-
-    def reset_for_new_data(self, reset_warmup_steps=2000):
-        self._tau_var = None
-        self._tau_mag = None
-        self._tau_1malpha = None
-        self._tau_gate_var = None
-        self._ls_fast = None
-        self._ls_slow = None
-        self._ls_mult = None

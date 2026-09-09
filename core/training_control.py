@@ -69,10 +69,13 @@ def layer_tau_ctx(layer, tau_config=None, layer_idx: Optional[int] = None) -> Tu
     return li, tau_norm, alpha
 
 
-def mirror_lstats(layer, tau_config=None) -> Tuple[float, float]:
+def mirror_lstats(layer, tau_config=None, expl_thresh: float = 0.296) -> Tuple[float, float]:
     """(exploration, differentiation) for one layer — τ-aware and live.
 
-    exploration = min(1, |mirror| / λ⁻²): how hard the mirror is correcting.
+    exploration = min(1, |mirror| / expl_thresh): how hard the mirror is
+    correcting. expl_thresh is the λ⁻² of the layer's λ-hierarchy — callers
+    pass the cfg-derived value (stack passes ``cfg.exploration_threshold``,
+    itself synced from LambdaConfig); the 0.296 default is λ₃⁻².
     differentiation = behavioural divergence of the experts normalized by its
     own running mean (self-referenced ratio, saturating at 1). This replaces
     the old ``var(log_scale)/λ⁻⁴`` signal which froze at 0 whenever `log_scale`
@@ -81,7 +84,7 @@ def mirror_lstats(layer, tau_config=None) -> Tuple[float, float]:
     """
     m = getattr(layer, 'mirror', layer)
     mag = float(getattr(m, '_last_magnitude', torch.tensor(0.0)).detach().item())
-    expl = min(1.0, mag / 0.296)  # λ⁻² (λ_d d=3 hierarchy)
+    expl = min(1.0, mag / max(float(expl_thresh), 1e-6))
     div = float(getattr(m, '_div_run', torch.tensor(0.0)).detach().item())
     rec = float(getattr(m, '_div_run_rec', torch.tensor(1e-8)).detach().item())
     diff = max(0.0, min(1.0, div / (rec + 1e-8)))

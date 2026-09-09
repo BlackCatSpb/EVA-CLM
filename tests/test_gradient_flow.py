@@ -478,7 +478,7 @@ class TestGradientClipping:
         loss = _forward_loss(model, x)
         loss.backward()
         clipper = GradientClipper(c=0.5)
-        clipper.set_tau_scale(0.5)
+        clipper.attach(model)  # per-layer c_eff map from the tau ladder
         pre_norm = sum(p.grad.data.norm(2).item() ** 2 for p in model.parameters() if p.grad is not None) ** 0.5
         clipper.clip(list(model.parameters()))
         post_norm = sum(p.grad.data.norm(2).item() ** 2 for p in model.parameters() if p.grad is not None) ** 0.5

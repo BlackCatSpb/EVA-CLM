@@ -586,11 +586,17 @@ class GroupedCognitiveMirror(nn.Module):
         
         # ─── Learnable signal weights (sigmoid + Fibonacci self-organization) ───
         # U5: τ-scheduled signal temperature — bounds taken from the τ-field
-        # (tau_config.gate_tau_min/max), not hardcoded 0.3/5.0.
+        # (tau_config.gate_tau_min/max), not hardcoded 0.3/5.0. The learnable
+        # base _tau_signal_log is a LOG-SPACE OFFSET to the geometric ladder:
+        # 0 ⇒ exactly the τ-schedule (identity at init, checkpoint-compatible),
+        # training may adapt the signal temperature beyond the fixed schedule.
         if self._tau_norm_layer is not None:
             tau_norm = self._tau_norm_layer
-            tau_signal = self._tau_gate_min * (self._tau_gate_max / self._tau_gate_min) ** (1 - tau_norm)
-            tau_signal = max(tau_signal, 0.01)
+            log_base = (math.log(self._tau_gate_min)
+                        + (math.log(self._tau_gate_max) - math.log(self._tau_gate_min))
+                        * (1 - tau_norm))
+            tau_signal = (log_base + self._tau_signal_log).clamp(
+                min=math.log(0.01), max=2 * math.log(max(self._tau_gate_max, 1.01))).exp()
             w = torch.sigmoid(self._signal_log_weights / tau_signal)
         else:
             w = torch.sigmoid(self._signal_log_weights)  # (n_sig,), no sum-to-1 constraint
@@ -836,11 +842,15 @@ class GroupedCognitiveMirror(nn.Module):
         info['private_mem_norm'] = self._private_mem.norm(dim=-1).mean().item()
         info['w_help'] = torch.sigmoid(self.w_help).mean().item()
         info['w_contra'] = self.w_contra.mean().item()
-        # U5: τ-scheduled signal temperature (consistent with forward)
+        # U5: τ-scheduled signal temperature (consistent with forward: geometric
+        # ladder × exp(learnable log-space offset _tau_signal_log))
         if self._tau_norm_layer is not None:
             tau_norm = self._tau_norm_layer
-            tau_signal = self._tau_gate_min * (self._tau_gate_max / self._tau_gate_min) ** (1 - tau_norm)
-            tau_signal = max(tau_signal, 0.01)
+            log_base = (math.log(self._tau_gate_min)
+                        + (math.log(self._tau_gate_max) - math.log(self._tau_gate_min))
+                        * (1 - tau_norm))
+            tau_signal = (log_base + self._tau_signal_log).clamp(
+                min=math.log(0.01), max=2 * math.log(max(self._tau_gate_max, 1.01))).exp()
             w = torch.sigmoid(self._signal_log_weights / tau_signal)
         else:
             w = torch.sigmoid(self._signal_log_weights)

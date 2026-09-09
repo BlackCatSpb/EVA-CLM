@@ -14,7 +14,9 @@ from .adaptive_gate import hybrid_gate
 
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, D: int, theta: float = 1000000.0, scaling: float = 1.0, max_len: int = 65536) -> None:
+    # No fixed max_len: _build_cache grows on demand to the actual sequence
+    # length (dynamic RoPE), so a length cap knob was dead — audit 2026-09.
+    def __init__(self, D: int, theta: float = 1000000.0, scaling: float = 1.0) -> None:
         super().__init__()
         self.D: int = D
         self.theta: float = theta
