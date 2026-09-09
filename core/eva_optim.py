@@ -1,14 +1,36 @@
 """core/eva_optim.py — EVA-AdamW: AdamW-эквивалентное ядро + архитектурно-осознанные
 модификаторы, адаптированные под реальную архитектуру EVA (не обобщённый прототип).
 
-mode='adamw' по-операторно эквивалентен torch.optim.AdamW (те же уравнения и
-порядок операций; расхождения ≤ ~1e-7 ULP из-за foreach-ядра torch) —
-используется как строгий эталон для A/B. mode='eva' включает модификаторы
-ниже; каждый отключается независимым флагом.
+mode='adamw' ПОБИТОВО идентичен torch.optim.AdamW (тот же порядок операций:
+decoupled-wd до применения, lerp для m, denom=(√v/bc2**0.5)+eps, и тот же fused
+`addcdiv_` в ветке без модификаторов) — проверено 100-шаговым A/B (maxdiff 0.0).
+Используется как строгий эталон для A/B. mode='eva'/'eva_proj' включают
+модификаторы ниже; каждый отключается независимым флагом.
+
+Математический аудит (2026-09, измерения на полигоне audit_fires/audit_fixed):
+  * gradient-EMA slow_ema с бeta_slow=0.9999 нормировалась быстрым √v̂ (окно ~20)
+    — у сходимости лока по фикс. батчу отношение slow/fast доходит до 219× (шаг
+    на 2 порядки больше AdamW), пользы на измерено. slow_ema по умолчанию OFF;
+    при включении — EMA по самому Adam-направлению u (знак-масштаб, |ms|≤|u|max)
+    и ВЫПУКЛОЕ смешивание u=(u+c·ms/bc3)/(1+c): шаг не раздувается никогда.
+  * константы модификаторов связаны с τ-полем (attach_tau(model)):
+    горизонт slow b3=1−exp(−1/τ_l), вес c=τ_min/τ_l (равный доп. лаг τ_min у
+    всех слоёв), cap для τ = dev_max/(delta_t·lr) (полный проход dev_max за
+    ширину рампы созревания).
+  * AdamP-порог δ привязан к размерности: δ=2/√D — null-полоса косинуса двух
+    случайных векторов; проецируем ТОЛЬКО при |cos|<δ (нет значимого радиального
+    сигнала). Старый фикс. δ=0.111 с unilateral-gate (cos<δ) проецировал и
+    антисогласованные (cos≈−0.99) обновления, перенормировкой усиливая касательный
+    шум до 7×.
+  * cautious-ренормировка ограничена null-полосой доли согласий: делитель
+    ≥ 0.5·max(0.5, 1−2/√D) — амплификация ≤ 2 на большой размерности (бума),
+    ≤4 на малой; случайные signs u·g ниже уровня шума не усиливаются.
+  * все модификаторные операции in-place (dot/скалярные редукции): ноль
+    полномерных аллокаций за шаг (пожирание VRAM на 723M убрано).
 
 Роли вычисляются по реальным именам параметров (по дампу named_parameters()
 модели 723.27M, seq_len=256):
-  - tau        : tau_config / _tau_l_dev  — WD off, пошаговый update_cap
+  - tau        : tau_config / _tau_l_dev  — WD off, пошаговый update_cap (τ-привязанный)
   - scale_inv  : _vsa_log_param, ._vsa_tau_log, log_temp, log_tau, log_gain,
                  log_scale, _fusion_tau_alpha, _w_alpha_expert, *_log_*,
                  embed_mix, bit_bias, *_bias(VSA-биасы) — WD off (искажает LR)
@@ -20,27 +42,29 @@ mode='adamw' по-операторно эквивалентен torch.optim.Adam
   - scalar     : остальные dim<2 (w_i/w_d/w_q/w_u/w_v, biases) — WD off
 
 Модификаторы (все вырождаются в AdamW при флагах выкл). Порядок в step():
-u = m/denom -> AdamP-проекция (проектирование "сырого" Adam-направления,
-как в оригинальном AdamP: p̄ = m̂/√v̂ до коррекции bc1) -> slow-смешивание ->
-cautious-маска -> trust -> update_cap -> wd -> apply (-lr/bc1):
-  * projected : Gram–Schmidt: u' = u - (⟨u,w⟩/‖w‖²)·w при cos(w,u) < δ (0.111)
-                + нормосохраняющая перекалибровка ‖u'‖=‖u‖ (AdamP, Heo 2020);
-                только для dim>=2 где wd>0. Не мутирует momentum (пер-шаговый
-                фильтр; эквивалентно оригиналу пошагово).
-  * cautious  : обнуление u там, где u*g<=0, с нормировкой на среднюю маску
-  * slow_ema  : третья EMA (beta_slow=0.9999) только для матричных параметров;
-                терм ms/bc3, Ada-нормирован на v̂^0.5 и смешан slow_mix; к-т
-                net = lr·slow_mix (коррекция bc1 вынесена в self.step)
+u = m/denom -> AdamP-проекция (null-полоса 2/√D, in-place) -> slow-смешивание
+(выпуклое, u-пространство) -> cautious-маска -> trust -> update_cap -> wd ->
+apply (-lr/bc1):
+  * projected : Gram–Schmidt u -= (⟨u,w⟩/‖w‖²)·w при |cos(w,u)| < δ=2/√D
+                + нормосохраняющая перекалибровка (AdamP, Heo 2020); только
+                dim>=2 где wd>0. Пошаговый фильтр направления, momentum не
+                мутируется (эквивалентно оригиналу пошагово).
+  * cautious  : обнуление u где u·g<=0, ренормировка на долю согласий (пол
+                null-полосы — см. аудит)
+  * slow_ema  : EMA по Adam-направлению u (не по сырому градиенту!) для
+                матричных групп; выпуклая комбинация (u + c·û_slow)/(1+c);
+                b3/c из τ-лестницы через attach_tau (fallback: kwargs)
   * trust     : u *= floor + (1-floor)*trust — восстанавливает пропорциональность
                 созревающих ветвей, уничтоженную нормировкой Adam; trust из
                 set_trust() по роли, клэмпится к [0,1]
-  * update_cap : u.clamp_(-cap, cap) для τ-параметров (trust-region геометрии)
+  * update_cap : u.clamp_(-cap, cap) для τ-параметров; cap=dev_max/(delta_t·lr)
+                из τ-бюджета (attach_tau), fallback 0.02
   * wd_enabled : включение/выключение weight_decay по роли; всегда только dim>=2
 """
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 from torch.optim import Optimizer
@@ -59,41 +83,43 @@ _ZERO_INIT_SUBSTR = ("intent_probe.", "intent_probe.bias", "bus_head_proj.",)
 
 _TAU_DEV_SUBSTR = ("tau_config.", "_tau_l_dev")
 
-# AdamP порог косинуса: проецируем только если u почти ортогонален w
-# (cos < 0.111 => угол > ~83.6°, и ‖u_⊥‖ ≈ ‖u‖·sinθ ≥ 0.99·‖u‖ — нет вырожденности).
-_ADAMP_DELTA = 0.111
-
 
 def _adamp_project(u: torch.Tensor, w: torch.Tensor,
-                   delta: float = _ADAMP_DELTA, eps: float = 1e-8) -> torch.Tensor:
-    """AdamP-фильтр на шаге Adam.
+                   delta: Optional[float] = None, eps: float = 1e-8) -> torch.Tensor:
+    """AdamP-фильтр на шаге Adam — IN-PLACE, без полномерных аллокаций.
 
     u — "сырое" Adam-направление m/denom (как в оригинале: до коррекции bc1);
-    w — текущий вес. При cos(w,u) < delta вычитается компонента вдоль w
-    (Gram–Schmidt), затем нормосохраняющая перекалибровка ‖u'‖=‖u‖.
-    Проекция нормо-сохраняющая, поэтому bc1 при применении не влияет на геометрию.
+    w — текущий вес. Порог δ=2/√D — null-полоса косинуса двух случайных
+    векторов размерности D: проекция идёт только когда радиальной компоненты
+    статистически нет (|cos|<δ), и тогда она почти не меняет u (renorm ≤1.0002).
+    При |cos|≥δ радиальный сигнал значим — направление не искажается
+    (в т.ч. антисогласованные cos<0: старый unilateral-gate проецировал их и
+    перенормировкой усилял касательный шум до 7×).
     """
-    uf = u.flatten()
-    wf = w.detach().flatten()
-    wn = wf.norm()
-    un = uf.norm()
-    if wn == 0.0 or un == 0.0:
+    D = u.numel()
+    if delta is None:
+        delta = 2.0 / math.sqrt(max(D, 4))
+    uf = u.reshape(-1)
+    wf = w.reshape(-1)
+    wn = float(wf.norm())
+    un = float(uf.norm())
+    if wn <= 0.0 or un <= 0.0:
         return u
-    ow = (uf * wf).sum().clamp(-wn * un, wn * un)
-    cos = float(ow / (wn * un + eps))
-    if cos >= delta:
-        return u
-    proj = uf - (float(ow) / (wn * wn + eps)) * wf
-    pn = proj.norm()
+    ow = float(torch.dot(uf, wf))
+    if abs(ow) >= delta * un * wn:          # |cos| >= delta — значимый радиальный
+        return u                            # сигнал: не трогаем направление
+    coef = ow / (wn * wn + eps)
+    uf.add_(wf, alpha=-coef)                # Gram-Schmidt in-place (view u)
+    pn = float(uf.norm())
     if pn > eps:
-        proj = proj * (un / pn)
+        uf.mul_(un / pn)                    # нормосохранение (in-place)
     else:
-        proj = uf.new_zeros(uf.shape)
-    return proj.view_as(u)
+        uf.zero_()
+    return u
 
 
 def _resolve_role(name: str, dim: int) -> dict:
-    """Определяет роль и флаги группы по имени+дородности параметра."""
+    """Определяет роль и флаги группы по имени+размерности параметра."""
     if any(s in name for s in _TAU_DEV_SUBSTR):
         return dict(role="tau", wd=False, cap=0.02, trust=None, cautious=True)
     if any(s in name for s in _ZERO_INIT_SUBSTR):
@@ -115,15 +141,16 @@ def _resolve_role(name: str, dim: int) -> dict:
 class EVAAdamW(Optimizer):
     """AdamW с модификаторами. mode='adamw' ≡ torch.optim.AdamW.
 
-    Ожидает, что группы приходят из stack.EVAStack.param_groups() — они уже
-    несут lr (с LLRD и lambda-иерархией), weight_decay, betas. Здесь добавляются
-    поля роли и per-group флаги модификаторов.
+    Ожидает, что группы приходят из core.adaptation.build_optimizer — они несут
+    lr (LLRD + lambda-иерархия), weight_decay, betas, role, layer_idxs. После
+    построения вызывается attach_tau(model): константы slow-EMA, τ-cap
+    пересчитываются из τ-лестницы модели.
     """
 
     def __init__(self, params, mode: str = "eva", lr: float = 3e-4,
                  betas=(0.9, 0.95), eps: float = 1e-8,
                  weight_decay: float = 0.01,
-                 cautious: bool = True, slow_ema: bool = True,
+                 cautious: bool = True, slow_ema: bool = False,
                  beta_slow: float = 0.9999, slow_mix: float = 0.25,
                  trust_enabled: bool = True, trust_floor: float = 0.5,
                  projected_wd: bool = False,
@@ -136,6 +163,34 @@ class EVAAdamW(Optimizer):
                         wd_enabled=True, trust_key=None, update_cap=None)
         super().__init__(params, defaults)
         self._trust: Dict[str, float] = {}
+
+    # ── привязка констант к τ-лестнице модели ─────────────────────────────
+    def attach_tau(self, model: torch.nn.Module) -> "EVAAdamW":
+        """Пересчитывает медленнические константы из TauConfig модели.
+
+        matrix-группы:  b3 = 1 − exp(−1/τ̄_l) (горизонт = лока τ),
+                        c  = τ_min/τ̄_l (равный доп. лаг τ_min у всех слоёв)
+        tau-группы:     cap = dev_max/(delta_t·lr) — полный проход dev_max
+                        не быстрее ширины рампы созревания delta_t.
+        """
+        tc = getattr(model, "tau_config", None)
+        if tc is None:
+            return self
+        with torch.no_grad():
+            tau_l = tc.tau_l.detach().cpu().tolist()
+        tmin = float(tc.tau_min)
+        for g in self.param_groups:
+            idxs: List[int] = [int(i) for i in (g.get("layer_idxs") or [])
+                               if 0 <= int(i) < len(tau_l)]
+            if g["role"] == "matrix" and idxs:
+                tl = sum(tau_l[i] for i in idxs) / len(idxs)
+                tl = max(tl, 1.0)
+                g["beta_slow_g"] = 1.0 - math.exp(-1.0 / tl)
+                g["slow_mix_g"] = min(1.0, tmin / tl)
+            if g["role"] == "tau" and g.get("update_cap") is not None:
+                lr = max(float(g["lr"]), 1e-12)
+                g["update_cap"] = float(tc.dev_max) / (float(tc.delta_t) * lr)
+        return self
 
     # ── доверие (maturation/bridge) из цикла обучения ─────────────────────
     def set_trust(self, mapping: Dict[str, float]) -> None:
@@ -157,7 +212,8 @@ class EVAAdamW(Optimizer):
             cautious = eva_on and group["cautious"]
             cap = group["update_cap"] if eva_on else None
             slow_ok = eva_on and group["slow_ema"] and group["role"] == "matrix"
-            slow_mix = group["slow_mix"]
+            b3 = group.get("beta_slow_g", group["beta_slow"])
+            cmix = group.get("slow_mix_g", group["slow_mix"])
             tkey = group["trust_key"] if (eva_on and group["trust_enabled"]) else None
             if tkey:
                 trust = min(1.0, max(0.0, self._trust.get(tkey, 1.0)))
@@ -180,16 +236,27 @@ class EVAAdamW(Optimizer):
                 m = st["exp_avg"]
                 v = st["exp_avg_sq"]
                 step = int(st["step"])
-                # Тот же порядок операций, что в torch.optim.AdamW (для побитовой
-                # идентичности в mode='adamw'): lerp + addcmul_ + denom-разложение.
+                # Тот же порядок операций, что в torch.optim.AdamW (для
+                # эквивалентности в mode='adamw'): lerp + addcmul_ +
+                # denom=(√v/√bc2)+eps, decoupled-wd до применения.
                 m.lerp_(g, 1.0 - b1)
                 v.mul_(b2).addcmul_(g, g, value=1.0 - b2)
                 bc1 = 1.0 - b1 ** step
                 bc2 = 1.0 - b2 ** step
-                denom = (v.sqrt() / math.sqrt(bc2)).add_(eps)
+                # Побитово как в torch: bias_correction2**0.5 (float pow), а не
+                # math.sqrt — ULP-расхождение double иначе инвертирует float32-
+                # округление деления на ~половине "ровных" координат.
+                denom = (v.sqrt() / (bc2 ** 0.5)).add_(eps)
+                if not eva_on:
+                    # mode='adamw': точный torch-путь (fused addcdiv_) — без
+                    # отдельного bu=m/denom (у unfused div+add alpha иной ULP).
+                    if wd > 0.0 and p.dim() >= 2:
+                        p.mul_(1.0 - lr * wd)
+                    p.addcdiv_(m, denom, value=-(lr / bc1))
+                    continue
                 u = m / denom
-                # AdamP-проекция "сырого" Adam-направления (до коррекции bc1 и
-                # до slow/cautious) — оригинальный случай AdamP: p̄ = m̂/√v̂.
+                # AdamP-проекция "сырого" Adam-направления (null-полоса 2/√D,
+                # in-place) — оригинальный случай AdamP: p̄ = m̂/√v̂.
                 if eva_on and group["projected"] and wd > 0.0 and p.dim() >= 2:
                     u = _adamp_project(u, p)
                 if slow_ok:
@@ -197,15 +264,17 @@ class EVAAdamW(Optimizer):
                     if ms is None:      # реставрация со старых чекпоинтов без slow-EMA
                         ms = st["exp_avg_slow"] = torch.zeros_like(
                             p, memory_format=torch.preserve_format)
-                    b3 = group["beta_slow"]
-                    ms.mul_(b3).add_(g, alpha=1.0 - b3)
-                    # Ada-нормированный на v̂^0.5 slow-терм; bc1 вынесен наружу,
-                    # чтобы net-коэффициент был ровно lr*slow_mix (см. apply ниже).
-                    slow_n = (ms / (1.0 - b3 ** step)) / (v / bc2).sqrt().add_(eps)
-                    u = u + slow_mix * bc1 * slow_n
+                    # EMA по САМОМУ Adam-направлению u (знак-масштаб: |ms|≤|u|),
+                    # выпуклая комбинация — шаг не может раздуться выше max|u|.
+                    ms.lerp_(u, 1.0 - b3)
+                    ms_hat = ms / (1.0 - b3 ** step)
+                    u = (u + cmix * ms_hat) / (1.0 + cmix)
                 if cautious:
-                    mask = (u * g > 0).to(u.dtype)
-                    u.mul_(mask).div_(mask.mean().clamp_min(1e-3))
+                    mask = torch.mul(u, g).gt_(0)
+                    u.mul_(mask)
+                    # Ренорм только на null-полосе доли согласий (0.5±2σ, σ=√(0.25/D)).
+                    floor = 0.5 * max(0.5, 1.0 - 2.0 / math.sqrt(max(mask.numel(), 4)))
+                    u.div_(mask.mean().clamp_min(floor))
                 if tscale is not None and tscale != 1.0:
                     u.mul_(tscale)
                 if cap is not None:
@@ -222,7 +291,7 @@ class EVAAdamW(Optimizer):
 def build_eva_optimizer(model, base_lr: float, weight_decay: float = 0.01,
                         betas=(0.9, 0.95), mode: str = "eva",
                         llrd_decay: float = 0.9,
-                        cautious: bool = True, slow_ema: bool = True,
+                        cautious: bool = True, slow_ema: bool = False,
                         beta_slow: float = 0.9999, slow_mix: float = 0.25,
                         trust_enabled: bool = True, trust_floor: float = 0.5,
                         projected_wd: bool = False, debug: bool = False):
@@ -232,7 +301,7 @@ def build_eva_optimizer(model, base_lr: float, weight_decay: float = 0.01,
     """
     from .adaptation import build_optimizer as _build
     return _build(model, base_lr, llrd_decay=llrd_decay, weight_decay=weight_decay,
-                  betas=betas, optimizer="eva",
+                  betas=betas, optimizer=mode,
                   eva_kwargs=dict(cautious=cautious, slow_ema=slow_ema,
                                   beta_slow=beta_slow, slow_mix=slow_mix,
                                   trust_enabled=trust_enabled,

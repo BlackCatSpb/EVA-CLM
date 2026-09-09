@@ -405,15 +405,30 @@ class TestU8Formula:
 
 
 class TestU9Formula:
-    """U9: τ-aware Gradient Clipping.
-    c_eff = c * (1 + τ_norm)^(-γ)."""
+    """U9: τ-aware Gradient Clipping (audit 2026-09: docstring == код).
+    c_eff = c · (mem_tau_ref / τ_l)^(llrd_gamma) для каждого слоя l;
+    вне слоёв c_eff = c. Старый прокси (1+τ_norm)^(-γ) не соответствовал
+    docstring и не использовал per-layer τ."""
 
-    def test_formula(self):
-        clipper = GradientClipper(c=1.0, gamma=0.65)
-        for tn in [0.0, 0.5, 1.0]:
-            clipper.set_tau_scale(tn)
-            c_eff = 1.0 * (1.0 + tn) ** (-0.65)
-            assert abs(clipper._tau_scale - c_eff) < 1e-4
+    def test_per_layer_formula(self):
+        import re as _re
+        cfg = EVAConfig(**SMALL)
+        model = EVAStack(cfg)
+        clipper = GradientClipper(c=1.0)
+        clipper.attach(model)
+        tc = model.tau_config
+        ref, gam = float(tc.mem_tau_ref), float(tc.llrd_gamma)
+        tau = tc.tau_l.detach().cpu().tolist()
+        seen = 0
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            mm = _re.match(r"(?:.*\.)?layers\.(\d+)\.", name)
+            if mm:
+                sc = clipper._p_scale[id(p)]
+                assert abs(sc - (ref / tau[int(mm.group(1))]) ** gam) < 1e-9
+                seen += 1
+        assert seen > 0
 
 
 class TestU10Formula:

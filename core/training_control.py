@@ -134,19 +134,21 @@ class FailureDetector:
     carries a fast EMA (a, half-life ~70) against a slow self-referencing
     baseline (a_slow, half-life ~700):
 
-        viol  = value > slow_ema·(1 + rel_margin)   AND   value ≥ prev
-        AND   value ≥ floor          (per-signal healthy-band floor)
+        viol  = value > slow_ema·(1 + rel_margin)   AND   value ≥ floor
 
     ``margins``/``floors`` widen the test per signal. Diagnostic magnitudes
     (mlp_ratio, ig_eff, diversity) are NOT steady independent variables: they
-    ride a healthy ramp across the whole early training (mlp_ratio 1.0→1.9,
-    ig_eff 0.2→1.0) whose trailing slow-EMA lags the current level — a pure
+    ride a healthy ramp across the whole early training (mlp_ratio 1.0→~1.9,
+    ig_eff 0→~1.1) whose trailing slow-EMA lags the current level — a pure
     relative rule would fire on every leg of the ramp. The floor is the healthy
-    band's ceiling: mlp_ratio>2.0 (safe range tops ~1.9), ig_eff>1.0 (unity =
-    balanced gate use; below it the gate is still calibrating), diversity>0.5.
-    A *runaway* is a value OUTSIDE the band (the polygon sabotage: ig_eff 1.8).
-    The absolute floor double-checks the relative test by discarding
-    pre-calibration levels; CE itself needs no floor (armed post-eval).
+    band's ceiling: mlp_ratio>2.0 (safe range tops ~1.9), ig_eff>1.5 (unity =
+    the gate's own running-RMS setpoint; healthy real-model excursions reach
+    ~1.1-1.2, a 1.5 kick = sustained +50% over setpoint = runaway), diversity
+    >5.0 (healthy dense-expert diversity ≤~0.9; a real blowup is an order-of-
+    magnitude explosion, e.g. 3.8e22). A *runaway* is a value OUTSIDE the band
+    (the polygon sabotage: ig_eff 1.8-5.2). The absolute floor double-checks
+    the relative test by discarding pre-calibration levels; CE itself needs no
+    floor (armed post-eval).
     CE additionally sits under a ``ce_armed`` flag: the run's first ~1k steps show a
     *known benign transient* (CE 66→29→11 across 3 healthy restarts); rolling
     back inside it thrashes the LR. CE joins the watch only after the first
@@ -219,10 +221,14 @@ class FailureDetector:
             slow = self.a_slow * slow + (1 - self.a_slow) * value
             s[0], s[1], s[2], s[3] = fast, value, n, slow
             return False
-        rising = value >= prev  # plateau at a new level is still a sustained shift
         margin = self.margins.get(name, self.rel_margin)
         floor = self.floors.get(name, float('-inf'))
-        viol = (value > slow * (1.0 + margin)) and rising and value >= floor
+        # No `rising` requirement: an explosion peaks then DECAYS while staying far
+        # above the baseline (ig_eff 33 -> 14 -> 9 vs slow*2 ≈ 0.3). Requiring
+        # monotonic rise would give "0 consecutive" instead of a sustained watch.
+        # Sustained-ness comes from min_consecutive=3; a healthy noise oscillation
+        # flips below the threshold within a step, so it never chains 3.
+        viol = (value > slow * (1.0 + margin)) and value >= floor
         s[0] = self.a * fast + (1 - self.a) * value
         s[1] = value
         s[2] = n
@@ -285,6 +291,13 @@ class FailureDetector:
         torch.cuda.empty_cache()
         self._cooldown = self.cooldown
         self._viol = {}
+        # Re-bootstrap every signal baseline after rollback: model weights were
+        # restored to the pre-crash state and LR is re-warming, so CE/ratios run
+        # ABOVE their value for hundreds of steps. Without clearing _stats the
+        # slow_ema still remembers the pre-crash level and flags the recovery
+        # itself (the Colab "rollback every ~50 steps" loop). Fresh stats give a
+        # full fast-EMA half-life (1/(1-a)) of grace before re-arming.
+        self._stats = {}
         if self.recover_count > self.recover_max:
             raise RuntimeError(
                 f'FailureDetector: {self.recover_count} recoveries exceeded '
@@ -374,6 +387,9 @@ class LossBalancer:
         aux_tensors = [v for v in aux_dict.values() if isinstance(v, torch.Tensor)]
         if not aux_tensors:
             for p, g in zip(params, ce_grads):
+                # clone() ОБЯЗАТЕЛЕН: autograd.grad при retain_graph отдаёт
+                # просмотры внутренних буферов движка — их нельзя мутировать
+                # в grad-mode (AGC делает p.grad.mul_ in-place).
                 p.grad = g.clone() if g is not None else None
             return
 
@@ -381,19 +397,27 @@ class LossBalancer:
         aux_grads = torch.autograd.grad(aux_total, params, retain_graph=retain_graph,
                                         allow_unused=True)
 
-        ce_flat, aux_flat = [], []
+        # Поток без полно-модельных flat-копий (аудит VRAM 2026-09): cos и нормы
+        # накапливаются попарными dot на устройстве (0-dim, один .item() в конце).
+        # clone() при назначении обязателен: выходы autograd.grad — просмотры
+        # no_grad-буферов движка, их нельзя мутировать в grad-mode (AGC mul_).
+        num = den_a = den_b = None
         for gce, gau in zip(ce_grads, aux_grads):
-            if gce is not None and gau is not None:
-                ce_flat.append(gce.flatten())
-                aux_flat.append(gau.flatten())
-        if ce_flat:
-            ce_flat = torch.cat(ce_flat)
-            aux_flat = torch.cat(aux_flat)
-            cos = torch.nn.functional.cosine_similarity(
-                ce_flat.unsqueeze(0), aux_flat.unsqueeze(0)).clamp(min=0.0, max=1.0)
-            scale = cos.item() * ce_flat.norm() / (aux_flat.norm() + 1e-8)
-        else:
-            scale = 0.0
+            if gce is None or gau is None:
+                continue
+            a = gce.reshape(-1)
+            b = gau.reshape(-1)
+            da = torch.dot(a, a)
+            db = torch.dot(b, b)
+            num = torch.dot(a, b) if num is None else num + torch.dot(a, b)
+            den_a = da if den_a is None else den_a + da
+            den_b = db if den_b is None else den_b + db
+        scale = 0.0
+        if num is not None:
+            na = float(den_a.sqrt())
+            nb = float(den_b.sqrt()) + 1e-8
+            cos = float(num) / (na * nb + 1e-8)
+            scale = min(1.0, max(0.0, cos)) * na / nb
 
         with torch.no_grad():
             for p, gce, gau in zip(params, ce_grads, aux_grads):

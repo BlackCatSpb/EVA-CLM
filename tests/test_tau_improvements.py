@@ -379,40 +379,56 @@ class TestU8IntentAlpha:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestU9GradientClipping:
-    def test_clipper_has_tau_params(self):
-        clipper = GradientClipper(c=0.1, tau_ref=64.0, gamma=0.65)
-        assert clipper.tau_ref == 64.0
-        assert clipper.gamma == 0.65
-        assert clipper._tau_scale == 1.0
+    """τ-aware AGC (audit 2026-09): attach(model) строит карту id(p) ->
+    (mem_tau_ref/τ_l)^llrd_gamma по слоям; clip() применяет её per-param."""
 
-    def test_set_tau_scale(self):
-        clipper = GradientClipper(c=0.1, gamma=0.65)
-        clipper.set_tau_scale(0.0)  # shallow
-        s0 = clipper._tau_scale
-        clipper.set_tau_scale(1.0)  # deep
-        s1 = clipper._tau_scale
-        # (1+0)^(-0.65) = 1.0; (1+1)^(-0.65) ≈ 0.64
-        assert s0 > s1
+    def _model(self):
+        cfg = EVAConfig(**SMALL)
+        return EVAStack(cfg)
+
+    def test_attach_maps_layered_params_only(self):
+        import re as _re
+        model = self._model()
+        clipper = GradientClipper(c=0.1)
+        clipper.attach(model)
+        tc = model.tau_config
+        ref, gam = float(tc.mem_tau_ref), float(tc.llrd_gamma)
+        tau = tc.tau_l.detach().cpu().tolist()
+        seen = 0
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            mm = _re.match(r"(?:.*\.)?layers\.(\d+)\.", name)
+            if mm:
+                sc = clipper._p_scale[id(p)]
+                assert abs(sc - (ref / tau[int(mm.group(1))]) ** gam) < 1e-9
+                seen += 1
+            else:
+                assert id(p) not in clipper._p_scale
+        assert seen > 0
+
+    def test_ladder_monotonic_gives_deeper_tighter(self):
+        model = self._model()
+        tc = model.tau_config
+        tau = tc.tau_l.detach().cpu().tolist()
+        assert all(tau[i] <= tau[i + 1] for i in range(len(tau) - 1))
+        ref, gam = float(tc.mem_tau_ref), float(tc.llrd_gamma)
+        assert (ref / tau[-1]) ** gam < (ref / tau[0]) ** gam
 
     def test_clipper_clip_works(self):
         clipper = GradientClipper(c=0.1)
         params = [nn.Parameter(torch.randn(10, 10))]
-        # Create a huge gradient
         params[0].grad = torch.randn(10, 10) * 100
-        clipper.set_tau_scale(0.5)
         clipper.clip(params)
-        # Gradient should be clipped
-        g_norm = params[0].grad.norm()
-        p_norm = params[0].norm()
-        assert g_norm <= clipper.c * clipper._tau_scale * p_norm + 1e-4
+        assert params[0].grad.norm() <= clipper.c * params[0].norm() + 1e-4
 
     def test_clipper_skip_zero_params(self):
         clipper = GradientClipper(c=0.1)
         p = nn.Parameter(torch.zeros(10, 10))
         p.grad = torch.randn(10, 10)
+        before = p.grad.clone()
         clipper.clip([p])
-        # Zero-norm params should not be clipped (grad unchanged except by the skip)
-        assert p.grad is not None
+        assert torch.equal(p.grad, before)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -666,14 +682,24 @@ class TestEdgeCases:
         out = mb(h, tokens, step=0, mat_gate=0.0)
         assert out.shape == h.shape
 
-    def test_clipper_high_tau_norm(self):
-        """High tau_norm → more aggressive clipping."""
-        clipper = GradientClipper(c=0.1, gamma=0.65)
-        clipper.set_tau_scale(1.0)
-        s_deep = clipper._tau_scale
-        clipper.set_tau_scale(0.0)
-        s_shallow = clipper._tau_scale
-        assert s_deep < s_shallow
+    def test_clipper_deeper_layer_tighter(self):
+        """Audit 2026-09: AGC is per-layer via attach(model) — deeper layers
+        (higher tau_l) get a smaller c_eff = c*(tau_ref/tau_l)**gamma."""
+        import re as _re
+        cfg = EVAConfig(**SMALL)
+        model = EVAStack(cfg)
+        clipper = GradientClipper(c=0.1)
+        clipper.attach(model)
+        tc = model.tau_config
+        tau = tc.tau_l.detach().cpu().tolist()
+        deepest = max(range(len(tau)), key=lambda i: tau[i])
+        shallowest = min(range(len(tau)), key=lambda i: tau[i])
+        by_layer = {}
+        for name, p in model.named_parameters():
+            mm = _re.search(r"layers\.(\d+)\.", name)
+            if mm and id(p) in clipper._p_scale:
+                by_layer[int(mm.group(1))] = clipper._p_scale[id(p)]
+        assert by_layer[deepest] < by_layer[shallowest]
 
 
 # ═══════════════════════════════════════════════════════════════════════

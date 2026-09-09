@@ -212,6 +212,8 @@ def train(cfg=None, resume_path=None):
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
     clipper = GradientClipper(c=0.1)
+    # τ-aware AGC: per-layer c_eff = c·(τ_ref/τ_l)^γ from the model's τ-ladder.
+    clipper.attach(model)
 
     # AMP (Automatic Mixed Precision)
     use_amp = getattr(cfg, 'use_amp', False) and device == 'cuda'
@@ -494,10 +496,9 @@ def train(cfg=None, resume_path=None):
             tokens_seen += cfg.batch_size * seq_len
             
             # Clip gradients (AGC — scale-free ratio, replaces magic grad_clip)
-            # U9: set τ-aware clipping scale from model's τ-field
-            if hasattr(model, 'tau_config'):
-                _mean_tau_norm = model.tau_config.tau_norm.mean().item()
-                clipper.set_tau_scale(_mean_tau_norm)
+            # U9: keep the τ-AGC per-layer map fresh (τ ladder drifts slowly).
+            if step % cfg.eval_interval == 0:
+                clipper.attach(model)
             if use_amp:
                 scaler.unscale_(optimizer)
             clipper.clip(model.parameters())

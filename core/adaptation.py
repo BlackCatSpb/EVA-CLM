@@ -247,15 +247,19 @@ def build_optimizer(model: torch.nn.Module, base_lr: float,
             if g is None:
                 g = {"params": [], "lr": lr, "weight_decay": wd,
                      "wd_enabled": r["wd"], "role": r["role"],
-                     "trust_key": r["trust"], "update_cap": r["cap"]}
+                     "trust_key": r["trust"], "update_cap": r["cap"],
+                     "layer_idxs": []}
                 by_role[key] = g
             g["params"].append(p)
+            if li is not None and li >= 0:
+                g["layer_idxs"].append(int(li))
         opt = EVAAdamW(list(by_role.values()), lr=base_lr, betas=betas,
                        weight_decay=weight_decay, mode=optimizer,
                        **{k: v for k, v in mk.items()
                           if k in ("cautious", "slow_ema", "beta_slow",
                                    "slow_mix", "trust_enabled",
                                    "trust_floor", "projected_wd", "debug")})
+        opt.attach_tau(model)   # константы модификаторов из τ-лестницы
         return opt
 
     return torch.optim.AdamW([g for g in groups.values() if g['params']],
@@ -358,31 +362,47 @@ class GradientClipper:
     across architectures and dtypes.  Default ``c=0.01`` matches the ResNet
     regime in the paper; raise toward 0.1 for transformer blocks.
 
-    U9: τ-aware clipping: clip_threshold = base_c · (τ_ref / τ_l)^γ
+    τ-aware clipping (docstring == код, исправлено после аудита 2026-09):
+    ``attach(model)`` строит поимённый map param→layer, и для параметра слоя l
+    эффективный порог ``c_eff = c · (τ_ref / τ_l)^γ``, где ``τ_ref =
+    tau_config.mem_tau_ref`` и ``γ = tau_config.llrd_gamma`` — те же
+    константы, которыми TauConfig строит τ-LLRD. Вне слоёв (embed/lm_head/
+    memory_bank) масштаб = 1. Старый вызов set_tau_scale(mean(tau_norm)) был
+    прокси без размерного смысла и не использовал per-layer τ.
     """
 
-    def __init__(self, c: float = 0.01, eps: float = 1e-3,
-                 tau_ref: float = 64.0, gamma: float = 0.65) -> None:
+    def __init__(self, c: float = 0.01, eps: float = 1e-3) -> None:
         self.c: float = float(c)
         self.eps: float = float(eps)
-        self.tau_ref: float = float(tau_ref)
-        self.gamma: float = float(gamma)
-        self._tau_scale: float = 1.0  # default: no modulation
+        self._p_scale: dict = {}   # id(param) -> (τ_ref/τ_l)^γ
 
-    def set_tau_scale(self, tau_norm: float) -> None:
-        """U9: set τ-modulation for clipping: (τ_ref / τ_l)^γ."""
-        import math
-        # tau_norm ∈ [0,1]; reconstruct τ_l from τ-field
-        # τ_l = τ_min * (τ_max/τ_min)^τ_norm, but we use a simpler proxy:
-        # scale = (1 + tau_norm)^(-gamma) — shallow (τ_norm≈0) clips more loosely
-        self._tau_scale = (1.0 + tau_norm) ** (-self.gamma)
+    def attach(self, model) -> None:
+        import re as _re
+        tc = getattr(model, "tau_config", None)
+        if tc is None:
+            return
+        with torch.no_grad():
+            tau_l = tc.tau_l.detach().cpu().tolist()
+        ref = float(tc.mem_tau_ref)
+        gamma = float(tc.llrd_gamma)
+        self._p_scale = {}
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            m = _re.match(r"(?:.*\.)?layers\.(\d+)\.", name)
+            if m and int(m.group(1)) < len(tau_l):
+                self._p_scale[id(p)] = (ref / max(tau_l[int(m.group(1))], 1e-6)) ** gamma
+
+    def set_tau_scale(self, tau_norm: float = 0.0) -> None:
+        """Legacy shim: τ-масштаб теперь per-layer из attach(); no-op."""
+        return None
 
     def clip(self, parameters: Iterable[torch.nn.Parameter]) -> None:
-        # U9: τ-aware effective clip ratio
-        c_eff = self.c * self._tau_scale
         for p in parameters:
             if p.grad is None:
                 continue
+            # τ-aware effective clip ratio (docstring==код): c·(τ_ref/τ_l)^γ
+            c_eff = self.c * self._p_scale.get(id(p), 1.0)
             g_norm = p.grad.norm()
             p_norm = p.norm()
             # Skip near-zero-init params (‖θ‖≈0): AGC would otherwise set
