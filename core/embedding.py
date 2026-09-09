@@ -187,7 +187,11 @@ class SigmoidCodedHead(nn.Module):
             nn.init.xavier_uniform_(self.readout, gain=0.5)
         prop: torch.Tensor = codes.mean(dim=0)
         self.register_buffer('_prop', prop)
-        self.bit_bias: nn.Parameter = nn.Parameter(torch.zeros(self.K))
+        # Code-prior init (the _prop buffer was computed and left dead): with
+        # bit_bias = logit(p_active) the head starts at the unigram prior of
+        # the sparse block code, not at an arbitrary 0.5 per bit.
+        _p = prop.clamp(1e-7, 1 - 1e-7)
+        self.bit_bias: nn.Parameter = nn.Parameter(torch.log(_p / (1 - _p)))
         self.log_temp: nn.Parameter = nn.Parameter(torch.zeros(self.K))
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
@@ -201,7 +205,7 @@ class SigmoidCodedHead(nn.Module):
         B, L, D = h.shape
         h_g: torch.Tensor = h.reshape(B, L, self.K, -1)
         z: torch.Tensor = (h_g * self.readout.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
-        T: torch.Tensor = torch.exp(self.log_temp).clamp_min(0.1)
+        T: torch.Tensor = torch.exp(self.log_temp).clamp(0.1, 10.0)
         if temp_factor is not None:
             T = T * temp_factor
         zt: torch.Tensor = z / T + self.bit_bias
@@ -214,8 +218,10 @@ class SigmoidCodedHead(nn.Module):
         return zt
 
     def _su(self, zt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        tau: torch.Tensor = torch.exp(self.log_temp).clamp(0.1, 10.0)
-        return hybrid_gate(zt, tau, log=True)
+        # Single per-bit temperature: T already scaled z in _gates, so the
+        # emphasis softmax reads the SAME logits (passing tau=exp(log_temp)
+        # here again divided twice: z/T/tau = z/T^2 — audit M1).
+        return hybrid_gate(zt, 1.0, log=True)
 
     def forward(self, h: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if h.dim() == 2:
@@ -232,29 +238,24 @@ class SigmoidCodedHead(nn.Module):
         return logits
 
     def log_probs_for_target(self, h: torch.Tensor, targets: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if h.dim() == 2:
-            h_2d: bool = True
-            h_in: torch.Tensor = h.unsqueeze(1)
-        else:
-            h_2d = False
-            h_in = h
+        # Training calls this with flattened (N, D) h (losses.compute_losses).
+        # The old 2D branch returned raw[0, 0, targets]: EVERY position was
+        # scored by hidden state #0's logits and the gradient for rows 1..N-1
+        # was exactly zero (audit M1, proven: per-position grad = [75,0,...,0]).
+        # token_bias also double-counted (forward already adds it before the
+        # logsumexp normalization). Both removed: one gather, one bias.
+        t: torch.Tensor = targets.reshape(-1)
+        h2: torch.Tensor = h.reshape(-1, h.shape[-1])
+        if bus_bias is not None and bus_bias.dim() == 3 and bus_bias.shape[0] != h2.shape[0]:
+            bus_bias = bus_bias.reshape(h2.shape[0], 1, bus_bias.shape[-1])
         if self.normalize:
-            raw: torch.Tensor = self.forward(h_in, bus_bias=bus_bias)
-            if h_2d:
-                return raw[0, 0, targets] + self.token_bias[targets]
-            idx: torch.Tensor = torch.arange(raw.shape[1], device=raw.device)
-            return raw[:, idx, targets] + self.token_bias[targets]
-        zt: torch.Tensor = self._gates(h_in, bus_bias=bus_bias)
-        tau: torch.Tensor = torch.exp(self.log_temp).clamp(0.1, 10.0)
-        gate: torch.Tensor = hybrid_gate(zt, tau)
-        gate = gate.clamp(1e-7, 1 - 1e-7)
-        ls: torch.Tensor = torch.log(gate)
-        lms: torch.Tensor = torch.log(1 - gate)
-        c: torch.Tensor = self.codes[targets].float()
-        if h_2d:
-            c = c.unsqueeze(1)
-        logp: torch.Tensor = (c * ls).sum(-1) + ((1 - c) * lms).sum(-1)
-        return logp + self.token_bias[targets]
+            logits: torch.Tensor = self.forward(h2, bus_bias=bus_bias)   # (N,V), 2D-in -> 2D-out
+            return torch.gather(logits, 1, t[:, None]).squeeze(1)
+        zt: torch.Tensor = self._gates(h2, bus_bias=bus_bias)             # (N,K)
+        u, _base = self._su(zt)                                           # (N,K) log-odds
+        c: torch.Tensor = self.codes[t].to(u.dtype)
+        lp: torch.Tensor = (c * F.logsigmoid(u) + (1 - c) * F.logsigmoid(-u)).sum(-1)
+        return lp + self.token_bias[t]
 
 
 class CognitiveCodedHead(nn.Module):
@@ -307,7 +308,8 @@ class CognitiveCodedHead(nn.Module):
         self._contra_graph = contra_graph
         self._dominance = dominance
 
-    def _compute_z(self, h: torch.Tensor, B: int, L: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_z(self, h: torch.Tensor, B: int, L: int, device: torch.device,
+                   bus_bias: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
         h_g: torch.Tensor = h.reshape(B, L, self.K, self.d)
         z_raw: torch.Tensor = (h_g * self.readout.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
         if self._pred_error is not None:
@@ -349,6 +351,10 @@ class CognitiveCodedHead(nn.Module):
         z = z / T.unsqueeze(0).unsqueeze(0)
         z = z * (1.0 + self.gamma * ctx)
         z = z + prior + social_bias.unsqueeze(0).unsqueeze(0)
+        if bus_bias is not None:
+            # intent-bus phase-2 stencil: per-bit bias, same convention as
+            # SigmoidCodedHead._gates (applied before the base normalization).
+            z = z + bus_bias.reshape(B, L, self.K)
         base: torch.Tensor = F.logsigmoid(-z).sum(dim=-1)
         return z, base
 
@@ -361,23 +367,32 @@ class CognitiveCodedHead(nn.Module):
         c: torch.Tensor = self.codes[token_ids]
         return (c * delta).sum(dim=-1)
 
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        h2d = h.dim() == 2
+        if h2d:
+            h = h.unsqueeze(1)
         B, L, _ = h.shape
-        z, base = self._compute_z(h, B, L, h.device)
+        z, base = self._compute_z(h, B, L, h.device, bus_bias=bus_bias)
         raw: torch.Tensor = z @ self.codes.T + base.unsqueeze(-1) + self.token_bias + self._shift_all()
         if self.normalize:
             raw = raw - raw.logsumexp(dim=-1, keepdim=True)
-        return raw
+        return raw.squeeze(1) if h2d else raw
 
-    def log_probs_for_target(self, h: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def log_probs_for_target(self, h: torch.Tensor, targets: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # losses.compute_losses flattens to (N,D): accept 2D/3D uniformly and
+        # gather per position (audit M1 — this head used to crash on 2D).
+        t: torch.Tensor = targets.reshape(-1)
+        if h.dim() == 2:
+            h = h.unsqueeze(1)
         B, L, _ = h.shape
-        z, base = self._compute_z(h, B, L, h.device)
-        c: torch.Tensor = self.codes[targets]
-        score: torch.Tensor = (c * z).sum(dim=-1) + base + self.token_bias[targets] + self._shift_targets(targets)
+        z, base = self._compute_z(h, B, L, h.device, bus_bias=bus_bias)
+        c: torch.Tensor = self.codes[t].to(z.dtype)
+        zf, basef = z.reshape(-1, self.K), base.reshape(-1)
+        score: torch.Tensor = (c * zf).sum(dim=-1) + basef + self.token_bias[t] + self._shift_targets(t)
         if not self.normalize:
             return score
-        raw: torch.Tensor = self.forward(h)
-        logZ: torch.Tensor = raw.logsumexp(dim=-1)
+        logits: torch.Tensor = zf @ self.codes.T + basef.unsqueeze(-1) + self.token_bias + self._shift_all()
+        logZ: torch.Tensor = logits.logsumexp(dim=-1)
         return score - logZ
 
 

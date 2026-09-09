@@ -62,11 +62,14 @@ def hybrid_gate(
         gate = gate / gate_sum
 
     if log:
-        gate = gate.clamp(eps, 1 - eps)
-        ls = torch.log(gate)
-        lms = torch.log(1 - gate)
-        u = ls - lms
-        base = lms.sum(dim=dim)
+        # Factorized code-likelihood semantics (SigmoidCodedHead). The
+        # (1+relative) emphasis enters as a LOG-ODDS boost, not as a clipped
+        # probability multiplier: p = sigmoid(z + log(1+r)) never saturates, so
+        # the softmax emphasis survives exactly where the old
+        # gate=clamp(sigmoid*(1+r), 0, 1-eps) collapsed confident+emphasized
+        # bits onto the eps-cliff (u pinned at ±16.1, emphasis erased).
+        u = logits + torch.log1p(relative)
+        base = F.logsigmoid(-u).sum(dim=dim)
         return u, base
 
     return gate

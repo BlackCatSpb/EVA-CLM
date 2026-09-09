@@ -26,13 +26,31 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             bus_bias = bus_bias.reshape(B * L, 1, -1)      # (N,1,K) align h(-1,D)
         log_probs = stack.lm_head.log_probs_for_target(
             h.reshape(-1, D), targets.reshape(-1), bus_bias=bus_bias)
-        ce_loss = -log_probs.mean()
+        # Audit M1 (A4/A5): the coded-head branch ignored PAD/EOS masking and
+        # surprisal weighting entirely — token 0 (PAD) was trained as a real
+        # prediction. Same contract as the legacy branch below now applies to
+        # BOTH paths. mask_eos getattr default matches the declared field
+        # (False: Colab data is *_eos.bin — sentence ends are trained).
+        ce = -log_probs
+        flat_t = targets.reshape(-1)
+        mask = flat_t != 0
+        if getattr(stack.cfg, 'mask_eos', False):
+            mask = mask & (flat_t != 2)
+        mask_f = mask.to(ce.dtype)
+        sw = getattr(stack.cfg, 'surprisal_weight', 0.0)
+        if stack.training and sw > 0:
+            with torch.no_grad():
+                ce_ratio = ce / (ce.sum() / mask_f.sum().clamp(min=1) + 1e-8)
+                w = torch.sigmoid(sw * 2.0 * (ce_ratio - 1.0))
+            ce_loss = (ce * w * mask_f).sum() / mask_f.sum().clamp(min=1)
+        else:
+            ce_loss = (ce * mask_f).sum() / mask_f.sum().clamp(min=1)
     else:
         logits = stack.lm_head(h)
         ce = F.cross_entropy(logits.reshape(-1, stack.cfg.vocab),
                              targets.reshape(-1), reduction='none')
         mask = targets.reshape(-1) != 0
-        if getattr(stack.cfg, 'mask_eos', True):
+        if getattr(stack.cfg, 'mask_eos', False):  # default = declared field (False: EOS trained)
             mask = mask & (targets.reshape(-1) != 2)
         ce = ce * mask.float()
         sw = getattr(stack.cfg, 'surprisal_weight', 0.0)
