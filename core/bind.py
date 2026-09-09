@@ -336,10 +336,13 @@ class TrajectorySpiralBind(nn.Module):
         # типичных hp (скрещивания в hp-пространстве); старые чекпоинты через
         # миграцию получают 1.0 (численно эквивалентно прежнему поведению).
         self.freq_scale: nn.Parameter = nn.Parameter(torch.tensor(2 * math.pi))
-        # U10: τ-coherent frequency schedule
+        # U10: τ-coherent frequency schedule (audit M7: the ladder bounds are
+        # read from cfg — the old literals 8.0/512.0 silently froze the
+        # schedule to the default ladder even when cfg moved)
         self._eta: nn.Parameter = nn.Parameter(torch.tensor(0.5))  # learnable exponent (init 0.5)
-        self._tau_min: float = 8.0  # from config (default)
-        self._tau_norm: Optional[float] = None  # set by stack during init
+        self._tau_min: float = float(getattr(cfg, 'tau_min', 8.0))
+        self._tau_max: float = float(getattr(cfg, 'tau_max', 512.0))
+        self._tau_norm: Optional[float] = None  # refreshed LIVE per forward by the block
         self.W_phase: nn.Parameter = nn.Parameter(torch.randn(self.S, self.n_dims, K) * 0.1)
         self.register_buffer('_step_count', torch.zeros(1, dtype=torch.long))
         self.hybrid_alpha_max: float = getattr(cfg, 'hybrid_alpha_max', 0.7)
@@ -395,7 +398,7 @@ class TrajectorySpiralBind(nn.Module):
             _eta = torch.sigmoid(self._eta)
             # freq_eff = freq_scale * (tau_min / tau_l)^η
             # tau_l = tau_min * (tau_max/tau_min)^tau_norm → tau_min/tau_l = (tau_min/tau_max)^tau_norm
-            _tau_ratio = (self._tau_min / 512.0) ** self._tau_norm  # tau_min/tau_max = 8/512
+            _tau_ratio = (self._tau_min / self._tau_max) ** self._tau_norm  # = tau_min/tau_l
             _freq_eff = self.freq_scale * (_tau_ratio ** _eta)
         else:
             _freq_eff = self.freq_scale

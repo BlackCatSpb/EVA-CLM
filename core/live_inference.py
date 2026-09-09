@@ -80,7 +80,13 @@ class MirrorMonitor:
             d_bar = float(torch.sigmoid(layer.b_d.detach()).mean().clamp(1e-6, 1 - 1e-9))
             taus[i] = -1.0 / math.log(d_bar)
 
-        expl_val, _ = AdaptiveController.stats(m.layers)
+        # cfg-derived thresholds (audit M7): the default 0.296/0.087 are valid
+        # only at d=3; the live LambdaConfig-synced cfg values must be used.
+        _cfg = getattr(m, 'cfg', None)
+        expl_val, _ = AdaptiveController.stats(
+            m.layers,
+            expl_thresh=getattr(_cfg, 'exploration_threshold', 0.296) if _cfg else 0.296,
+            diff_thresh=getattr(_cfg, 'differentiation_threshold', 0.087) if _cfg else 0.087)
 
         self.history['step'].append(None)  # filled by LiveInference
         self.history['expert_gates'].append(gates)

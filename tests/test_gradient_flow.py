@@ -385,6 +385,11 @@ class TestParamGroups:
                 assigned.add(id(p))
         for n, p in model.named_parameters():
             if p.requires_grad:
+                # audit M7: the block-level _vsa_tau_log is the standalone
+                # fallback ladder — the stack passes its own live tau_s, so
+                # this copy is deliberately EXCLUDED from the optimizer.
+                if n.endswith('._vsa_tau_log'):
+                    continue
                 assert id(p) in assigned, f'{n} not in any param_group'
 
     def test_param_group_count_reasonable(self):

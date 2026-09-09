@@ -124,11 +124,15 @@ class EVABlock(nn.Module):
         self.K: int = cfg.bind_K
         self.layer_idx: int = layer_idx
         self.tie_bind: bool = cfg.tie_bind
-        # Store τ_norm for this layer (U1, U3)
+        # Store τ_norm for this layer (U1, U3). __init__ value is only the
+        # fallback; forward refreshes it from the LIVE τ-field (audit M7:
+        # _tau_dev trains during the run, a snapshot froze U3/U10/ψ at their
+        # init values while the τ-ladder moved on).
         self._tau_norm: Optional[float] = None
         if tau_config is not None and hasattr(tau_config, 'tau_norm'):
             with torch.no_grad():
                 self._tau_norm = tau_config.tau_norm[layer_idx].item()
+                self._tau_norm_t = tau_config.tau_norm[layer_idx].detach()
         # Keep the τ-field so the mirror can bind its gate authorities to τ
         # (intent_alpha etc.); previously the mirror always saw tau_config=None,
         # which silently disabled all τ-ties inside GroupedCognitiveMirror.
@@ -149,7 +153,8 @@ class EVABlock(nn.Module):
             self.bind = SpiralBind(cfg.D, cfg.bind_K, cfg)
         else:
             self.bind = BottleneckBind(cfg.D, cfg.bind_K, cfg)
-        # U10: set τ_norm on bind module for frequency schedule
+        # U10: set τ_norm on bind module for frequency schedule (refreshed
+        # LIVE in forward — audit M7)
         if self._tau_norm is not None and hasattr(self.bind, '_tau_norm'):
             self.bind._tau_norm = self._tau_norm
 
@@ -180,7 +185,7 @@ class EVABlock(nn.Module):
             intent_bridge=getattr(cfg, 'intent_bridge', False),
             bridge_glu=getattr(cfg, 'bridge_glu', False),
             bridge_glu_beta=getattr(cfg, 'bridge_glu_beta', 0.25),
-            pm_write_delay=getattr(cfg, 'pm_write_delay', 5000),
+            pm_write_delay=getattr(cfg, 'pm_write_delay', 0),
             pm_coh_gate_std=getattr(cfg, 'pm_coh_gate_std', 0.02),
             mirror_tau_min=getattr(cfg, 'mirror_tau_min', 2.0),
             mirror_tau_max=getattr(cfg, 'mirror_tau_max', 200.0),
@@ -188,8 +193,13 @@ class EVABlock(nn.Module):
         
         # ─── VSA Memory (multi-scale VSA: S=4 фиксированных τ) ───
         self._n_scales = 4
-        # U1: τ-consistent VSA scales: learnable log-space params (base distribution)
-        self._vsa_tau_log = nn.Parameter(torch.tensor([math.log(8), math.log(32), math.log(128), math.log(512)]))
+        # U1: τ-consistent VSA scales. This copy is the TRAINABLE ladder for
+        # standalone blocks (tau_s=None); inside EVAStack the live source is
+        # the stack-level _vsa_log_param (tau_s is always passed), and this
+        # copy is EXCLUDED from both optimizer builders so it stops being
+        # zero-gradient weight in the production optimizer state (audit M7).
+        self._vsa_tau_log = nn.Parameter(
+            torch.tensor([math.log(8), math.log(32), math.log(128), math.log(512)]))
         # Keep old buffer for backward compat (unused in forward when tau_config provided)
         tau_s = torch.tensor([8, 32, 128, 512], dtype=torch.float32)
         self.register_buffer('_tau_s', tau_s)
@@ -291,6 +301,22 @@ class EVABlock(nn.Module):
         B, L, D = h.shape
         NaN = float('nan')
         self._nan_at = None
+        # M7 (live τ-field): the __init__ τ_norm / intent_alpha were one-time
+        # snapshots of a ladder that _tau_dev keeps moving. Refresh the block's
+        # own U3 damping, the bind U10 frequency schedule, and the mirror's
+        # gate-amplitude authority (intent_alpha) + τ-signal ladder every
+        # forward so those τ-ties actually track the field (README §7/§8).
+        if self.tau_config is not None:
+            with torch.no_grad():
+                _tn = float(self.tau_config.tau_norm[self.layer_idx].detach())
+                _ia = float(self.tau_config.intent_alpha[self.layer_idx].detach())
+            self._tau_norm = _tn
+            if hasattr(self.bind, '_tau_norm'):
+                self.bind._tau_norm = _tn
+            mir = getattr(self, 'mirror', None)
+            if mir is not None:
+                mir._intent_alpha = _ia
+                mir._tau_norm_layer = _tn
         def _chk(t, label):
             if not self.training:
                 return False

@@ -121,7 +121,7 @@ class GroupedCognitiveMirror(nn.Module):
                  gate_bias_scale: float = 0.0, alpha_novelty_weight: float = 0.0, seq_len: int = 256,
                     intent_bridge: bool = False, bridge_glu: bool = False,
                     bridge_glu_beta: float = 0.25,
-                    pm_write_delay: int = 5000, pm_coh_gate_std: float = 0.02,
+                    pm_write_delay: int = 0, pm_coh_gate_std: float = 0.02,
                      matur_write_thr: float = 0.3,
                      mirror_tau_min: float = 2.0, mirror_tau_max: float = 200.0,
                      tau_config: Optional[object] = None) -> None:
@@ -329,7 +329,10 @@ class GroupedCognitiveMirror(nn.Module):
         # and τ-tied gate amplitude authority (intent_alpha = 1 − exp(−τ_l/τ_min)).
         self._tau_norm_layer = None
         self._intent_alpha = 1.0
-        self._tau_gate_min = 1.0
+        # Fallbacks equal the TauConfig defaults (0.3/5.0) so a standalone
+        # mirror doesn't silently run a different gate ladder than the
+        # stack-injected one (audit M7 default-alignment sweep).
+        self._tau_gate_min = 0.3
         self._tau_gate_max = 5.0
         if tau_config is not None and hasattr(tau_config, 'tau_norm'):
             with torch.no_grad():
@@ -715,6 +718,14 @@ class GroupedCognitiveMirror(nn.Module):
         n_eff = torch.as_tensor(n_eff, dtype=torch.float32, device=h.device)
         prog = 1.0 - torch.exp(-n_eff / 200.0)
         temp = torch.clamp(3.0 * torch.exp(-prog * 2.0), min=0.3, max=3.0)
+        # M7: MirrorLRScheduler schedules the usefulness softmax temperature
+        # through _usefulness_temp during warmup/blend (>0 ⇒ active). The
+        # buffer was written by the scheduler and IGNORED here — a knob
+        # without a consumer; wired now (0 ⇒ the intrinsic schedule stands).
+        _t_ov = self._usefulness_temp
+        if float(_t_ov) > 0.0:
+            temp = _t_ov.reshape(())
+        self._last_usef_temp = float(temp)  # observability (M7 test hook)
         with torch.no_grad():
             srt_u, _ = torch.sort(usefulness_logits, dim=-1)
             n_u = srt_u.shape[-1]

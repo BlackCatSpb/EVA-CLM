@@ -163,28 +163,40 @@ def _layer_index_of(name: str) -> int:
     return -1
 
 
+# ─── Param-role token sets (audit M7) ───────────────────────────────────────
+# Substring routing ('.b_d' in name) silently mis-captured look-alikes:
+# 'b_delta_gate'/'w_delta_gate' fell into the VSA-decay λ⁻² bucket before the
+# gate branch ever saw them ('silent LR confiscation'). Matching on exact
+# dotted NAME PARTS removes the whole class of collisions.
+_VSA_PARTS = frozenset({'b_d', 'b_i', 'scale_w'})
+_MIRROR_PARTS = frozenset({'alpha_diag', 'log_skip_alpha', 'w_temp', 'w_global',
+                           'log_scale', 'tanh_bias', 'log_dvar_mod_scale',
+                           'dvar_mod_bias', 'log_grad_mod_scale', 'grad_mod_bias'})
+_GATE_PARTS = frozenset({'w_gate', 'b_gate', 'w_delta_gate', 'b_delta_gate',
+                         'w_i', 'w_d', 'w_q', 'w_q_leaf', 'w_q_ctx', 'w_mem2v',
+                         'w_k_mu', 'w_q_mu', 'w_mu_mem', 'w_u', 'w_v',
+                         # intent-bridge gate authorities: previously reached
+                         # the gate bucket only through the '.w_i'/'.b_i'
+                         # substring accident (b_intent even hit VSA first)
+                         'w_intent', 'b_intent', 'w_sal'})
+
+
 def _role_lr_mult(name: str, lam: Any) -> float:
-    if '.b_d' in name or '.b_i' in name or '.scale_w' in name:
+    parts = frozenset(name.split('.'))
+    if parts & _VSA_PARTS:
         return lam ** (-2)            # vsa scales
     if name.startswith('embed.') or name.startswith('lm_head.readout') \
             or name.startswith('lm_head.proj'):
         return lam ** (-2)            # embeddings / readout
-    if any(g in name for g in ['.mirror.alpha_diag', '.log_skip_alpha',
-                               '.mirror.W_proj', '.mirror.W_out', '.mirror.w_temp',
-                               '.mirror.w_global', '.mirror.log_scale',
-                               '.mirror.tanh_bias', '.log_dvar_mod_scale',
-                               '.dvar_mod_bias', '.log_grad_mod_scale',
-                               '.grad_mod_bias']):
+    if (parts & _MIRROR_PARTS) or (('W_proj' in parts or 'W_out' in parts)
+                                   and 'mirror' in parts):
         return lam ** (1)             # mirror projections / gates
     if '.mlp.' in name or '.bind.W_proj.weight' in name \
             or name.endswith('.W_out') or name.endswith('.W_proj'):
         return lam ** (-1)            # MLP cores / bind
     if 'reasoning_gate' in name:
         return lam ** (1)
-    if any(g in name for g in ['.w_gate', '.b_gate', '.w_delta_gate', '.b_delta_gate',
-                               '.w_i', '.w_d', '.w_q', '.w_q_leaf', '.w_q_ctx',
-                               '.w_mem2v', '.w_k_mu', '.w_q_mu', '.w_mu_mem',
-                               '.w_u', '.w_v']):
+    if parts & _GATE_PARTS:
         return lam ** (1)             # gating / memory
     return 1.0
 
@@ -210,6 +222,8 @@ def build_optimizer(model: torch.nn.Module, base_lr: float,
         lam = lambda_d(model.cfg.lambda_d)
     groups = {}
     for name, p in model.named_parameters():
+        if name.endswith('._vsa_tau_log'):
+            continue  # stack overrides the VSA ladder via tau_s (audit M7)
         li = _layer_index_of(name)
         role_mult = _role_lr_mult(name, lam)
         depth_mult = llrd_decay ** max(li, 0)
@@ -235,6 +249,8 @@ def build_optimizer(model: torch.nn.Module, base_lr: float,
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
+            if name.endswith('._vsa_tau_log'):
+                continue  # stack overrides the VSA ladder via tau_s (audit M7)
             r = _resolve_role(name, p.dim())
             li = _layer_index_of(name)
             role_mult = _role_lr_mult(name, lam)

@@ -146,9 +146,9 @@ class EVAStack(nn.Module):
             D=cfg.D,
             bridge_dim=getattr(cfg, 'mem_bridge_dim', getattr(cfg, 'bridge_dim', 256)),
             l1_slots=getattr(cfg, 'mem_l1_slots', 3),
-            l2_slots=getattr(cfg, 'mem_l2_slots', 16),
+            l2_slots=getattr(cfg, 'mem_l2_slots', 32),
             l3_concepts=getattr(cfg, 'mem_l3_concepts', 8),
-            l3_birth_threshold=getattr(cfg, 'mem_l3_birth_threshold', 0.7),
+            l3_birth_threshold=getattr(cfg, 'mem_l3_birth_threshold', 0.85),
             min_write_maturation=getattr(cfg, 'mem_min_write_mat', 0.3),
             cfg=cfg,
             tau_config=self.tau_config,
@@ -165,12 +165,6 @@ class EVAStack(nn.Module):
             cfg=cfg,
             softmax_free=getattr(cfg, 'softmax_free', True),
         ) if getattr(cfg, 'unified_concept_layer', True) else None
-        tau_mid = math.sqrt(tau_l[0].item() * tau_l[-1].item())
-        write_rate = 1.0 / math.sqrt(cfg.D)
-        self._c_ema_value = write_rate * tau_mid
-        self._tau_min_value = tau_l[0].item()
-        self._tau_max_value = tau_l[-1].item()
-        self._tau_mid_value = tau_mid
         # ─── Maturation controller (unified wake-up gate) ───
         # Uses tau_config.mat_delay for per-layer timing.
         if getattr(cfg, 'maturation_enabled', True):
@@ -276,8 +270,9 @@ class EVAStack(nn.Module):
                 global_expl = self._expl_ema.clamp(0.0, 1.0).item()
                 
                 self._pred_weight = (pred_weight if pred_weight is not None
-                    else AdaptiveController.pred_weight(self.layers,
-                        min_val=0.05, max_val=0.3))
+                    else AdaptiveController.pred_weight(self.layers))
+                    # λ-tied defaults (λ⁻⁶..λ⁻²) — audit M7: a local 0.05/0.3
+                    # override silently diverged from the LambdaConfig range
                 
                 for i, layer in enumerate(self.layers):
                     l_expl, l_diff = _layer_stats_cache[i]
@@ -287,7 +282,7 @@ class EVAStack(nn.Module):
                     b_d_max = getattr(self.cfg, 'vsa_b_d_max', 12.0)
                     b_d_val = AdaptiveController.layer_b_d(layer, expl=l_expl,
                         b_d_max=b_d_max)
-                    smooth = getattr(self.cfg, 'vsa_b_d_smooth', 0.99)
+                    smooth = getattr(self.cfg, 'vsa_b_d_smooth', 0.999)
                     if smooth >= 1.0:
                         layer.b_i.fill_(b_i_val)
                         layer.b_d.fill_(b_d_val)
@@ -1043,9 +1038,15 @@ class EVAStack(nn.Module):
           p= 0: conv, norm, W_out, head  (1.00×)
           p=+1: mirror projections, α    (1.84×)
           p=+2: gates, w_i, b_i, etc     (3.38×)
-          vsa:  b_d, b_i                 (λ^{-4} ≈ 0.087×)
+          vsa:  b_d, b_i                 (λ^{-2})
           bridge: bridge_*, intent_*     (bridge_lr_mult ×, default 0.1×)
+
+        Role routing uses EXACT dotted-name parts (shared with
+        core.adaptation._role_lr_mult) — the old substring tests let
+        'b_delta_gate'/'w_delta_gate' fall into the λ⁻² VSA bucket before the
+        gate branch could claim them (audit M7).
         """
+        from .adaptation import _VSA_PARTS, _GATE_PARTS, _MIRROR_PARTS
         cfg = self.cfg
         lr = lr or cfg.lr
         wd = weight_decay or cfg.weight_decay
@@ -1078,6 +1079,11 @@ class EVAStack(nn.Module):
                 'default_wd':{'params': [], 'lr': lr,               'weight_decay': wd},
             }
             for name, p in self.named_parameters():
+                # block-level standalone-fallback ladder: unused when the
+                # stack passes tau_s, so keep it OUT of the optimizer state
+                # (audit M7; standalone blocks/tests build their own optimizers)
+                if name.endswith('._vsa_tau_log'):
+                    continue
                 # τ-config params: dedicated groups (check BEFORE bridge to avoid misrouting)
                 if 'tau_config.' in name or '_tau_l_dev' in name:
                     groups['tau_dev']['params'].append(p)
@@ -1087,7 +1093,7 @@ class EVAStack(nn.Module):
                       or 'layer_bridge_gate.' in name):
                     k = 'bridge' if p.ndim >= 2 else 'bridge_nd'
                     groups[k]['params'].append(p)
-                elif '.b_d' in name or '.b_i' in name or '.scale_w' in name:
+                elif frozenset(name.split('.')) & _VSA_PARTS:
                     groups['vsa']['params'].append(p)
                 elif name.startswith('embed.') or name.startswith('lm_head.readout') or name.startswith('lm_head.proj'):
                     k = 'embed_wd' if p.ndim >= 2 else 'embed'
@@ -1110,10 +1116,7 @@ class EVAStack(nn.Module):
                     # Adaptive reasoning gates — gate-like LR (fast adaptation), no decay
                     k = 'gate' if p.ndim < 2 else 'gate_wd'
                     groups[k]['params'].append(p)
-                elif any(g in name for g in ['.w_gate', '.b_gate', '.w_delta_gate', '.b_delta_gate',
-                                              '.w_i', '.w_d', '.w_q', '.w_q_leaf', '.w_q_ctx', '.w_mem2v',
-                                              '.w_k_mu', '.w_q_mu', '.w_mu_mem',
-                                              '.w_u', '.w_v']):
+                elif (frozenset(name.split('.')) & _GATE_PARTS):
                     k = 'gate_wd' if p.ndim >= 2 else 'gate'
                     groups[k]['params'].append(p)
                 else:
@@ -1131,7 +1134,9 @@ class EVAStack(nn.Module):
         bridge_decay = []
         bridge_no_decay = []
         for name, p in self.named_parameters():
-            if '.b_d' in name or '.b_i' in name or '.scale_w' in name:
+            if name.endswith('._vsa_tau_log'):
+                continue
+            if frozenset(name.split('.')) & _VSA_PARTS:
                 vsa_bias.append(p)
                 continue
             # Bridge params: bridge.*, bridge_glu_net.*, intent_probe, bus_head_proj
@@ -1144,17 +1149,9 @@ class EVAStack(nn.Module):
                 else:
                     bridge_decay.append(p)
                 continue
-            is_gate = any(g in name for g in ['.w_i', '.w_d', '.w_q', '.w_q_leaf', '.w_q_ctx', '.w_mem2v',
-                                               '.w_k_mu', '.w_q_mu', '.w_mu_mem',
-                                               '.w_u', '.w_v',
-                                               '.tanh_bias', '.log_scale',
-                                               '.mirror.W_proj', '.mirror.W_out',
-                                               '.mirror.w_temp', '.mirror.w_global',
-                                                 '.mirror.alpha_diag',
-                                               '.mirror.w_gate', '.mirror.b_gate',
-                                               '.log_dvar_mod_scale', '.dvar_mod_bias',
-                                               '.log_grad_mod_scale', '.grad_mod_bias',
-                                               '.log_skip_alpha'])
+            _parts = frozenset(name.split('.'))
+            is_gate = bool(_parts & (_GATE_PARTS | _MIRROR_PARTS)) \
+                or (('W_proj' in _parts or 'W_out' in _parts) and 'mirror' in _parts)
             if 'reasoning_gate' in name:
                 is_gate = True
             if is_gate:

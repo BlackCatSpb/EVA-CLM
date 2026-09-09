@@ -91,11 +91,19 @@ class TestU1VsaTauScales:
         assert 0.0 <= block._tau_norm <= 1.0
 
     def test_vsa_tau_log_trainable(self):
+        # Audit M7: the live trainable VSA scale ladder is the STACK-level
+        # _vsa_log_param (single source, always passed as tau_s to blocks);
+        # the block attribute is a constant fallback for standalone use.
         cfg = EVAConfig(**SMALL)
         tc = TauConfig(n_layers=cfg.n_layers)
         tc.update()
         block = EVABlock(cfg, 0, tau_config=tc)
-        assert block._vsa_tau_log.requires_grad
+        assert block._vsa_tau_log.requires_grad     # standalone ladder trainable
+        stack = EVAStack(cfg)
+        assert stack._vsa_log_param.requires_grad   # live single source
+        grouped = {id(q) for g in stack.param_groups() for q in g['params']}
+        assert id(block._vsa_tau_log) not in grouped, \
+            'dead weight: block fallback ladder must not enter the stack optimizer' 
 
     def test_vsa_tau_per_layer_differs(self):
         cfg = EVAConfig(**SMALL)

@@ -526,6 +526,90 @@ def test_concept_store_consistency():
     assert math.isfinite(float(m.concept_layer._cached_birth_gate))
 
 
+# ── M7.1 role routing on EXACT name parts (b_delta_gate was confiscated) ─────
+def test_role_routing_exact_tokens():
+    from core.adaptation import _role_lr_mult
+    from core.lambda_utils import lambda_d
+    lam = lambda_d(3)
+    assert _role_lr_mult('layers.0.mirror.b_delta_gate', lam) == lam ** 1, \
+        'b_delta_gate mis-routed (substring collision with .b_d)'
+    assert _role_lr_mult('layers.0.mirror.w_delta_gate', lam) == lam ** 1
+    assert _role_lr_mult('layers.0.b_d', lam) == lam ** -2
+    assert _role_lr_mult('layers.0.b_i', lam) == lam ** -2
+    assert _role_lr_mult('layers.0.mirror.w_intent', lam) == lam ** 1
+    assert _role_lr_mult('layers.0.mirror.b_intent', lam) == lam ** 1, \
+        'b_intent hit the .b_i VSA bucket before the gate branch'
+
+
+# ── M7.2 τ-ladder is bounded by dev_max (documented clip actually applies) ───
+def test_tau_ladder_bounded():
+    from core.tau_config import TauConfig
+    tc = TauConfig(n_layers=24, tau_min=8.0, tau_max=512.0, dev_max=0.3)
+    with torch.no_grad():
+        tc._tau_dev.fill_(50.0)            # pathological drift
+    tc.update()
+    tau = tc.tau_l
+    assert torch.isfinite(tau).all()
+    ratio = float((tau.max() / tau.min()).detach())
+    # inc ≤ base·softplus(dev_max)/ln2 ⇒ total log-range ×(softplus(dev_max)/ln2)
+    gain = math.log1p(math.exp(-0.3)) / math.log(2.0)      # softplus(0.3)/ln2 ≈ 1.233
+    assert ratio < 400, f'ladder runaway: ratio {ratio:.1e} (bounded design: ≤~170)'
+    # dev=0 identity (checkpoint-safe): exactly the pre-fix uniform ladder
+    tc0 = TauConfig(n_layers=24, tau_min=8.0, tau_max=512.0, dev_max=0.3)
+    tc0.update()
+    base = math.log(512.0 / 8.0) / 23
+    want = torch.tensor([8.0 * math.exp(base * (i + 1)) for i in range(24)])
+    assert torch.allclose(tc0.tau_l.detach(), want, rtol=1e-5)
+
+
+# ── M7.3 τ consumers read the LIVE field, not the init snapshot ──────────────
+def test_tau_consumers_live():
+    # 4 layers so layer 1 sits mid-ladder (2-layer minis clamp every τ_norm to
+    # the endpoints and hide the refresh)
+    m = _stack(n_layers=4)
+    x = torch.randint(1, m.cfg.vocab, (1, 4))
+    with torch.no_grad():
+        m(m.embed_tokens(x), step=2, tokens=x)
+    snap = float(m.layers[1]._tau_norm)
+    with torch.no_grad():
+        m.tau_config._tau_dev.fill_(0.25)
+    with torch.no_grad():
+        m(m.embed_tokens(x), step=3, tokens=x)
+    now = float(m.layers[1]._tau_norm)
+    assert abs(now - snap) > 1e-4, 'block._tau_norm frozen at init (U3/U10 snapshot bug)'
+    assert abs(now - float(m.tau_config.tau_norm[1].detach())) < 1e-6
+
+
+# ── M7.4 scheduler's usefulness-temp knob has a consumer ─────────────────────
+def test_usefulness_temp_wired():
+    m = _stack()
+    x = torch.randint(1, m.cfg.vocab, (1, 4))
+    lay = m.layers[0].mirror
+    with torch.no_grad():
+        lay._usefulness_temp.fill_(2.5)
+    with torch.no_grad():
+        m(m.embed_tokens(x), step=2, tokens=x)
+    assert abs(lay._last_usef_temp - 2.5) < 1e-6, 'scheduler temp ignored by forward'
+    with torch.no_grad():
+        lay._usefulness_temp.fill_(0.0)
+    with torch.no_grad():
+        m(m.embed_tokens(x), step=300, tokens=x)
+    assert 0.3 <= lay._last_usef_temp <= 3.0 and abs(lay._last_usef_temp - 2.5) > 1e-3
+
+
+# ── M7.5 bind U10 bounds from cfg, not literals ──────────────────────────────
+def test_bind_tau_bounds_from_cfg():
+    cfg_kw = {**SMALL}
+    cfg = EVAConfig(**cfg_kw)
+    m = _stack()
+    b = m.layers[0].bind
+    if hasattr(b, '_tau_max'):
+        assert b._tau_min == cfg.tau_min and b._tau_max == cfg.tau_max
+    else:
+        import pytest
+        pytest.skip('bind mode without U10 schedule')
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

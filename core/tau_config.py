@@ -115,7 +115,15 @@ class TauConfig(nn.Module):
         base_inc = self._log_tau_range / max(self.n_layers - 1, 1)
         # softplus(0) = log(2) ≈ 0.693 — normalization ensures dev=0 → base_inc
         _sp0 = math.log(2.0)
-        inc = base_inc * F.softplus(self._tau_dev) / _sp0
+        # dev_max is the DOCUMENTED clip range and now actually bounds the
+        # ladder. The old code used softplus(dev) with an UNBOUNDED dev: the
+        # only brake was an L2 reg that the align path can drop, so a drifting
+        # _tau_dev could overflow exp(log_tau)→inf (audit M7). A smooth
+        # bounded reparam keeps gradients alive (unlike a hard clamp):
+        #   dev_eff = dev_max · tanh(dev / dev_max) ∈ (−dev_max, +dev_max)
+        # dev=0 ⇒ dev_eff=0 ⇒ inc=base_inc (init unchanged, checkpoint-safe).
+        dev_eff = self.dev_max * torch.tanh(self._tau_dev / max(self.dev_max, 1e-6))
+        inc = base_inc * F.softplus(dev_eff) / _sp0
 
         log_tau = self._log_tau_min + torch.cumsum(inc, dim=0)
         return torch.exp(log_tau)
