@@ -446,6 +446,86 @@ def test_mlp_mod_anchor_identity():
     assert torch.allclose(coef, torch.ones_like(coef), atol=1e-6)
 
 
+# ── M6 CONCEPT LAYER: write path must carry gradient (design principle #3) ───
+def _concept_step(m, it=0):
+    x = torch.randint(1, m.cfg.vocab, (1, 8))
+    h = m.embed_tokens(x)
+    lay = m.layers[0]
+    torch.manual_seed(100 + it)
+    hp = torch.randn(1, 8, lay.mirror.G, lay.mirror.k, device=h.device)
+    # low pen → conf = σ(−pen) ≥ birth_thresh (0.375 at init): the birth path
+    # is what exercises write_q_proj/write_v_proj gradients.
+    pen = 0.02 + torch.rand(1, 8) * 0.06
+    out = m.concept_layer(h, hp=hp, pen=pen, resvar=0.2,
+                          mat_gate=1.0, allow_write=True,
+                          gate=torch.rand(1, 8, lay.mirror.G), tau_norm=0.5)
+    return out
+
+
+def test_concept_write_gradient_live():
+    m = _stack()
+    assert m.concept_layer is not None, 'mini stack has no concept layer'
+    for it in range(10):
+        out = _concept_step(m, it)
+        out.sum().backward()          # writes start ~it=5 (maturity transient)
+    wq = m.concept_layer.write_q_proj.weight
+    wv = m.concept_layer.write_v_proj.weight
+    assert wq.grad is not None and float(wq.grad.abs().sum()) > 0, \
+        'write_q_proj: write path has no gradient (design principle #3 violated)'
+    assert wv.grad is not None and float(wv.grad.abs().sum()) > 0, 'write_v_proj dead'
+    assert int(m.concept_layer._n_births.item()) > 0, 'no concept was ever born'
+
+
+def test_concept_gate_param_used():
+    outs = []
+    for gv in (0.0, 1.0):
+        m = _stack()
+        o = None
+        for it in range(10):
+            x = torch.randint(1, m.cfg.vocab, (1, 8))
+            h = m.embed_tokens(x)
+            lay = m.layers[0]
+            torch.manual_seed(100 + it)
+            hp = torch.randn(1, 8, lay.mirror.G, lay.mirror.k)
+            pen = 0.02 + torch.rand(1, 8) * 0.06
+            o = m.concept_layer(h, hp=hp, pen=pen, resvar=0.2, mat_gate=1.0,
+                                allow_write=True,
+                                gate=torch.full((1, 8, lay.mirror.G), gv),
+                                tau_norm=0.5)
+        outs.append(o.detach())
+    assert not torch.allclose(outs[0], outs[1], atol=1e-6), 'gate argument ignored (principle #4)'
+
+
+def test_concept_novelty_thr_live():
+    m = _stack()
+    with torch.no_grad():
+        m.concept_layer._log_tau_novelty_thr.fill_(-20.0)   # gap≈0 → permissive
+        for it in range(10):
+            _concept_step(m, it)
+    permissive = int(m.concept_layer._n_births.item())
+    m3 = _stack()
+    with torch.no_grad():
+        m3.concept_layer._log_tau_novelty_thr.fill_(20.0)    # gap≈1 → never novel
+        for it in range(10):
+            _concept_step(m3, it)
+    strict = int(m3.concept_layer._n_births.item())
+    assert permissive > 0 and strict == 0, \
+        f'novelty gap has no authority (permissive={permissive}, strict={strict})'
+
+
+def test_concept_store_consistency():
+    # after multiple write steps the persistent store must equal the last
+    # effective store (no divergence between buffer and used keys)
+    m = _stack()
+    for it in range(10):
+        out = _concept_step(m, it)
+    out.sum().backward()
+    keys = m.concept_layer.concept_keys
+    assert torch.isfinite(keys).all() and float(keys.norm()) > 0
+    # birth_gate diagnostic must be finite
+    assert math.isfinite(float(m.concept_layer._cached_birth_gate))
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

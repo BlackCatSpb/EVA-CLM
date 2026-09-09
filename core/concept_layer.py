@@ -50,8 +50,11 @@ class UnifiedConceptLayer(nn.Module):
         self.S = S
 
         # ─── τ-параметры (все пороги через sigmoid(τ·x)) ───
-        # Novelty: sigmoid(τ_novelty · (1 - best_sim)) → вероятность "новизны"
-        self.log_tau_novelty = nn.Parameter(torch.tensor(0.0))
+        # Novelty GAP: concept is novel when cosine distance to the nearest
+        # slot exceeds gap = sigmoid(log_tau_novelty_thr) (design principle #1).
+        # Audit M6: the old novelty_score = σ(τ·(1−sim)) tested `> 0.5` —
+        # σ(x)>0.5 ⇔ x>0 ⇔ sim<1 for ANY τ: a dead knob that never gated.
+        self._log_tau_novelty_thr = nn.Parameter(torch.tensor(0.0))  # gap position
         # Birth confidence: sigmoid(τ_birth · confidence) → порог рождения
         self.log_tau_birth = nn.Parameter(torch.tensor(0.0))
         # Update momentum: α = 1/τ_update → чем выше τ, тем медленнее обновление
@@ -64,10 +67,14 @@ class UnifiedConceptLayer(nn.Module):
         self.log_tau_gate = nn.Parameter(torch.tensor(0.0))
 
         # ─── Concept slots ───
+        # STORAGE buffers, not Parameters: learning lives in the projections
+        # via the FUNCTIONAL write path (design principle #3; audit M6: the
+        # old `.data[...]` writes cut every gradient and the Parameters were
+        # dead weight in the optimizer). Read + effective store carry grads.
         g = torch.Generator().manual_seed(seed)
         m_init = torch.randn(S, bridge_dim, generator=g)
-        self.concept_keys = nn.Parameter(F.normalize(m_init, dim=-1))  # (S, bridge_dim)
-        self.concept_vals = nn.Parameter(torch.randn(S, D) * 0.02)    # (S, D)
+        self.register_buffer('concept_keys', F.normalize(m_init, dim=-1))  # (S, bridge_dim)
+        self.register_buffer('concept_vals', torch.randn(S, D, generator=g) * 0.02)  # (S, D)
 
         # ─── Projections ───
         # Write path: hp expert K-space (B,L,G,k) → shared (B,L,k)
@@ -111,11 +118,16 @@ class UnifiedConceptLayer(nn.Module):
 
         mat = sigmoid((1/cv - λ) · τ_mat)
         cv = sqrt(var) / |ema| → low cv = stable = mature
+        (audit M6: λ must be the λ_d VALUE from lambda_utils — the old code
+        substituted the DIMENSION d (3) in place of λ≈1.839, mis-scaling the
+        EMA rate and the neutral cv.)
         """
         if resvar is None:
             return
+        from .lambda_utils import lambda_d as _lambda_d
         rv = resvar.detach().item() if isinstance(resvar, torch.Tensor) else float(resvar)
-        lam = getattr(self.cfg, 'lambda_d', 3) if self.cfg else 3
+        d_lam = getattr(self.cfg, 'lambda_d', 3) if self.cfg is not None else 3
+        lam = _lambda_d(d_lam)
         ema_rate = 1.0 / lam
 
         delta = rv - self._resvar_ema.item()
@@ -134,118 +146,130 @@ class UnifiedConceptLayer(nn.Module):
 
     # ─────────────────── Write ───────────────────
 
-    def _maybe_write(self, hp: torch.Tensor, pen: torch.Tensor, mat_gate: float) -> tuple[torch.Tensor, torch.Tensor]:
-        """τ-gated concept write (birth/update).
+    def _maybe_write(self, hp: torch.Tensor, pen: torch.Tensor, mat_gate: float,
+                     keys: torch.Tensor, vals: torch.Tensor,
+                     gate: torch.Tensor | None = None,
+                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """τ-gated concept write — FUNCTIONAL & DIFFERENTIABLE (design
+        principle #3; audit M6: the old implementation wrote through
+        `.data[...]`, cutting autograd from read to write_q_proj/write_v_proj
+        — the whole write path was learning-dead).
 
-        hp: (B, L, G, k) — expert K-space states
-        pen: (B, L) — prediction error norm
-        mat_gate: float — maturation gate from stack
+        Discrete bookkeeping (slot assignment, counts, ages, eviction) stays
+        no-grad buffers; the key/value blend into the EFFECTIVE store is a
+        live graph so gradients reach the write projections and the expert
+        gate (principle #4: caller-provided per-expert gate weights the
+        shared representation instead of being ignored).
 
-        Returns: (write_event: (B,L) bool, best: (B,L) long)
-        """
+        Returns (write_event: (B,L) bool, best: (B,L) long,
+                 keys_eff: (S,bridge_dim) live, vals_eff: (S,D) live)."""
         self._step += 1
         B, L, G, k = hp.shape
         device = hp.device
-        zeros = torch.zeros(B, L, dtype=torch.bool, device=device)
-
+        zeros_ev = torch.zeros(B, L, dtype=torch.bool, device=device)
+        zeros_best = torch.zeros(B, L, dtype=torch.long, device=device)
         if mat_gate < 0.1:
-            return zeros, zeros.long()
+            return zeros_ev, zeros_best, keys, vals
 
-        # τ-driven thresholds
-        tau_nov = torch.exp(self.log_tau_novelty).clamp(0.1, 10.0)
-        tau_birth = torch.exp(self.log_tau_birth).clamp(0.1, 10.0)
-        tau_update = torch.exp(self.log_tau_update).clamp(0.1, 10.0)
-
-        # Shared representation: gate-weighted average over experts
-        gate_w = torch.ones(B, L, G, device=device)  # uniform if no gate provided
+        # Shared representation: PER-EXPERT GATED average (principle #4).
+        if gate is not None and tuple(gate.shape) == (B, L, G):
+            gate_w = gate.float()
+        else:
+            gate_w = torch.ones(B, L, G, device=device)
         gsum = gate_w.sum(dim=-1, keepdim=True).clamp(min=1e-6)
         shared = (hp * gate_w.unsqueeze(-1)).sum(dim=-2) / gsum  # (B, L, k)
 
-        # Query/key for concept matching (project k → bridge_dim)
-        q = self.write_q_proj(shared).reshape(B * L, self.bridge_dim)  # (B*L, bridge_dim)
-        q = q.reshape(B, L, self.bridge_dim)
-        q_n = F.normalize(q, dim=-1)
-        concept_n = F.normalize(self.concept_keys.data, dim=-1)  # (S, bridge_dim)
-        sims = torch.einsum('blk,sk->bls', q_n, concept_n)  # (B, L, S)
-        best = sims.argmax(dim=-1)  # (B, L)
-        best_sim = sims.max(dim=-1).values  # (B, L)
+        q = self.write_q_proj(shared)                            # live
+        q_n = F.normalize(q, dim=-1)                             # (B,L,bridge_dim)
+        concept_n = F.normalize(keys, dim=-1)                     # (S,bridge_dim)
+        sims = torch.einsum('blk,sk->bls', q_n, concept_n)       # (B,L,S) live
+        with torch.no_grad():
+            best = sims.argmax(dim=-1)
+            best_sim = sims.max(dim=-1).values
+        val_proj = self.write_v_proj(shared)                      # (B,L,D) live
 
-        # Value projection (k → D) for writing into concept_vals
-        val_proj = self.write_v_proj(shared)  # (B, L, D)
-
-        # Confidence from prediction error
-        conf = torch.sigmoid(-pen)  # (B, L) — high confidence = low error
-
+        conf = torch.sigmoid(-pen)                                # (B,L)
         write_event = torch.zeros(B, L, dtype=torch.bool, device=device)
 
-        # ─── Update existing concepts ───
-        # Update momentum: α = sigmoid(-log(τ_update)) → small for high τ
-        alpha = torch.sigmoid(-self.log_tau_update).clamp(0.001, 0.5).item()
+        # Update momentum α (learnable, live scalar in the blend)
+        alpha = torch.sigmoid(-self.log_tau_update).clamp(0.001, 0.5)
         mat = self._mature.item()
 
         if mat >= 0.3:
+            conf_floor = conf.median().clamp(min=0.01)
+            upd_idx, upd_keys, upd_vals = [], [], []
             for s in range(self.S):
-                mask = (best == s) & (conf >= conf.median().clamp(min=0.01))
-                if mask.any():
-                    write_event |= mask
-                    new_key = q_n.reshape(B, L, self.bridge_dim)[mask].mean(dim=0)
-                    new_key = F.normalize(new_key, dim=-1)
-                    if self.concept_count[s].item() < 3:
-                        self.concept_keys.data[s] = new_key
-                    else:
-                        self.concept_keys.data[s] = F.normalize(
-                            self.concept_keys.data[s] * (1 - alpha) + new_key * alpha, dim=-1
-                        )
-                    # Update value (no normalize — preserve magnitude)
-                    new_val = val_proj[mask].mean(dim=0)
-                    self.concept_vals.data[s] = self.concept_vals.data[s] * (1 - alpha) + new_val * alpha
-                    self.concept_count[s] += mask.sum().item()
-                    self.concept_age.data[s] = 0.0
+                mask = (best == s) & (conf >= conf_floor)
+                if not bool(mask.any()):
+                    continue
+                new_key = F.normalize(q_n[mask].mean(dim=0), dim=-1)
+                new_val = val_proj[mask].mean(dim=0)
+                if int(self.concept_count[s].item()) < 3:
+                    k_upd, v_upd = new_key, new_val
+                else:
+                    a = alpha
+                    # .clone(): a detached VIEW of the buffer row keeps the
+                    # base's version counter — the read commit (copy_) then
+                    # bumps it and breaks MulBackward (M6 in-place error)
+                    k_upd = F.normalize(keys[s].detach().clone() * (1 - a) + new_key * a, dim=-1)
+                    v_upd = vals[s].detach().clone() * (1 - a) + new_val * a
+                upd_idx.append(s)
+                upd_keys.append(k_upd)
+                upd_vals.append(v_upd)
+                with torch.no_grad():
+                    self.concept_count[s] += mask.sum()
+                    self.concept_age[s] = 0.0
                     self._n_updates += 1
+                write_event |= mask
+            if upd_idx:
+                # out-of-place index_copy: grad flows through the SOURCE
+                # (in-place put into a non-grad clone drops the graph — M6)
+                it = torch.tensor(upd_idx, device=device)
+                keys = keys.detach().index_copy(0, it, torch.stack(upd_keys))
+                vals = vals.detach().index_copy(0, it, torch.stack(upd_vals))
 
         # ─── Birth new concepts ───
-        # Novelty: sigmoid(τ_novelty · (1 - best_sim)) → high when far from all concepts
-        novelty_score = torch.sigmoid(tau_nov * (1.0 - best_sim))  # (B, L)
-        # U7: τ-learned birth threshold
+        # Novelty: cosine distance to the nearest slot must exceed the
+        # LEARNABLE gap sigmoid(_log_tau_novelty_thr) (audit M6: the old
+        # `novelty_score > 0.5` was equivalent to sim<1 — the τ knob never
+        # gated anything).
+        gap = torch.sigmoid(self._log_tau_novelty_thr)
         base_thr = torch.sigmoid(self._log_tau_birth_thr).item()
         decay = torch.sigmoid(self._log_tau_decay_thr).item()
         tau_norm_val = self._tau_norm if self._tau_norm is not None else 0.5
         birth_thresh = base_thr * (1.0 - tau_norm_val * decay)
-        novel = (novelty_score > 0.5) & (conf >= birth_thresh)  # τ-driven novelty
+        novel = ((1.0 - best_sim) > gap) & (conf >= birth_thresh)
 
-        if mat >= 0.1 and novel.any():
-            empty = torch.nonzero(self.concept_count == 0)
+        if mat >= 0.1 and bool(novel.any()):
+            with torch.no_grad():
+                empty = torch.nonzero(self.concept_count == 0)
             if empty.numel() > 0:
-                idx = empty[0].item()
-                self.concept_keys.data[idx] = F.normalize(
-                    q_n[novel].mean(dim=0), dim=-1
-                )
-                self.concept_vals.data[idx] = val_proj[novel].mean(dim=0)
+                idx = int(empty[0].item())
+            else:
+                with torch.no_grad():
+                    utility = self.concept_confidence * self.concept_count.clamp(min=1)
+                    idx = int(utility.argmin().item())
+            it = torch.tensor([idx], device=device)
+            # keep the update pass' gradient alive: index_copy's self is only
+            # detached when it is still the raw (non-grad) buffer
+            _kb = keys if keys.requires_grad else keys.detach()
+            _vb = vals if vals.requires_grad else vals.detach()
+            keys = _kb.index_copy(
+                0, it, F.normalize(q_n[novel].mean(dim=0), dim=-1).unsqueeze(0))
+            vals = _vb.index_copy(0, it, val_proj[novel].mean(dim=0).unsqueeze(0))
+            with torch.no_grad():
                 self.concept_count[idx] = 1
                 self.concept_age[idx] = 0.0
-                self.concept_confidence[idx] = conf[novel].mean().item()
+                self.concept_confidence[idx] = conf[novel].mean().detach()
                 self._n_births += 1
-                write_event |= novel
-            else:
-                # Eviction: least useful concept
-                utility = self.concept_confidence * self.concept_count.clamp(min=1)
-                evict = utility.argmin().item()
-                self.concept_keys.data[evict] = F.normalize(
-                    q_n[novel].mean(dim=0), dim=-1
-                )
-                self.concept_vals.data[evict] = val_proj[novel].mean(dim=0)
-                self.concept_count[evict] = 1
-                self.concept_age[evict] = 0.0
-                self.concept_confidence[evict] = conf[novel].mean().item()
-                self._n_births += 1
-                write_event |= novel
+            write_event |= novel
         else:
-            self._n_skipped += (~novel).sum().item() if novel.numel() > 0 else 0
+            with torch.no_grad():
+                self._n_skipped += (~novel).sum()
 
-        # Age all concepts
-        self.concept_age += 1.0
-
-        return write_event, best
+        with torch.no_grad():
+            self.concept_age += 1.0
+        return write_event, best, keys, vals
 
     # ─────────────────── Read ───────────────────
 
@@ -283,16 +307,19 @@ class UnifiedConceptLayer(nn.Module):
         if self.training:
             self._update_maturity(resvar)
 
-        # Write concepts (τ-gated)
+        # Write concepts (τ-gated) — FUNCTIONAL: returns the effective store
+        # for the read below so the write path keeps its gradients (M6).
         if allow_write and hp is not None and pen is not None:
-            write_event, best = self._maybe_write(hp, pen, mat_gate)
+            write_event, best, keys_eff, vals_eff = self._maybe_write(
+                hp, pen, mat_gate, self.concept_keys, self.concept_vals, gate=gate)
         else:
             write_event = torch.zeros(B, L, dtype=torch.bool, device=device)
             best = torch.zeros(B, L, dtype=torch.long, device=device)
+            keys_eff, vals_eff = self.concept_keys, self.concept_vals
 
         # ─── Read from concepts ───
-        concept_n = F.normalize(self.concept_keys.data, dim=-1)  # (S, bridge_dim)
-        concept_v = self.concept_vals.data  # (S, D)
+        concept_n = F.normalize(keys_eff, dim=-1)     # (S, bridge_dim)
+        concept_v = vals_eff                           # (S, D)
 
         # Query: project h to bridge space
         q = self.q_proj(h)  # (B, L, bridge_dim)
@@ -343,6 +370,16 @@ class UnifiedConceptLayer(nn.Module):
         else:
             self._cached_birth_gate.mul_(0.99)  # decay
 
+        # ─── Commit the effective store to persistent buffers (after the
+        # read so gradients through keys_eff/vals_eff are preserved).
+        # Skip when nothing was written: keys_eff IS the buffer then, and a
+        # self copy_ would bump the version of the tensors the read saved
+        # (in-place-modified-saved-variable autograd error, audit M6).
+        if write_event.any():
+            with torch.no_grad():
+                self.concept_keys.copy_(keys_eff.detach())
+                self.concept_vals.copy_(vals_eff.detach())
+
         return out
 
     # ─────────────────── Diagnostics ───────────────────
@@ -355,7 +392,7 @@ class UnifiedConceptLayer(nn.Module):
             'concept_n_births': int(self._n_births.item()),
             'concept_n_updates': int(self._n_updates.item()),
             'concept_birth_gate': self._cached_birth_gate.item(),
-            'concept_tau_novelty': torch.exp(self.log_tau_novelty).item(),
+            'concept_novelty_gap': torch.sigmoid(self._log_tau_novelty_thr).item(),
             'concept_tau_birth': torch.exp(self.log_tau_birth).item(),
             'concept_tau_read': torch.exp(self.log_tau_read).item(),
             'concept_confidence_mean': self.concept_confidence.mean().item(),
