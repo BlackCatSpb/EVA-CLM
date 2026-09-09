@@ -22,6 +22,34 @@ def prefix_mean(x: torch.Tensor, dim: int = 1) -> torch.Tensor:
     shape = [1] * x.dim()
     shape[dim] = n
     return x.cumsum(dim=dim) / cnt.view(shape)
+
+
+def _amplitude_ladder(alpha_init: torch.Tensor) -> list:
+    """Geometric amplitude ladder for expert_asymmetry, DERIVED from the same
+    expert τ-ladder as the α init: endpoints amp = [τ_min_eff/τ_max_eff, 1],
+    τ_g = −1/ln(α_g), UNIFORM in log-space across experts (a convex α-grid is
+    heavily non-uniform in τ-space; equal ratio steps is the geometric analog
+    of the α-ladder's equal-α steps). G-invariant by construction (the old
+    0.05·1.5^g exploded to ×14381 at G=32 — the last expert's residual
+    contribution was 4 orders of magnitude above the trunk at init, audit M4).
+    """
+    a = alpha_init.detach().clamp(1e-6, 1.0 - 1e-9)[:, 0]
+    tau_g = -1.0 / torch.log(a)
+    lo = float(torch.log(tau_g.min() / tau_g.max()))
+    return torch.linspace(lo, 0.0, a.shape[0]).tolist()
+
+
+def grad_mod_input(prev_grad_norm: torch.Tensor, grad_norm_ema: torch.Tensor,
+                   bias: torch.Tensor) -> torch.Tensor:
+    """Scaled prediction-error input for the grad modulation gate.
+
+    The raw ‖∂L/∂hp‖ spans orders of magnitude (1e-3..1e2) across training
+    phases; tanh(raw + bias) therefore SATURATES exactly while gradients are
+    large, freezing log_grad_mod_scale in a flat region (the AGENT_BRIEF §3
+    class of pathology, audit M4). Dividing by the running EMA centers the
+    typical magnitude at 0, keeping tanh in its sensitive zone.
+    """
+    return prev_grad_norm / grad_norm_ema.clamp(min=1e-8) - 1.0 + bias
 from .adaptive_gate import AdaptiveGate
 
 class BridgeGLU(nn.Module):
@@ -169,13 +197,18 @@ class GroupedCognitiveMirror(nn.Module):
         # self._intent_alpha = 1 − exp(−τ_l / τ_min)).
         self.register_buffer('_ig_norm_ema', torch.ones(G), persistent=False)
         self.register_buffer('_ctr_norm_ema', torch.ones(G), persistent=False)
+        # running scale of |∂L/∂hp| for the grad-modulation gate (audit M4)
+        self.register_buffer('_grad_norm_ema', torch.ones(G), persistent=False)
+        # running var(log_scale) so the anti-collapse governor is identical
+        # at train and eval (audit M4: it used to fire only in training).
+        self.register_buffer('_ls_var_run', torch.ones(1), persistent=False)
         # Behavioural-divergence tracker + its self-reference: feeds the τ-aware
         # differentiation signal (mirror_lstats) with a live, gradient-driven
         # metric even when log_scale is frozen.
         self.register_buffer('_div_run', torch.zeros(1), persistent=False)
         self.register_buffer('_div_run_rec', torch.ones(1), persistent=False)
         if expert_asymmetry and G > 1:
-            ls_vals = [math.log(0.05 * (1.5 ** g)) for g in range(G)]
+            ls_vals = _amplitude_ladder(alpha_init)
             ls_base: torch.Tensor = torch.tensor(ls_vals).unsqueeze(1).expand(G, self.d)
         else:
             ls_base: torch.Tensor = torch.linspace(-0.3, 0.3, G).unsqueeze(1).expand(G, self.d)
@@ -596,8 +629,12 @@ class GroupedCognitiveMirror(nn.Module):
         for i, s in enumerate(signals):
             if self.training:
                 with torch.no_grad():
-                    rms = s.norm(dim=(-2, -1), keepdim=True).mean(dim=(0, 1), keepdim=True)
-                    self._signal_norm_ema[i].mul_(1 - decay).add_(rms.squeeze(), alpha=decay)
+                    # per-EXPERT, per-dim RMS (G,k): the old global scalar
+                    # (.norm over (G,k) then .squeeze) broadcast to all
+                    # experts, so the normalization claimed per-expert
+                    # statistics it never computed (audit M4).
+                    rms = s.detach().pow(2).mean(dim=(0, 1)).sqrt()  # (G, k)
+                    self._signal_norm_ema[i].mul_(1 - decay).add_(rms, alpha=decay)
             s_norm = s / (self._signal_norm_ema[i].unsqueeze(0).unsqueeze(0) + 1e-8)
             signals_normed.append(s_norm)
         
@@ -642,7 +679,12 @@ class GroupedCognitiveMirror(nn.Module):
         delta = delta + self.tanh_bias * tanh_bias_mod
         
         # ─── Gate modulation signals (shared between gate & usefulness) ───
-        grad_mod = torch.exp(self.log_grad_mod_scale) * torch.tanh(self._prev_grad_norm + self.grad_mod_bias)
+        if self.training:
+            with torch.no_grad():
+                self._grad_norm_ema.mul_(0.99).add_(
+                    self._prev_grad_norm.detach(), alpha=0.01)
+        grad_mod = torch.exp(self.log_grad_mod_scale) * torch.tanh(
+            grad_mod_input(self._prev_grad_norm, self._grad_norm_ema, self.grad_mod_bias))
         if self.training:
             with torch.no_grad():
                 dvar = delta.var(dim=(0, 1), unbiased=False).mean(dim=-1)  # (G,)
@@ -711,11 +753,15 @@ class GroupedCognitiveMirror(nn.Module):
         # Linear projection + skip connection
         linear = torch.einsum('blgk,gkd->blgd', delta, self.W_out)  # (B, L, G, d)
         skip_alpha = torch.exp(self.log_skip_alpha).view(1, 1, G, 1)
-        mirror = torch.tanh(linear) + skip_alpha * linear
-        # Adaptive scale: prevents saturation when delta is large
-        delta_norm = delta.norm(dim=-1).mean(dim=(0, 1)).detach().clamp(min=1e-8)  # (G,)
-        adapt_scale = (1.0 / (1.0 + 0.1 * delta_norm)).view(1, 1, -1, 1)  # (1, 1, G, 1)
-        mirror = mirror * torch.exp(self.log_scale) * adapt_scale
+        # Audit M4: the global shrink 1/(1+0.1·‖δ‖) damped the mirror exactly
+        # when correction was most needed (large δ = high surprise). δ is
+        # RMS-normalized before W_out, so the dimensionally honest bound on
+        # the unbounded skip branch is the RMS scale of δ itself: ‖δ‖₂ ~ √k.
+        # Soft-cap the skip branch at that scale (tanh branch is bounded).
+        _ln = linear.detach().norm(dim=-1, keepdim=True)
+        _cap = float(self.k) ** 0.5
+        mirror = (torch.tanh(linear) + skip_alpha * linear * (_cap / _ln.clamp(min=_cap))) \
+            * torch.exp(self.log_scale)
 
         # ─── SMF gate (scoped to mirror only) ───
         # Убирает доминирование L0: α зависит от h (последовательный путь)
@@ -807,16 +853,21 @@ class GroupedCognitiveMirror(nn.Module):
             # Meta-pressure authority = complement of intent_alpha (fast/memory
             # suppression is a shallow-layer mechanism; deep layers rely on intent).
             gate_logits = gate_logits - (1.0 - self._intent_alpha) * p
+        # Anti-collapse governor: bump gate when log-scale flattens.
+        # Amplitude = τ-authority (intent_alpha); 0.05/3.0 are degenerate-bypass
+        # guards, not tunable scales (fires only under log-scale collapse).
+        # Runs at TRAIN *and* EVAL off a running var(log_scale) buffer — the
+        # old training-only branch made inference gates systematically lower
+        # than training gates whenever log_scale was flat (audit M4).
+        ls = self.log_scale
+        ls_dev = ls.mean(dim=-1) - ls.mean()
         if self.training:
-            ls = self.log_scale
-            ls_dev = ls.mean(dim=-1) - ls.mean()
-            ls_var = ls.var().item()
-            if ls_var < 0.05:
-                # Anti-collapse governor: bump gate when log-scale flattens.
-                # Amplitude = τ-authority (intent_alpha); 0.05/3.0 are degenerate-bypass
-                # guards, not tunable scales (fires only under log-scale collapse).
-                boost = self._intent_alpha * torch.sigmoid(3.0 * ls_dev)
-                gate_logits = gate_logits + boost.unsqueeze(0).unsqueeze(0)
+            with torch.no_grad():
+                self._ls_var_run.mul_(0.99).add_(
+                    ls.detach().var(unbiased=False), alpha=0.01)
+        active = (self._ls_var_run < 0.05).to(ls.dtype)
+        boost = active * self._intent_alpha * torch.sigmoid(3.0 * ls_dev)
+        gate_logits = gate_logits + boost.unsqueeze(0).unsqueeze(0)
         
         expert_gate = torch.sigmoid(gate_logits)  # (B, L, G)
         # Cache gate L1 for auxiliary sparsity loss (still in graph for gradients)

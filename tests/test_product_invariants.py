@@ -285,6 +285,64 @@ def test_gamma_init_from_tau_ladder():
         assert abs(got - want) < 1e-4, f'L{li}: gamma_init {got:.4f} vs ladder-derived {want:.4f}'
 
 
+# ── M4.1 expert amplitude ladder must be G-invariant (was 1.5^g → ×14k) ─────
+def test_mirror_amplitude_ladder_g32():
+    from core.mirror import GroupedCognitiveMirror
+    torch.manual_seed(11)
+    mir = GroupedCognitiveMirror(D=256, G=32, k=4, layer_idx=0, n_layers=2,
+                                 expert_asymmetry=True)
+    amp = torch.exp(mir.log_scale.detach().mean(dim=-1))
+    # top of the ladder is amp=1 plus the documented log_scale_init_std noise
+    assert float(amp.max()) <= 1.15, f'init amplitude explodes: {float(amp.max())}'
+    assert float(amp.min()) >= 0.03, 'ladder floor lost'
+    la = amp.log()
+    assert 2.0 <= float(la.max() - la.min()) <= 3.5, 'ladder span lost'
+    corr = torch.corrcoef(torch.stack([torch.arange(32, dtype=torch.float32), la]))[0, 1]
+    assert float(corr) > 0.98, 'ladder not monotone-in-trend in expert index'
+
+
+# ── M4.2 grad-modulation input must be scale-normalized, not raw ─────────────
+def test_grad_mod_input_normalized():
+    from core.mirror import grad_mod_input
+    big = torch.full((4,), 1000.0)
+    x = grad_mod_input(big, big.clone(), torch.zeros(4))
+    assert float(x.abs().max()) < 1e-3, 'typical large-gradient step must map to ~0'
+    x2 = grad_mod_input(big * 4, big.clone(), torch.zeros(4))
+    assert 0.5 < float(x2.mean()) < 3.5, f'ratio lost: {float(x2.mean())}'
+
+
+# ── M4.3 signal EMA must carry per-expert statistics ─────────────────────────
+def test_signal_norm_per_expert():
+    m = _stack()
+    m.train()
+    torch.manual_seed(8)
+    for _ in range(3):
+        x = torch.randint(1, m.cfg.vocab, (1, 6))
+        h = m.embed_tokens(x)
+        m(h, step=1, tokens=x)
+    ema = m.layers[0].mirror._signal_norm_ema[0]      # (G, k)
+    assert float(ema.std(dim=0).mean()) > 1e-6, \
+        'signal EMA broadcast a global scalar over experts (old squeeze bug)'
+
+
+# ── M4.4 anti-collapse governor must be active at EVAL too (parity) ──────────
+def test_governor_eval_parity():
+    m = _stack()
+    m.eval()
+    lay = m.layers[0].mirror
+    torch.manual_seed(9)
+    x = torch.randint(1, m.cfg.vocab, (1, 6))
+    h = m.embed_tokens(x)
+    with torch.no_grad():
+        lay._ls_var_run.fill_(0.9)
+        m(h, step=1, tokens=x)
+        g_off = float(lay._last_gates.mean())
+        lay._ls_var_run.fill_(0.001)
+        m(h, step=1, tokens=x)
+        g_on = float(lay._last_gates.mean())
+    assert g_on > g_off, 'governor dead at eval (train-only branch, audit M4)'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0
