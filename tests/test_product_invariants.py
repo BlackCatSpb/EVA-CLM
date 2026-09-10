@@ -773,6 +773,55 @@ def test_no_unregistered_dead_parameters():
                      + ', '.join(dead[:12])
 
 
+def test_logit_cache_incremental_kv_and_identity_init():
+    """Audit #3 follow-up (L4 OOM / 42 tok/s): the cache must (1) store
+    detached entries, (2) encode k/v ONCE at write time (O(L), not O(M)
+    re-projection), and (3) start as identity — gate bias -10, not 0."""
+    from core.logit_cache import LogitCacheAttention
+    torch.manual_seed(3)
+    D, V, L = 64, 40, 8
+    a = LogitCacheAttention(D=D, V=V, n_layers=2, max_entries=4, n_heads=4)
+    # (3) near-identity at init even with a populated cache
+    hs = [torch.randn(1, L, D, requires_grad=True) for _ in range(3)]
+    outs = []
+    for h in hs:
+        out = a.augment(h)
+        assert (out - h.detach()).abs().max().item() < 2e-3, \
+            'zero-gate must make augment ~identity at init'
+        outs.append(out)
+    # (1) every stored entry and stored kv pair is detached
+    for e in a.cache._h_cache:
+        assert e.grad_fn is None, 'entries must be detached at STORE time'
+    for k, v in a.cache._kv_h:
+        assert k.grad_fn is None and v.grad_fn is None
+    # lengths stay in lockstep with max_entries
+    assert len(a.cache._kv_h) == len(a.cache._h_cache) == 3
+    # (2) frozen weights ⇒ incremental encoding == full re-projection
+    h4 = torch.randn(1, L, D)
+    with torch.no_grad():
+        out_live = a.augment(h4)
+    with torch.no_grad():
+        full = a.attention.k_norm(a.attention.k_proj_h(
+            torch.cat([e for e in a.cache._h_cache], dim=1)))
+        last = a.attention.k_norm(a.attention.k_proj_h(h4))
+        inc = torch.cat([p[0] for p in a.cache.kv_window()] + [last], dim=1)
+        # stored encodings cover every window at write weights == full
+        # projection now (frozen) — minus the live newest duplicate below
+        assert torch.allclose(full, inc[:, :full.shape[1]], atol=1e-5), \
+            'stored k/v must equal write-time projection'
+    # gradient still flows to the live projections through augment
+    a.zero_grad(set_to_none=True)
+    h5 = torch.randn(1, L, D, requires_grad=True)
+    a.augment(h5).sum().backward()
+    assert a.attention.k_proj_h.weight.grad.abs().sum().item() > 0, \
+        'k_proj_h must train via the live newest entry'
+    # clear() must clear the kv list too
+    a.cache.clear()
+    assert a.cache._kv_h == [] and a.cache._h_cache == []
+    # bias really is -10 (sigmoid≈4.5e-5), not the old zero init
+    assert abs(float(a.attention.cache_gate[2].bias.detach()) + 10.0) < 1e-6
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

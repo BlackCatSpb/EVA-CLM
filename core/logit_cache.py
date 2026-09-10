@@ -2,11 +2,16 @@
 logit_cache.py — Per-scale LogitCache with dual-mode: training + inference.
 
 Training mode:
-  - Stores hidden states h; the CURRENT step's entry is live (gradient flows),
-    PAST entries are detached on retrieve — back-propagating through the
-    already-freed graphs of previous steps raised
+  - Entries are DETACHED AT STORE time — back-propagating through the
+    already-freed graphs of previous steps raises
     "backward through the graph a second time" (audit decision #3).
-  - Memory: D × 4 bytes/token = 10 KB/token (seq_len=128 → 1.3 MB)
+  - The same-step gradient flows through the LIVE q/k/v projections of the
+    current window only.  Each entry's k/v are computed ONCE at write time
+    and cached alongside it (memory-as-written-encoding, UCL philosophy):
+    per-step cost is O(L) projections + O(L·M) scores, not O(M) projections.
+    Re-projecting all M=entries×L keys through D×D every step cost ≈215
+    GFLOPs at D=2560/M=8192 and OOMed an L4 at seq=256.
+  - Memory: h D×4 B/token + k/v 2×D×4 B/token ≈ 30 KB/token (seq 128 → 4 MB)
 
 Inference mode:
   - Stores compressed logits (VSA-driven, 4 scales)
@@ -59,8 +64,11 @@ class LogitCache(nn.Module):
         self.vsa_scales = nn.Parameter(torch.zeros(n_scales))
 
         # Storage: either h (training) or compressed logits (inference)
-        self._h_cache: List[torch.Tensor] = []  # training: store h
+        self._h_cache: List[torch.Tensor] = []  # training: store h (detached)
         self._logit_cache: List[Dict] = []  # inference: store compressed logits
+        # write-time k/v encodings for the h entries (owned by LogitAttention's
+        # projections, stored HERE so every cache.clear() boundary is complete)
+        self._kv_h: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self._position = 0
 
     def get_k(self, scale_idx: int) -> int:
@@ -77,10 +85,13 @@ class LogitCache(nn.Module):
             training: if True, store h (gradient flows); if False, store compressed logits
         """
         if training:
-            # Store h directly (no compression, gradient flows - NO detach!)
-            self._h_cache.append(h_or_logits)
+            # Detached at store: the same-step gradient runs through the live
+            # q/k/v path, not through retained graphs of past steps (#3).
+            self._h_cache.append(h_or_logits.detach())
             if len(self._h_cache) > self.max_entries:
                 self._h_cache.pop(0)
+                if len(self._kv_h) > len(self._h_cache):
+                    self._kv_h.pop(0)
         else:
             # Store compressed logits (no gradient)
             compressed = self._compress(h_or_logits)
@@ -104,10 +115,7 @@ class LogitCache(nn.Module):
             if not self._h_cache:
                 return None
             entries = self._h_cache[-n:] if n else self._h_cache
-            # Past steps: detached (their graphs are freed after opt.step);
-            # the newest entry may be the live current-step tensor.
-            if len(entries) > 1:
-                entries = [e.detach() for e in entries[:-1]] + [entries[-1]]
+            # Every entry is already detached at store time.
             return torch.cat(entries, dim=1)
         else:
             if not self._logit_cache:
@@ -142,10 +150,30 @@ class LogitCache(nn.Module):
             compressed['shape'], compressed['dtype']
         )
 
+    def push_kv(self, k: torch.Tensor, v: torch.Tensor) -> None:
+        """Store a write-time (detached) k/v encoding for the newest h entry.
+
+        A batch/width change invalidates every stored encoding (they are
+        shape-locked to B, D) — the list is rebuilt, not re-projected.
+        """
+        if self._kv_h and (self._kv_h[0][0].shape[0] != k.shape[0]
+                           or self._kv_h[0][0].shape[2] != k.shape[2]):
+            self._kv_h.clear()
+        self._kv_h.append((k, v))
+        while len(self._kv_h) > self.max_entries:
+            self._kv_h.pop(0)
+        while len(self._kv_h) > len(self._h_cache):
+            self._kv_h.pop(0)
+
+    def kv_window(self, n: int = None):
+        """The stored write-time encodings (chronological, ≤ n entries)."""
+        return self._kv_h[-n:] if n else list(self._kv_h)
+
     def clear(self) -> None:
         """Clear the cache."""
         self._h_cache.clear()
         self._logit_cache.clear()
+        self._kv_h.clear()
         self._position = 0
 
     def size_mb(self, training: bool = True) -> float:
@@ -236,9 +264,12 @@ class LogitAttention(nn.Module):
             nn.Sigmoid(),
         )
 
-        # Initialize: start as no-op (cache_gate ≈ 0)
+        # Start as (near-)no-op: zero weights + bias −10 ⇒ gate = 4.5e-5,
+        # so out == h within 5e-5 at init. (zeros(bias) would have given
+        # sigmoid(0)=0.5 — HALF the untrained attention mixed into h, the
+        # opposite of the documented identity.)
         nn.init.zeros_(self.cache_gate[-2].weight)
-        nn.init.zeros_(self.cache_gate[-2].bias)
+        nn.init.constant_(self.cache_gate[-2].bias, -10.0)
 
     def bit_profile(self, logits: torch.Tensor) -> torch.Tensor:
         """Per-bit evidence of a logit field, in the head's sparse block code.
@@ -267,39 +298,42 @@ class LogitAttention(nn.Module):
                 return h, None
             return h
 
-        # Retrieve cached data
-        cached = cache.retrieve(n=min(len(cache), 512), training=training)
-
-        if cached is None:
-            if return_attention:
-                return h, None
-            return h
-
-        M = cached.shape[1]
-
-        # Normalize for numerical stability
-        if not training:
-            # logits: tanh normalization
-            cached = torch.tanh(cached / 10.0)
-
-        # Project Q from hidden state
+        # Project Q from the CURRENT window (live gradient)
         Q = self.q_proj(h)
 
-        # Project K, V from cached data
+        if training:
+            # ── incremental memory-as-written (audit #3, OOM/42-tok/s fix) ──
+            # k/v are computed ONCE at write time (the entry encodes the
+            # weights that wrote it). Per-step cost drops from O(M)=64·L
+            # projections (≈215 GFLOPs at D=2560) to O(L).
+            k_new = self.k_norm(self.k_proj_h(h))
+            v_new = self.v_norm(self.v_proj_h(h))
+            cache.push_kv(k_new.detach(), v_new.detach())
+            pairs = cache.kv_window(n=min(len(cache), 512))
+            # the newest entry stays LIVE (same-step gradient through the
+            # projections); the stored copy below it is detached
+            K = torch.cat([p[0] for p in pairs[:-1]] + [k_new], dim=1)
+            V_cache = torch.cat([p[1] for p in pairs[:-1]] + [v_new], dim=1)
+            M = K.shape[1]
+        else:
+            cached = cache.retrieve(n=min(len(cache), 512), training=False)
+            if cached is None:
+                if return_attention:
+                    return h, None
+                return h
+            M = cached.shape[1]
+            # logits: tanh normalization
+            cached = torch.tanh(cached / 10.0)
+            # logits mode: summarize into the code space, project K → D
+            prof = self.bit_profile(cached)
+            K = self.k_norm(self.k_proj_l(prof))
+            V_cache = self.v_norm(self.v_proj_l(prof))
+
         # position ids modulo the embedding table (the old arange(M) raised
         # IndexError once the entry-window exceeded max_cache_len at L>2)
         positions = (torch.arange(M, device=h.device)
                      % self.pos_enc.num_embeddings).unsqueeze(0).expand(B, -1)
-
-        if training:
-            # h mode: project h → D
-            K = self.k_norm(self.k_proj_h(cached)) + self.pos_enc(positions)
-            V_cache = self.v_norm(self.v_proj_h(cached))
-        else:
-            # logits mode: summarize into the code space, project K → D
-            prof = self.bit_profile(cached)
-            K = self.k_norm(self.k_proj_l(prof)) + self.pos_enc(positions)
-            V_cache = self.v_norm(self.v_proj_l(prof))
+        K = K + self.pos_enc(positions)
 
         # Multi-head attention
         Q = Q.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)

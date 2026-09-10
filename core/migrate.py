@@ -99,4 +99,13 @@ def migrate_state_dict(
         del sd[k]
         changed += 1
 
+    # The cache gate was bias-zero-init (sigmoid=0.5 ⇒ HALF an untrained
+    # attention mixed into h — the bug the -10 init fixes). A checkpoint
+    # saved before the fix carries that untrained bias; remap it, but only
+    # if it never left the near-zero region (a genuinely trained gate stays).
+    gb = 'logit_cache.attention.cache_gate.2.bias'
+    if gb in sd and sd[gb].numel() == 1 and abs(float(sd[gb])) < 0.5:
+        sd[gb] = torch.full_like(sd[gb], -10.0)
+        changed += 1
+
     return sd, changed
