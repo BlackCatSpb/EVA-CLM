@@ -163,6 +163,9 @@ def train(cfg=None, resume_path=None):
         raise FileNotFoundError(f'No token_stream_*.bin files in {cfg.data_dir}')
     
     streams = [TokenStream(f) for f in stream_files]
+    # Audit M13: file-level hold-out (last 3 files when >=8 files exist,
+    # else the single-stream M8 semantics). Excluded from the train sampler.
+    _hold_n = 3 if len(streams) >= 8 else (1 if streams else 0)
     total_tokens = sum(s.len for s in streams)
     print(f'Found {len(streams)} files, {total_tokens:,} total tokens')
     
@@ -354,6 +357,8 @@ def train(cfg=None, resume_path=None):
         print('[EVA] seeded best.pt (step 0) as early-rollback target (M12)')
     
     stream_idx = resumed_stream_idx   # continue the data cursor (audit M12)
+    if stream_idx >= max(len(streams) - _hold_n, 1):   # pre-M13 cursor (M13)
+        stream_idx, offset = 0, 0
     offset = resumed_offset
     tokens_seen = 0
     t0 = time.time()
@@ -402,7 +407,7 @@ def train(cfg=None, resume_path=None):
             if offset == 0 or offset + _need > streams[stream_idx].len:
                 # holdout: the LAST stream belongs to evaluate() (audit M8) —
                 # the old sampler could pick it, so 'val' was in-train data.
-                stream_idx = torch.randint(0, max(len(streams) - 1, 1), (1,), generator=rng).item()
+                stream_idx = torch.randint(0, max(len(streams) - _hold_n, 1), (1,), generator=rng).item()
                 offset = 0
                 state = None  # reset state on stream switch (document boundary)
                 gs = None
@@ -643,7 +648,9 @@ def train(cfg=None, resume_path=None):
 
 
 @torch.no_grad()
-def evaluate(model, streams, cfg, device):
+def evaluate(model, streams, cfg, device, hold_n=None):
+    if hold_n is None:  # M13 default (mirrors the train-sampler split)
+        hold_n = 3 if len(streams) >= 8 else (1 if streams else 0)
     model.eval()
     # Audit M8: (a) `len(stream)` crashed — TokenStream exposes `.len` only,
     # so train.py died at its FIRST eval (eval_interval≈233); (b) val
@@ -660,20 +667,24 @@ def evaluate(model, streams, cfg, device):
     total_loss = 0.0
     total_steps = 0
     
-    # Use last stream for eval (hold-out, excluded from the train sampler)
-    stream = streams[-1]
-    offset = max(stream.len // 2, cfg.batch_size * cfg.seq_len + 1)
-    
-    for _ in range(min(100, stream.len // (cfg.batch_size * cfg.seq_len))):
-        x, y, offset, wrapped = stream.get_batch(cfg.seq_len, cfg.batch_size, offset, cfg.vocab)
-        if wrapped:
-            break  # end of the hold-out document region — no wrapped re-read
-        x, y = x.to(device), y.to(device)
-        h = model.embed_tokens(x)
-        out, _, _, _ = model(h, None, adaptive=False, tokens=x)
-        loss = model.compute_loss(out, y, h_emb=h)
-        total_loss += loss.item()
-        total_steps += 1
+    # Hold-out eval (audit M13): average over the last `_hold_n` files, each
+    # read from its 3/4-region; per-file budget divides 100 batches.
+    eval_pool = streams[-hold_n:] if hold_n >= 1 else [streams[-1]]
+    for stream in eval_pool:
+        if stream.len < cfg.batch_size * cfg.seq_len + 1:
+            continue
+        offset = max(stream.len // 2, cfg.batch_size * cfg.seq_len + 1)
+        for _ in range(max(min(100 // max(hold_n, 1),
+                               stream.len // (cfg.batch_size * cfg.seq_len)), 1)):
+            x, y, offset, wrapped = stream.get_batch(cfg.seq_len, cfg.batch_size, offset, cfg.vocab)
+            if wrapped:
+                break  # end of the hold-out document region — no wrapped re-read
+            x, y = x.to(device), y.to(device)
+            h = model.embed_tokens(x)
+            out, _, _, _ = model(h, None, adaptive=False, tokens=x)
+            loss = model.compute_loss(out, y, h_emb=h)
+            total_loss += loss.item()
+            total_steps += 1
     
     if _lc is not None:
         _lc.cache.clear()
