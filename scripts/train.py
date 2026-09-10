@@ -341,9 +341,9 @@ def train(cfg=None, resume_path=None):
     gs = None
     rng = torch.Generator().manual_seed(42)
     if _m12_rng is not None:          # resume the dropout/sampling stream (M12)
-        torch.set_rng_state(_m12_rng)
+        torch.set_rng_state(_m12_rng.cpu())  # map_location=device may have moved it to CUDA
     if _m12_data_rng is not None:     # resume the document-shuffle stream
-        rng.set_state(_m12_data_rng)
+        rng.set_state(_m12_data_rng.cpu())
     
     # Training loop
     os.makedirs(cfg.save_dir, exist_ok=True)
