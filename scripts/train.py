@@ -459,6 +459,10 @@ def train(cfg=None, resume_path=None):
             except Exception:
                 pass
             if watchdog.check(ce_val, step, _mets):
+                # free the current step graph BEFORE rebuilding state — the
+                # next forward must not run on top of retained activations
+                # (live-incident fix, see notebook cell 10)
+                h = out = ce_loss = aux_dict = None
                 optimizer = watchdog.optimizer
                 cfg.lr = watchdog.base_lr
                 state = None
@@ -613,7 +617,7 @@ def train(cfg=None, resume_path=None):
                     torch.cuda.empty_cache()
                 scheduler.report_val_loss(val_loss)
                 depth.update(step, val_loss)
-                watchdog.ce_armed = True  # CE joins the watch once val is trusted (M8)
+                watchdog.arm_ce()  # CE joins the watch once val is trusted (M8; baseline re-bootstrap in arm_ce)
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss

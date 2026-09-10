@@ -45,17 +45,29 @@ def load_ckpt(path):
     """Потоковая загрузка с минимальным пиком RAM.
 
     torch.load возвращает ЧЕКПОИНТ-словник целиком: стейт-дикт модели
-    (886M чисел ~3.5GB) + optimizer (ADAM m+v ~5.8GB) + scheduler. Если
+    (~212M params ≈ 0.9GB) + optimizer (m+v ≈ 1.7GB) + scheduler. Если
     держать всё одновременно с моделью (~6.7GB с буферами), пик ~16GB —
     это OOM на машинах с малым RAM. Здесь:
       1) optimizer/scheduler/param_names выбрасываются СРАЗУ после load,
       2) стейт-дикт копируется в модель поэлементно и освобождается по ходу
          (пик во время копирования ~ модель + один тензор вместо 2 дублей).
+    weights_only=False (M12): конверт best.pt несёт cfg-датакласс и
+    dict-состояния стража/балансировщика; на torch<2.4 нет самого kwarg.
     """
-    ckpt = torch.load(path, map_location='cpu', weights_only=True)
+    try:
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
+    except TypeError:
+        ckpt = torch.load(path, map_location='cpu')
     cfg = ckpt['cfg']
-    for _k in ('optimizer', 'scheduler', 'param_names'):
-        ckpt.pop(_k, None)
+    # M12-конверт проверяется ДО того, как тяжёлые части выброшены ради RAM:
+    _sch = ckpt.pop('scheduler', None)
+    _opt = ckpt.pop('optimizer', None) or {}
+    _pn = ckpt.pop('param_names', None) or []
+    ckpt['_sched_present'] = _sch is not None
+    ckpt['_opt_groups'] = len(_opt.get('param_groups', []))
+    ckpt['_opt_slots'] = len(_opt.get('state', {}))
+    ckpt['_param_names_n'] = len(_pn)
+    del _sch, _opt, _pn
     sd = ckpt.pop('model') or {}
     ckpt['_n_tensors'] = len(sd)
     sd_keys = set(sd.keys())
@@ -76,7 +88,7 @@ def load_ckpt(path):
                 if b.shape == v.shape:
                     b.copy_(v)
             del v
-    model_keys = set(params_d) | set(buffers_d)
+    model_keys = set(model.state_dict().keys())  # persistent-буферы; не-persistent не «missing»
     missing = sorted(model_keys - sd_keys)
     unexpected = sorted(sd_keys - model_keys)
     model.train()
@@ -90,6 +102,175 @@ def sec(title):
     print('=' * 78)
     print(title)
     print('=' * 78)
+
+
+# ───────────────────────── ENVELOPE (M12/M13) ─────────────────────────
+
+def run_envelope(ckpt):
+    """Конверт единственного чекпоинта: best.pt обязан нести ВСЁ состояние
+    перезапуска (M12) — иначе resume это не resume, а холодный старт."""
+    sec('ENVELOPE (M12 single-checkpoint)')
+    step = ckpt.get('step', '?')
+    if ckpt.get('seed') and step == 0:
+        print('  SEED (step 0, model-only) — цель отката до первого EVAL; '
+              'для resume не годится. Ждём первую eval-запись.')
+        return {'seed': True}
+    need = ['step', 'model', 'optimizer', 'param_names', 'scheduler', 'best_val_loss',
+            'cfg', 'reasoning_enabled_step', 'recover_count', 'active_depth',
+            'detector', 'balancer', 'stream_idx', 'offset', 'rng', 'data_rng']
+    # load_ckpt streaming-pop выбрасывает тяжёлые части; восстанавливаем факт их
+    # наличия из метаданных, иначе они вечно ложно падают как MISSING.
+    present = {k for k in ckpt if not k.startswith('_')}
+    if ckpt.get('_n_tensors'):
+        present.add('model')
+    if ckpt.get('_sched_present'):
+        present.add('scheduler')
+    if ckpt.get('_opt_groups') or ckpt.get('_opt_slots'):
+        present.add('optimizer')
+    if ckpt.get('_param_names_n'):
+        present.add('param_names')
+    miss = [k for k in need if k not in present]
+    extra = [k for k in present if k not in need]
+    d = ckpt.get('detector') or {}
+    b = ckpt.get('balancer') or {}
+    print(f'  step={step}  best_val={ckpt.get("best_val_loss", float("nan")):.4f}  '
+          f'depth={ckpt.get("active_depth")}  reasoning_ramp={ckpt.get("reasoning_enabled_step")}')
+    print(f'  data cursor: stream_idx={ckpt.get("stream_idx")} offset={ckpt.get("offset")}')
+    print(f'  detector: recover={d.get("recover_count", ckpt.get("recover_count"))} '
+          f'armed={d.get("ce_armed")} baselines={sorted((d.get("stats") or {}).keys())} '
+          f'viol={d.get("viol")}')
+    print(f'  balancer: ema_ce={b.get("ema_ce")} align={b.get("align")}')
+    print(f'  rng: cpu={("rng" in present)} data_gen={("data_rng" in present)}  '
+          f'optimizer: groups={ckpt.get("_opt_groups", 0)} slots={ckpt.get("_opt_slots", 0)} '
+          f'(model tensors={ckpt.get("_n_tensors", 0)})')
+    if miss:
+        print('  [MISSING] ' + ', '.join(map(str, miss)))
+        print('   -> пред-M12 чекпоинт: resume холодный в недостающих частях '
+              '(страж пере-бустрапится, курсор данных/val-эпоха начнутся заново)')
+    if extra:
+        print('  extra keys (ok): ' + ', '.join(map(str, extra)))
+    print('  VERDICT: ' + ('полный побитовый resume возможен' if not miss else 'частичный resume'))
+    return {'seed': False, 'missing': miss}
+
+
+# ───────────────────────── MECHANISMS (post-M1..M13) ─────────────────────────
+
+def run_mech(model, cfg):
+    """Живой инвентарь механизмов, которые аудиты оживляли: состояние
+    init-гейтов и обученных управляющих весов по состоянию чекпоинта."""
+    import math
+    sec('MECHANISMS (cache / UCL / mirror-signals / head / tau-ladder)')
+    out = {}
+    lc = getattr(model, 'logit_cache', None)
+    if lc is None:
+        print('  logit_cache: DISABLEN конфигом (logit_cache_enabled=False)')
+    else:
+        a = lc.attention
+        gb = float(a.cache_gate[-2].bias.detach())
+        gate = 1.0 / (1.0 + math.exp(-gb))
+        status = ('identity — CE кэш ещё не спрашивает' if gate < 1e-3 else
+                  'приоткрыт' if gate < 0.05 else 'АКТИВНО востребован')
+        at = float(a.log_tau.detach().exp().clamp(0.1, 10.0))
+        vs = torch.sigmoid(lc.cache.vsa_scales.detach()).tolist()
+        print(f'  cache: windows={lc.cache.max_entries} gate_bias={gb:+.2f} (σ={gate:.5f}) -> {status}')
+        print(f'         attn τ={at:.2f}; inference k-фракции шкал={[round(x, 2) for x in vs]}')
+        out['cache'] = {'gate': gate, 'bias': gb}
+    ucl = getattr(model, 'concept_layer', None)
+    if ucl is not None:
+        nb = int(ucl._n_births); nu = int(ucl._n_updates); ns = int(ucl._n_skipped)
+        S = int(ucl.concept_count.numel()); used = int((ucl.concept_count > 0).sum())
+        thr = float(torch.sigmoid(ucl._log_tau_birth_thr.detach()))
+        nov = float(torch.sigmoid(ucl._log_tau_novelty_thr.detach()))
+        conf = float(ucl.concept_confidence.max())
+        step = int(ucl._step)
+        warn = '  ⚠ не рождал концептов за 5k+ шагов — novelty ниже порога?' if (nb == 0 and step > 5000) else ''
+        print(f'  UCL: births={nb} updates={nu} skipped={ns} занято={used}/{S} '
+              f'step={step}; thr σ(birth)={thr:.3f} σ(novelty)={nov:.3f} max_conf={conf:.3f}{warn}')
+        out['ucl'] = {'births': nb, 'updates': nu, 'used': used, 'step': step}
+    n_sig = int(model.layers[0].mirror._signal_log_weights.numel())
+    hs = []
+    for layer in model.layers:
+        w = torch.sigmoid(layer.mirror._signal_log_weights.detach())
+        p = w / (w.sum() + 1e-10)
+        hs.append(float(-(p * (p + 1e-10).log()).sum()))
+    hmax = math.log(n_sig)
+    print(f'  mirror signal entropy (n_sig={n_sig}, max={hmax:.3f}): '
+          f'avg={sum(hs) / len(hs):.3f} min={min(hs):.3f} max={max(hs):.3f}')
+    if min(hs) < 0.35 * hmax:
+        print('   ⚠ near-collapse на каком-то слое (когда-то +H-знак вёл именно туда; M5)')
+    out['mirror_h'] = hs
+    head = getattr(model, 'lm_head', None)
+    tb = getattr(head, 'token_bias', None); bb = getattr(head, 'bit_bias', None)
+    if tb is not None:
+        print(f'  head: token_bias rms={float(tb.detach().pow(2).mean().sqrt()):.4f} '
+              f'bit_bias std={float(bb.detach().std()):.4f} (приор {float(bb.detach().mean()):+.3f})')
+    dev = model.tau_config._tau_dev.detach()
+    print(f'  τ-ladder dev: |max|={float(dev.abs().max()):.4f} '
+          f'[{float(dev.min()):+.4f}, {float(dev.max()):+.4f}] (лестница ещё прямая = мало движения)')
+    return out
+
+
+# ──────────────────────────── HEALTH (log rules) ───────────────────────────
+
+def run_health(data):
+    """Детерминированные вердикты по логам — то, что при разборе смотрели
+    глазами (наклон branch/bridge_conn, направление signal_ent, жизнь intent,
+    healthy-band diversity, ползучесть mem)."""
+    import statistics as _stt
+    sec('HEALTH RULES')
+    steps = data['steps']
+    if not steps:
+        print('  ⚠ main-строки не найдены — формат лога не распознан '
+              '(проверь intent_eff/55-интервал)')
+        return
+    main = data['main']; aux = data['aux']
+    def med(x):
+        x = list(x)
+        return _stt.median(x) if x else float('nan')
+    n = len(steps); q = max(1, n // 4)
+    res = []
+    ce = main.get('ce', [])
+    res.append(('ce без NaN/inf', all(v == v and abs(v) < 1e30 for v in ce)))
+    br = aux.get('branch', [])
+    if br:
+        res.append(('branch затухает (factorized head)', med(br[-q:]) < med(br[:q])))
+    bc = aux.get('bridge_conn', [])
+    if bc:
+        res.append(('bridge_conn падает (мост предсказывает)', med(bc[-q:]) < med(bc[:q])))
+    se = aux.get('signal_ent', [])
+    if se:
+        m = med(se)
+        res.append((f'signal_ent в −H-шкале (~{m:.2f})', -1.75 < m < -0.5))
+    gl = aux.get('gate_l1', [])
+    if gl:
+        res.append(('gate_l1 редеет/стабилен', med(gl[-q:]) <= med(gl[:q]) * 1.05))
+    dv = aux.get('diversity', [])
+    if dv:
+        res.append(('diversity в healthy band (<5.0)', max(dv) < 5.0))
+    ie = main.get('intent_w', [])
+    if ie:
+        res.append((f'intent-шина жива (late med={med(ie[n - q:]):.4f})', med(ie[n - q:]) > 0))
+    mem = main.get('mem', [])
+    if len(mem) > 4:   # creep = медиана последних четверти против второй (первые
+        q = max(1, len(mem)//4)   # ~10% — штатный разогрев: кэш, Adam-слоты)
+        _d = med(mem[-q:]) - med(mem[q:2*q])
+        res.append((f'mem без ползучего роста (Δплато={_d:+.2f}GB)', _d < 1.5))
+    us = main.get('usef', [])
+    if steps[-1] > 5000 and len(us) > q:
+        res.append(('usef разошёлся после 5k', _stt.pstdev(us[-q:]) > 1e-3))
+    ok_all = True
+    for name, ok in res:
+        ok_all = ok_all and ok
+        print(f'  {"✓" if ok else "⚠"} {name}')
+    ev = data['eval']
+    if ev:
+        vals = [v for _, v, _ in ev]
+        arrow = '↓' if vals[-1] <= vals[0] else '⚠ нет снижения'
+        print(f'  eval: {len(vals)} точек | first={vals[0]:.4f} last={vals[-1]:.4f} {arrow}')
+    lr = main.get('lr', []); tk = main.get('tok_s', [])
+    print(f'  steps={n} | med tok/s={med(tk):.0f} | lr∈[{min(lr):.2e}..{max(lr):.2e}]'
+          if lr else f'  steps={n}')
+    print('  VERDICT: ' + ('здорово' if ok_all else 'есть ⚠ — смотреть вручную'))
 
 
 # ─────────────────────────── STATIC ───────────────────────────
@@ -875,7 +1056,7 @@ def run_grad_info(model, cfg, seq=16):
     здесь делаем отдельный grad-прогон на seq<=16 токенов. Градиенты CE и
     diversity считаются по ОДНОМУ графу и накапливаются попараметно по чанкам:
     пиковая память ~ граф + 1 чанк градиентов вместо двух полных наборов
-    (2×723M×4B ≈ 5.8GB). Автограф по всем 24 слоям всё равно нужен, но при
+    (2×212.3M×4B ≈ 1.7GB). Автограф по всем 24 слоям всё равно нужен, но при
     seq=16 он мизерный."""
     import gc
     sec('GRAD INFO: dead_pred + cos_sim(diversity, CE)')
@@ -1075,14 +1256,14 @@ import re as _re
 _MAIN_RE = _re.compile(
     r'step=\s*(\d+)\s+loss=([-\d.eE+]+)\s+ce=([-\d.eE+]+)\s+'
     r'mod_mlp=([-\d.eE+]+)\s+mod_std=([-\d.eE+]+)\s+lr=([-\d.eE+]+)\s+'
-    r'tok/s=(\d+)\s+mem=([\d.]+)GB\s+intent_w=([-\d.eE+]+)\s+'
+    r'tok/s=(\d+)\s+mem=([\d.]+)GB\s+intent_eff=([-\d.eE+]+)\s+'
     r'mlp_out=([-\d.eE+]+)\s+usef=([-\d.eE+]+)\s+mat=([\d.]+)\[([\d.]+),([\d.]+)\]')
 _AUX_RE = _re.compile(r'aux:\s+(.*)')
 _AUX_KV = _re.compile(r'(\w+)=([-\d.eE+]+)')
 _EVAL_RE = _re.compile(r'EVAL step=(\d+):\s*val_loss=([-\d.eE+]+)\s*val_ppl=([-\d.eE+]+)')
 _DEPTH_RE = _re.compile(r'\[DepthController\].*?->\s*active_depth=(\d+)/(\d+)')
 _BRIDGE_RE = _re.compile(r'In-core SemanticBridge active\s*\((.*?)\)')
-_SAVE_RE = _re.compile(r'Saved (best|latest) to .*?\(?step\s*(\d+)\)?')
+_SAVE_RE = _re.compile(r'(?:EVAL )?[Ss]aved (best|latest)[^\n]*?step\s*=?\s*(\d+)')
 
 
 def parse_training_log(path):
@@ -1091,7 +1272,7 @@ def parse_training_log(path):
     Возвращает dict:
       steps : list[int]                       — шаги с основной строкой
       main  : {metric: [val,...]}             — loss, ce, mod_mlp, mod_std, lr,
-                                                tok_s, mem, intent_w, mlp_out, usef,
+                                                tok_s, mem, intent_eff, mlp_out, usef,
                                                 mat, mat_min, mat_max (по шагам)
       aux   : {metric: [val,...]}             — ВСЕ aux: ключи (alpha_novelty, balance,
                                                 branch, bridge_conn, decorr, div, diversity,
@@ -1106,7 +1287,7 @@ def parse_training_log(path):
     data = {'steps': [], 'main': {}, 'aux': {}, 'eval': [], 'depth': [],
             'bridge': None, 'saves': []}
     MAIN_KEYS = ['loss', 'ce', 'mod_mlp', 'mod_std', 'lr', 'tok_s', 'mem',
-                 'intent_w', 'mlp_out', 'usef', 'mat', 'mat_min', 'mat_max']
+                 'intent_w', 'mlp_out', 'usef', 'mat', 'mat_min', 'mat_max']  # internal key; log prints intent_eff
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             m = _MAIN_RE.search(line)
@@ -1191,7 +1372,7 @@ def render_log_html(data, outpath):
         ('branch', f'{_last(aux, "branch"):.2f}'),
         ('pred', f'{_last(aux, "pred"):.3f}'),
         ('gradalign', f'{_last(aux, "gradalign"):.2f}'),
-        ('intent_w', f'{_last(main, "intent_w"):.3f}'),
+        ('intent_eff', f'{_last(main, "intent_w"):.3f}'),
         ('usef', f'{_last(main, "usef"):.3f}'),
         ('active_depth', f'{data["depth"][-1][1]}/{data["depth"][-1][2]}' if data['depth'] else '—'),
         ('tok/s', f'{_last(main, "tok_s"):.0f}'),
@@ -1224,7 +1405,7 @@ def render_log_html(data, outpath):
     chart_metrics = [('ce', '#ff7b72'), ('mat', '#79c0ff'), ('mat_min', '#a5d6ff'),
                      ('mod_mlp', '#7ee787'), ('bridge_conn', '#d2a8ff'), ('branch', '#e3b341'),
                      ('pred', '#ffa657'), ('gradalign', '#56d364'), ('diversity', '#79c0ff'),
-                     ('gate_l1', '#58a6ff'), ('intent_w', '#ff7b72'),
+                     ('gate_l1', '#58a6ff'), ('intent_w', '#ff7b72'),  # intent_w = intent_eff series
                      ('usef', '#7ee787'), ('div', '#e3b341'), ('decorr', '#79c0ff'),
                      ('reinforce', '#d2a8ff'), ('ls_reg', '#56d364'), ('nuc', '#f0883e'),
                      ('tok_s', '#8b949e'), ('lr', '#a5d6ff')]
@@ -1246,7 +1427,8 @@ def render_log_html(data, outpath):
         ch.append(f'<tr><td>{steps[i]}</td>')
         for k in all_keys:
             src = main if k in main else aux
-            v = src.get(k, [None] * nrows)[i]
+            _ser = src.get(k) or ()          # aux-ряды могут быть короче (gradalign
+            v = _ser[i] if i < len(_ser) else None  # появляется не с первой строки)
             if v is None:
                 ch.append('<td>—</td>')
             else:
@@ -1791,11 +1973,21 @@ def main():
             continue
         ckpt['_path'] = path
         models[path] = (model, ckpt)
+        try:
+            run_envelope(ckpt)
+        except Exception as e:
+            print(f'[error] envelope: {e}')
         static_data = None
         try:
             static_data = run_static(ckpt, cfg, model, missing, unexpected, tok)
         except Exception as e:
             print(f'[error] static: {e}')
+        try:
+            mech_data = run_mech(model, cfg)
+            if static_data is not None:
+                static_data['mech'] = mech_data
+        except Exception as e:
+            print(f'[error] mech: {e}')
         try:
             wake_data = run_wake(model, ckpt)
         except Exception as e:
@@ -1852,6 +2044,7 @@ def main():
             n = len(log_data['steps'])
             print(f'  parsed steps={n}  aux_metrics={len(log_data["aux"])}  '
                   f'eval={len(log_data["eval"])}  depth={len(log_data["depth"])}')
+            run_health(log_data)
             if n == 0:
                 print('[warn] основные строки step= не найдены — проверьте формат лога')
             out = os.path.splitext(args.log)[0] + '_log_report.html'

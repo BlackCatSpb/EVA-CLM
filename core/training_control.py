@@ -268,6 +268,17 @@ class FailureDetector:
             self._last_viol_name = name
         return viol
 
+    def arm_ce(self) -> None:
+        """Arm CE watching after the first val eval AND re-bootstrap its
+        baseline. The stats accumulated while CE was disarmed tracked the
+        WARMUP RAMP (a rising/falling LR schedule, not model health); arming
+        against them flags the first healthy CE oscillation and rollback-
+        thrashes the run (live L4 incident 2026-09: armed at step 1045,
+        false divergence at 1052 -> rollback -> retained-graph OOM)."""
+        self.ce_armed = True
+        self._stats.pop('ce', None)
+        self._viol.pop('ce', None)
+
     def check(self, ce: float, step: int,
               metrics: Optional[Dict[str, float]] = None) -> bool:
         ce = float(ce)

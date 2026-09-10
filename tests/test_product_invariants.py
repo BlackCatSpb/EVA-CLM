@@ -853,6 +853,57 @@ def test_checkpoint_state_roundtrip():
     bal2.load_state_dict(None)
 
 
+def test_arm_ce_rebootstraps_warmup_baseline():
+    """Live L4 incident (step 1045/1052): arm-ing CE at the first eval while
+    its baseline still carries the WARMUP ramp rolled the run back on the very
+    first healthy CE oscillation. arm_ce() must disarm-and-rebootstrap: a fresh
+    baseline, violation counter zeroed, and only THEN the watch is live."""
+    from core.training_control import FailureDetector
+    model = torch.nn.Module()
+    wd = FailureDetector(model, None, lambda lr: None, 'nope.pt', 1e-4)
+    for i in range(60):                       # ramping (warmup) CE, un-armed
+        wd.check(6.0 + 0.05 * i, i)
+    assert 'ce' in wd._stats and not wd.ce_armed
+    wd.arm_ce()
+    assert wd.ce_armed and 'ce' not in wd._stats and 'ce' not in wd._viol
+    # the old ramp level must not veto a spike the very next steps: 100-sample
+    # bootstrap grace (min_samples) before the rule can fire at all
+    for i in range(70):
+        assert not wd.check(9.5, 100 + i), 'warmup baseline survived arming'
+
+
+def test_log_analyzer_tracks_live_format():
+    """analyze.py's log parser must keep matching the notebook's live line
+    format — it already drifted once (intent_w vs intent_eff) and died
+    silently (empty dashboard, no error). Lock the exact format the run
+    prints, plus the M12-era save lines and the short-aux-series render."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'az', os.path.join(os.path.dirname(__file__), '..', 'scripts', 'analyze.py'))
+    az = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(az)
+    line = ('step=    55  loss=54.4124  ce=5.9117  mod_mlp=0.504 mod_std=0.079 '
+            'lr=1.40e-05  tok/s=69  mem=14.7GB  intent_eff=0.0010  mlp_out=1006.1 '
+            'usef=0.500  mat=0.060[0.020,0.121]\n')
+    m = az._MAIN_RE.search(line)
+    assert m, 'main log format drifted from _MAIN_RE'
+    assert m.group(1) == '55' and float(m.group(9)) == 0.0010  # step…, mem(8), intent_eff(9)
+    e = az._EVAL_RE.search('  EVAL step=1045: val_loss=6.8123 val_ppl=9.08e+02 (n=99)')
+    assert e and int(e.group(1)) == 1045
+    s1 = az._SAVE_RE.search('  EVAL saved best.pt (val_loss=6.8123) step=1045')
+    s2 = az._SAVE_RE.search('Interrupted - saving latest state...')
+    assert s1 and int(s1.group(2)) == 1045, 'notebook eval-save line must parse'
+    # short aux series (gradalign appears only after the first step) must not
+    # crash the full-table renderer
+    ld = {'steps': [0, 55], 'main': {'ce': [5.8, 5.9], 'lr': [1e-7, 1e-5]},
+          'aux': {'gradalign': [0.14]}, 'eval': [], 'depth': [], 'bridge': None,
+          'saves': [('best', 1045)]}
+    try:
+        az.render_log_html(ld, os.devnull)
+    except IndexError as ex:
+        raise AssertionError(f'log dashboard crashes on ragged aux series: {ex!r}')
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0
