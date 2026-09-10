@@ -904,6 +904,36 @@ def test_log_analyzer_tracks_live_format():
         raise AssertionError(f'log dashboard crashes on ragged aux series: {ex!r}')
 
 
+def test_garbage_scanner_detects_synthetic_noise():
+    """M14: scan_garbage must actually fire on random-id stretches (empirical
+    window entropy is capped at log2(window)≈8, so any threshold above 8 on
+    entropy alone is a dead heuristic — the uniq-ratio carries the signal)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'sg', os.path.join(os.path.dirname(__file__), '..', 'scripts', 'scan_garbage.py'))
+    sg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sg)
+    import numpy as np
+    rng = np.random.default_rng(11)
+    zipf = (np.minimum(rng.zipf(1.15, size=30000), 30000) + 1).astype(np.uint16)
+    clean = os.path.join(os.path.dirname(__file__), '_sg_clean.tmp')
+    dirty = os.path.join(os.path.dirname(__file__), '_sg_dirty.tmp')
+    try:
+        zipf.tofile(clean)
+        garbage = rng.integers(0, 65536, size=5 * 256, dtype=np.uint16)
+        np.concatenate([zipf[:10000], garbage, zipf[10000:]]).tofile(dirty)
+        r_clean, _ = sg.scan_file(clean)
+        r_dirty, _ = sg.scan_file(dirty)
+        assert not r_clean, f'clean corpus flagged: {r_clean}'
+        assert r_dirty, 'planted 5-window garbage NOT detected'
+        a0, a1, e, u, k = r_dirty[0]
+        assert u > 0.9 and a1 - a0 >= 5 * 256 * 0.8
+    finally:
+        for p in (clean, dirty):
+            if os.path.exists(p):
+                os.remove(p)
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

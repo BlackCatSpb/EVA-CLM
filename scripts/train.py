@@ -435,6 +435,15 @@ def train(cfg=None, resume_path=None):
             ce_loss, aux_dict = model.compute_losses(out, y, h_emb=h)
 
             ce_val = ce_loss.item()
+            # M14 non-learnable-batch veto (mirror of the notebook): CE above
+            # the coded head's uniform-bit NLL = data garbage, not model
+            # divergence — skip the gradient, advance the cursor.
+            _ce_uni = float(getattr(model.lm_head, 'K', cfg.bind_K)) * 0.6931471805599453
+            if ce_val > _ce_uni:
+                print(f'  [veto] step {step}: ce={ce_val:.2f} > {_ce_uni:.1f} uniform-bit NLL — gradient skipped')
+                h = out = ce_loss = aux_dict = None
+                optimizer.zero_grad(set_to_none=True)
+                continue
             # Progressive unfreeze (validation-plateau driven)
             depth.update(step)
             # Statistical watchdog: CE explosion -> rollback + fresh Adam + LR rewind.
