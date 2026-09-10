@@ -286,7 +286,12 @@ class MirrorLRScheduler:
         self._tau_1malpha = sd.get('tau_1malpha')
         self._tau_gate_var = sd.get('tau_gate_var')
         if 'orig_lrs' in sd:
-            self._orig_lrs = sd['orig_lrs']
+            # orig_lrs is positional (step() indexes groups by position); a
+            # checkpoint saved before an optimizer-group-shaping change would
+            # silently map wrong LRs onto new groups -> only accept when the
+            # group count still matches, else keep the fresh snapshot.
+            if len(sd['orig_lrs']) == len(self._orig_lrs):
+                self._orig_lrs = sd['orig_lrs']
         if 'best_val_loss' in sd:
             self._best_val_loss = sd['best_val_loss']
             self._loss_lr_factor = sd.get('loss_lr_factor', 1.0)
