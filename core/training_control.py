@@ -202,6 +202,32 @@ class FailureDetector:
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self._stats: Dict[str, List[float]] = {}  # name -> [ema, var, prev, n]
 
+    def state_dict(self) -> Dict[str, Any]:
+        """Full watchdog state for the single-best.pt policy (audit M12): the
+        per-signal baselines (fast/slow EMAs + sample counts), violation
+        streaks and recovery counters must survive a session restart —
+        otherwise the detector re-bootstraps blind every resume and forgets
+        the recover_max pressure it already accumulated."""
+        return {
+            'recover_count': int(self.recover_count),
+            'ce_armed': bool(self.ce_armed),
+            'cooldown': int(self._cooldown),
+            'viol': {str(k): int(v) for k, v in self._viol.items()},
+            'stats': {str(k): [float(x) for x in v] for k, v in self._stats.items()},
+            'last_viol_name': self._last_viol_name,
+        }
+
+    def load_state_dict(self, sd: Optional[Dict[str, Any]]) -> None:
+        if not sd:
+            return
+        self.recover_count = int(sd.get('recover_count', self.recover_count))
+        self.ce_armed = bool(sd.get('ce_armed', self.ce_armed))
+        self._cooldown = int(sd.get('cooldown', 0))
+        self._viol = {str(k): int(v) for k, v in (sd.get('viol') or {}).items()}
+        self._stats = {str(k): [float(x) for x in v]
+                       for k, v in (sd.get('stats') or {}).items()}
+        self._last_viol_name = sd.get('last_viol_name')
+
     def _observe(self, name: str, value: float) -> bool:
         """Relative-outlier test against a *long* self-referencing baseline.
 
@@ -289,7 +315,10 @@ class FailureDetector:
         print(f'  [FailureDetector] divergence at step {step}: '
               f'{" ".join(f"{k}={v:.2g}" for k, v in signals.items())} '
               f'-> rollback to {self.best_path}')
-        ckpt = torch.load(self.best_path, map_location='cpu')
+        try:  # weights_only=False: best.pt is a full-state dict incl. cfg
+            ckpt = torch.load(self.best_path, map_location='cpu', weights_only=False)
+        except TypeError:  # torch < 2.4 has no weights_only kwarg
+            ckpt = torch.load(self.best_path, map_location='cpu')
         self.model.load_state_dict(ckpt['model'], strict=False)
         if getattr(self.model, '_active_depth', None) is not None:
             from .adaptation import set_active_depth
@@ -364,6 +393,24 @@ class LossBalancer:
 
     def set_stats(self, eval_interval: int = 1000) -> None:
         self.eval_interval = int(eval_interval)
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Persist the balance EMAs so a resumed run does not re-anneal the
+        aux scaling from scratch (audit M12 single-best.pt)."""
+        return {
+            'ema_ce': self.ema_ce,
+            'ema_A': self.ema_A,
+            'ema_aux': dict(self.ema_aux),
+            'align': bool(self.align),
+        }
+
+    def load_state_dict(self, sd: Optional[Dict[str, Any]]) -> None:
+        if not sd:
+            return
+        self.ema_ce = sd.get('ema_ce', self.ema_ce)
+        self.ema_A = sd.get('ema_A', self.ema_A)
+        if sd.get('ema_aux') is not None:
+            self.ema_aux = dict(sd['ema_aux'])
 
     def _ema_decay(self) -> float:
         return 1.0 - 1.0 / max(self.eval_interval, 100)

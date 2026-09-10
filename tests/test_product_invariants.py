@@ -822,6 +822,37 @@ def test_logit_cache_incremental_kv_and_identity_init():
     assert abs(float(a.attention.cache_gate[2].bias.detach()) + 10.0) < 1e-6
 
 
+def test_checkpoint_state_roundtrip():
+    """M12 single-best.pt: watchdog & balancer statistics must round-trip —
+    a resumed session continues its signal baselines, violation streaks and
+    recover_max pressure instead of silently re-bootstrapping (recover_count
+    was saved by M8 but never RESTORED until now)."""
+    from core.training_control import FailureDetector, LossBalancer
+    model = torch.nn.Module()
+    wd = FailureDetector(model, None, lambda lr: None, 'nonexistent.pt', 1e-4)
+    for i in range(30):                       # stable series: stats build, no trigger
+        assert not wd.check(7.0 + 0.001 * i, i)
+    wd.ce_armed = True
+    sd = wd.state_dict()
+    assert 'ce' in sd['stats'] and len(sd['stats']['ce']) == 4
+    wd2 = FailureDetector(model, None, lambda lr: True, 'x.pt', 1e-4)
+    wd2.load_state_dict(sd)
+    assert wd2._stats == wd._stats and wd2.recover_count == wd.recover_count
+    assert wd2.ce_armed and wd2._viol == wd._viol
+    # empty/legacy payload must be a no-ops, not crashes
+    wd2.load_state_dict(None)
+    bal = LossBalancer(align=False)
+    ce, aux = torch.tensor(2.0), {'u': torch.tensor(0.5), 'v': torch.tensor(-1.0)}
+    for _ in range(5):
+        bal.loss(ce, aux)
+    bsd = bal.state_dict()
+    assert bsd['ema_ce'] is not None and set(bsd['ema_aux']) == {'u', 'v'}
+    bal2 = LossBalancer(align=False)
+    bal2.load_state_dict(bsd)
+    assert bal2.ema_aux == bal.ema_aux and abs(bal2.ema_ce - bal.ema_ce) < 1e-12
+    bal2.load_state_dict(None)
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

@@ -233,6 +233,10 @@ def train(cfg=None, resume_path=None):
     # Resume
     start_step = 0
     best_val_loss = float('inf')
+    resumed_offset = 0
+    resumed_stream_idx = 0
+    _m12_rng = None
+    _m12_data_rng = None
     if resume_path == 'auto':
         # Find latest checkpoint: interrupt > step_* > best
         ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'interrupt_step_*.pt')))
@@ -319,19 +323,38 @@ def train(cfg=None, resume_path=None):
         print('  Optimizer/scheduler rebuilt FRESH (no momentum restore)')
         start_step = ckpt['step']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
+        # M12: full-state resume — watchdog/balancer baselines ride in best.pt
+        watchdog.load_state_dict(ckpt.get('detector'))
+        if ckpt.get('balancer') is not None:
+            balancer.load_state_dict(ckpt['balancer'])
+        _m12_rng = ckpt.get('rng')
+        _m12_data_rng = ckpt.get('data_rng')
+        resumed_offset = int(ckpt.get('offset', 0) or 0)
+        resumed_stream_idx = int(ckpt.get('stream_idx', 0) or 0)
     reasoning_enabled_step = ckpt.get('reasoning_enabled_step', 0) if resume_path and os.path.exists(resume_path) else 0
     
     # State for recurrent layers
     state = None
     gs = None
     rng = torch.Generator().manual_seed(42)
+    if _m12_rng is not None:          # resume the dropout/sampling stream (M12)
+        torch.set_rng_state(_m12_rng)
+    if _m12_data_rng is not None:     # resume the document-shuffle stream
+        rng.set_state(_m12_data_rng)
     
     # Training loop
     os.makedirs(cfg.save_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
+    # M12 single-checkpoint policy: seed best.pt (model-only, step 0) when no
+    # resume checkpoint exists, so pre-first-val divergence has a restore target.
+    _best_path = os.path.join(cfg.save_dir, 'best.pt')
+    if start_step == 0 and not os.path.exists(_best_path):
+        _save_checkpoint_safely({'model': model.state_dict(), 'step': 0,
+                                 'seed': True}, _best_path)
+        print('[EVA] seeded best.pt (step 0) as early-rollback target (M12)')
     
-    stream_idx = 0
-    offset = 0
+    stream_idx = resumed_stream_idx   # continue the data cursor (audit M12)
+    offset = resumed_offset
     tokens_seen = 0
     t0 = time.time()
     
@@ -600,6 +623,12 @@ def train(cfg=None, resume_path=None):
                         'cfg': cfg,
                         'reasoning_enabled_step': reasoning_enabled_step,
                         'active_depth': depth.active,
+                        # M12: one checkpoint carries the FULL restart state
+                        'recover_count': watchdog.recover_count,
+                        'detector': watchdog.state_dict(),
+                        'balancer': balancer.state_dict(),
+                        'stream_idx': int(stream_idx), 'offset': int(offset),
+                        'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
                     }, save_path)
                     print(f'  Saved best model to {save_path}')
                     generate_report(save_path)
