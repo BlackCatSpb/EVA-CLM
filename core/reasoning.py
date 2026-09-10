@@ -12,14 +12,6 @@ import torch.nn.functional as F
 import math
 
 
-class ReasoningTokens:
-    """Special tokens for chain-of-thought reasoning."""
-    THINK: int = 65536   # <think>
-    STEP: int = 65537    # <step>
-    ANSWER: int = 65538  # <answer>
-    END: int = 65539     # </think>
-
-
 class ReasoningMemory(nn.Module):
     """Explicit reasoning memory for chain-of-thought.
 
@@ -178,27 +170,3 @@ class ReasoningGate(nn.Module):
         if r is not None:
             logit = logit + self.r_proj(r)
         return logit
-
-
-class ThinkingTokenHead(nn.Module):
-    """Head that predicts thinking tokens for explicit reasoning.
-
-    Args:
-        D: Hidden dimension.
-        num_reasoning_tokens: Number of special reasoning tokens.
-    """
-
-    def __init__(self, D: int, num_reasoning_tokens: int = 4) -> None:
-        super().__init__()
-        self.reasoning_proj: nn.Linear = nn.Linear(D, num_reasoning_tokens)
-
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
-        """Predict reasoning token logits.
-
-        Args:
-            h: (B, L, D) hidden state.
-
-        Returns:
-            logits: (B, L, num_reasoning_tokens).
-        """
-        return self.reasoning_proj(h)

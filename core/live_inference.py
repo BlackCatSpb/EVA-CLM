@@ -167,7 +167,8 @@ class LiveInference:
         else:
             self.monitor = None
 
-    def think(self, n_steps: int = 1, h: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def think(self, n_steps: int = 1, h: Optional[torch.Tensor] = None,
+              tokens: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Run internal self-dialogue steps.
 
         If h is None AND there is no pending input, feeds a zero activation
@@ -186,7 +187,7 @@ class LiveInference:
                                 device=next(self.model.parameters()).device)
             out, new_states, self.global_state, self._reasoning = self.model(
                 h, self.layer_states, global_state=self.global_state,
-                intent_state=self.intent_state
+                intent_state=self.intent_state, tokens=tokens
             )
             self.layer_states = new_states
             self.intent_state = getattr(self.model, '_last_intent_state', None)
@@ -201,7 +202,7 @@ class LiveInference:
 
         return out
 
-    def respond(self, h: torch.Tensor) -> torch.Tensor:
+    def respond(self, h: torch.Tensor, tokens: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Process an actual input through the live model.
 
         Unlike think(), this does NOT feed the output back as input —
@@ -209,7 +210,7 @@ class LiveInference:
         """
         out, new_states, self.global_state, self._reasoning = self.model(
             h, self.layer_states, global_state=self.global_state,
-            intent_state=self.intent_state
+            intent_state=self.intent_state, tokens=tokens
         )
         self.layer_states = new_states
         self.intent_state = getattr(self.model, '_last_intent_state', None)
@@ -232,7 +233,7 @@ class LiveInference:
 
     def generate(self, prompt_ids: torch.Tensor, gen_len: int = 100, think_steps: int = 0) -> list[int]:
         """Convenience: think (optional) -> prefill -> generate tokens."""
-        last_hidden = self.respond(self.model.embed_tokens(prompt_ids))
+        last_hidden = self.respond(self.model.embed_tokens(prompt_ids), tokens=prompt_ids)
 
         for _ in range(think_steps):
             last_hidden = self.think()
@@ -244,10 +245,14 @@ class LiveInference:
         with torch.no_grad():
             h: Optional[torch.Tensor] = last_hidden[:, -1:, :]
             for _ in range(gen_len):
-                out = self.think(n_steps=1, h=h)
+                out = self.think(n_steps=1, h=h,
+                                 tokens=getattr(self, '_pending_tokens', None))
                 logits = self.model.lm_head(out)
                 next_tok = logits[:, -1].argmax(dim=-1, keepdim=True)
                 tokens.append(int(next_tok.item()))
                 h = self.model.embed_tokens(next_tok)
+                # inference=learning (decision #5): the next think-step is fed
+                # the generated token so banks/UCL consolidate live experience
+                self._pending_tokens = next_tok
 
         return tokens

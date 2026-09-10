@@ -291,7 +291,7 @@ class TestU6MemoryBankFusion:
         tc = TauConfig(n_layers=cfg.n_layers)
         tc.update()
         mb = StreamingMemoryBank(D=cfg.D, bridge_dim=64, l1_slots=2, l2_slots=4,
-                                  l3_concepts=2, tau_config=tc)
+                                  tau_config=tc)
         assert mb.tau_config is not None
 
     def test_memory_bank_has_fusion_tau_alpha(self):
@@ -299,7 +299,7 @@ class TestU6MemoryBankFusion:
         tc = TauConfig(n_layers=cfg.n_layers)
         tc.update()
         mb = StreamingMemoryBank(D=cfg.D, bridge_dim=64, l1_slots=2, l2_slots=4,
-                                  l3_concepts=2, tau_config=tc)
+                                  tau_config=tc)
         assert hasattr(mb, '_fusion_tau_alpha')
         assert mb._fusion_tau_alpha.requires_grad
 
@@ -308,7 +308,7 @@ class TestU6MemoryBankFusion:
         tc = TauConfig(n_layers=cfg.n_layers)
         tc.update()
         mb = StreamingMemoryBank(D=cfg.D, bridge_dim=64, l1_slots=2, l2_slots=4,
-                                  l3_concepts=2, tau_config=tc).to(device)
+                                  tau_config=tc).to(device)
         B, L, D = 1, 8, cfg.D
         h = torch.randn(B, L, D, device=device)
         tokens = torch.randint(0, cfg.vocab, (B, L), device=device)
@@ -684,7 +684,7 @@ class TestEdgeCases:
         tc = TauConfig(n_layers=cfg.n_layers)
         tc.update()
         mb = StreamingMemoryBank(D=cfg.D, bridge_dim=64, l1_slots=2, l2_slots=4,
-                                  l3_concepts=2, tau_config=tc).to(device)
+                                  tau_config=tc).to(device)
         h = torch.randn(1, 4, cfg.D, device=device)
         tokens = torch.randint(0, cfg.vocab, (1, 4), device=device)
         out = mb(h, tokens, step=0, mat_gate=0.0)

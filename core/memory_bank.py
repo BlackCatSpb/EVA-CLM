@@ -1,4 +1,4 @@
-"""Streaming Memory Bank for EVA — hierarchical L1 + L2 + L3.
+"""Streaming Memory Bank for EVA — hierarchical L1 + L2 (concepts: global UCL).
 
 Architecture:
   L1 (immediate): rolling buffer of last K sentence embeddings
@@ -10,7 +10,7 @@ Architecture:
     - Write: at sentence boundaries (SEP token = 2)
     - Read: attention over slots at each token
     - Selective: novelty-based write gating
-    - Simple ring buffer: overwrite oldest (or consumed slot from L3)
+    - Simple ring buffer: overwrite oldest (or consumed slot)
     - Differentiable: gradients flow through write/read
     - Keys normalized via F.normalize (sigmoid-weighted)
 
@@ -32,7 +32,6 @@ Integration:
 Flow:
   L1.write(summary)  -> overwrite oldest (fast)
   L2.write(summary)  -> overwrite oldest or consumed (fast)
-  L3.write(l2_key)   -> if birth/update, mark L2 slot as consumed
 
 Design principles from EVA:
   - Softmax-free (sigmoid attention) — regime B
@@ -89,7 +88,7 @@ class L1Buffer(nn.Module):
 
     Simple ring buffer: overwrite oldest slot.
     Fast, no cosine similarity checks.
-    Keys normalized via F.normalize for consistent attention with L2/L3.
+    Keys normalized via F.normalize for consistent attention with L2.
     Uses hybrid attention (sigmoid * (1 + softmax/tau)).
     """
     def __init__(self, D: int, bridge_dim: int, n_slots: int = 3,
@@ -173,7 +172,7 @@ class L2Bank(nn.Module):
 
     Simple ring buffer: overwrite oldest or consumed slot.
     Fast, no cosine similarity checks.
-    Consumed slots (from L3 concept birth) are prioritized for overwrite.
+    Consumed slots are prioritized for overwrite.
     
     Keys normalized via F.normalize + tau-based scaling (hybrid approach).
     Values scaled via tau-based sigmoid (preserves magnitude info).
@@ -227,7 +226,7 @@ class L2Bank(nn.Module):
     def write(self, embedding: torch.Tensor) -> int:
         """Write to bank. Returns slot index that was written.
 
-        Prioritizes overwriting consumed slots (from L3 concept birth).
+        Prioritizes overwriting consumed slots.
         Falls back to overwriting oldest slot.
         """
         novelty_score = torch.sigmoid(self.novelty_gate(embedding))
@@ -236,7 +235,7 @@ class L2Bank(nn.Module):
 
         with torch.no_grad():
             # Hybrid normalization: F.normalize + tau-based scaling
-            # Keys: normalized for stable cosine similarity in L3
+            # Keys: normalized for stable cosine similarity
             raw_key = self.W_k(embedding.detach())
             new_key = F.normalize(raw_key, dim=-1) * torch.sigmoid(self.key_log_scale)
             
@@ -273,7 +272,7 @@ class L2Bank(nn.Module):
 
     @torch.no_grad()
     def mark_consumed(self, slot: int) -> None:
-        """Mark slot as consumed by L3 concept birth."""
+        """Mark slot as consumed (e.g. by concept promotion)."""
         if 0 <= slot < self.n_slots:
             self.slot_consumed.data[slot] = True
 
@@ -318,182 +317,26 @@ class L2Bank(nn.Module):
         self._n_consumed = 0
 
 
-class L3Concepts(nn.Module):
-    """Emergent concept layer — clusters L2 slots into higher-level abstractions.
-
-    Mechanism:
-      - At each boundary write, check L2 key against existing concepts
-      - If cosine similarity > threshold: update concept (running mean)
-      - If no match and confidence > threshold: birth new concept
-      - Read: attention over concepts (higher-level than L2)
-
-    Concept birth is triggered by:
-      1. L2 key doesn't match any existing concept
-      2. The new key is confident enough (from L2 novelty gate)
-      3. An empty slot is available (or least-used concept is evicted)
-
-    Concept death: unused concepts decay via age and get evicted.
-
-    CONSUMES L2 slots: when concept is born/updated, the source L2 slot
-    is marked as consumed (for cleanup in L2).
-    
-    Values normalized via F.normalize + tau-based scaling (hybrid approach).
-    """
-    def __init__(self, D: int, bridge_dim: int, n_concepts: int = 8,
-                 birth_threshold: float = 0.7, update_momentum: float = 0.1,
-                 softmax_free: bool = True, tau_prior: float = 2.0):
-        super().__init__()
-        self.D = D
-        self.bridge_dim = bridge_dim
-        self.n_concepts = n_concepts
-        self._birth_threshold = birth_threshold
-        self._update_momentum = update_momentum
-        self._softmax_free = softmax_free
-
-        # Concept keys/values (learnable)
-        self.concept_keys = nn.Parameter(torch.randn(n_concepts, bridge_dim) * 0.02)
-        self.concept_vals = nn.Parameter(torch.randn(n_concepts, bridge_dim) * 0.02)
-
-        # Query projection for read
-        self.q_proj = nn.Linear(D, bridge_dim)
-        self.out_proj = nn.Linear(bridge_dim, D)
-
-        # Temperature (tau)
-        # P0 FIX: initialize from τ-prior instead of frozen=1.0
-        # L3 = slowest: high tau → more diversity (broader attention over concepts)
-        self.log_tau = nn.Parameter(torch.tensor(math.log(max(tau_prior, 0.1))))
-        self._init_log_tau = self.log_tau.data.clone()  # prior for regularization
-        
-        # Tau-based scaling for concept values (hybrid approach)
-        # Vals: F.normalize + sigmoid(tau) for stable representation
-        self.val_log_scale = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
-
-        # Tracking
-        self.register_buffer('concept_age', torch.zeros(n_concepts), persistent=True)
-        self.register_buffer('concept_count', torch.zeros(n_concepts), persistent=True)
-        self.register_buffer('concept_confidence', torch.zeros(n_concepts), persistent=True)
-        self._n_births = 0
-        self._n_updates = 0
-
-    @torch.no_grad()
-    def write(self, l2_key: torch.Tensor, l2_val: torch.Tensor = None, confidence: float = 0.5) -> bool:
-        """Try to write L2 key into a concept slot.
-
-        l2_key: (bridge_dim,) — the L2 key that was written
-        l2_val: (bridge_dim,) — the L2 value that was written (optional, defaults to l2_key)
-        confidence: float — novelty confidence from L2 gate
-        returns: True if wrote (updated or birthed)
-        """
-        # Use l2_val if provided, otherwise fallback to l2_key (backward compat)
-        if l2_val is None:
-            l2_val = l2_key
-            
-        # Normalize for cosine similarity
-        key_n = F.normalize(l2_key.unsqueeze(0), dim=-1)  # (1, bridge_dim)
-        concept_n = F.normalize(self.concept_keys.data, dim=-1)  # (n_concepts, bridge_dim)
-
-        # Cosine similarity to existing concepts
-        sims = (key_n @ concept_n.T).squeeze(0)  # (n_concepts,)
-
-        # Find best match
-        best_sim, best_idx = sims.max(0)
-        best_idx = best_idx.item()
-        best_sim = best_sim.item()
-
-        # Update existing concept if similarity > threshold
-        if best_sim > self._birth_threshold:
-            alpha = self._update_momentum
-            self.concept_keys.data[best_idx] = F.normalize(
-                self.concept_keys.data[best_idx] * (1 - alpha) + l2_key * alpha, dim=-1)
-            # Hybrid normalization for concept_vals: F.normalize + tau-based scaling
-            raw_val = self.concept_vals.data[best_idx] * (1 - alpha) + l2_val * alpha
-            self.concept_vals.data[best_idx] = F.normalize(raw_val, dim=-1) * torch.sigmoid(self.val_log_scale)
-            self.concept_count.data[best_idx] += 1
-            self.concept_confidence.data[best_idx] = (
-                self.concept_confidence.data[best_idx] * 0.9 + best_sim * 0.1)
-            self.concept_age.data[best_idx] = 0.0
-            self._n_updates += 1
-            return True
-
-        # Birth: find empty slot or evict least-used concept
-        empty = torch.nonzero(self.concept_count == 0)
-        if empty.numel() > 0:
-            idx = empty[0].item()
-        elif confidence > self._birth_threshold:
-            # Evict concept with lowest confidence * count (least established)
-            utility = self.concept_confidence * torch.clamp(self.concept_count, min=1)
-            idx = utility.argmin().item()
-        else:
-            return False
-
-        # Birth or overwrite
-        self.concept_keys.data[idx] = F.normalize(l2_key.unsqueeze(0), dim=-1).squeeze(0)
-        # Hybrid normalization for concept_vals: use l2_val (not l2_key!)
-        self.concept_vals.data[idx] = F.normalize(l2_val.unsqueeze(0), dim=-1).squeeze(0) * torch.sigmoid(self.val_log_scale)
-        self.concept_age.data[idx] = 0.0
-        self.concept_count.data[idx] = 1
-        self.concept_confidence.data[idx] = confidence
-        self._n_births += 1
-        return True
-
-    def read(self, query: torch.Tensor) -> torch.Tensor:
-        """Read from concepts using attention.
-
-        query: (B, L, D)
-        returns: (B, L, D)
-        """
-        B, L, _ = query.shape
-        q = self.q_proj(query)  # (B, L, bridge_dim)
-        k = self.concept_keys  # (n_concepts, bridge_dim)
-        v = self.concept_vals  # (n_concepts, bridge_dim)
-
-        temp = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
-        age_decay = torch.exp(-0.005 * self.concept_age)  # slower decay than L2 (concepts are long-range)
-        attn = _memory_attention(q, k, temp, self.bridge_dim,
-                                 self._softmax_free, age_decay)  # (B, L, n_concepts)
-
-        read = attn @ v  # (B, L, bridge_dim)
-        return self.out_proj(read)  # (B, L, D)
-
-    def get_active_concepts(self) -> int:
-        """Number of concepts with count > 0."""
-        return int((self.concept_count > 0).sum().item())
-
-    def get_stats(self) -> dict:
-        return {
-            'n_births': self._n_births,
-            'n_updates': self._n_updates,
-            'n_active': self.get_active_concepts(),
-            'confidence_mean': self.concept_confidence.mean().item(),
-            'val_scale': torch.sigmoid(self.val_log_scale).item(),
-        }
-
-    def reset(self) -> None:
-        self.concept_keys.data.zero_()
-        self.concept_vals.data.zero_()
-        self.concept_age.zero_()
-        self.concept_count.zero_()
-        self.concept_confidence.zero_()
-        self._n_births = 0
-        self._n_updates = 0
-
-
 class StreamingMemoryBank(nn.Module):
-    """Combined L1 + L2 + L3 memory bank for EVA.
+    """Combined L1 + L2 working memory for EVA.
+
+    Audit decision #2: the emergent-concept store is the SINGLE global
+    UnifiedConceptLayer (stack.concept_layer). L3Concepts was a second,
+    differently-parameterized concept system (config and the UCL docstring
+    already declared UCL its replacement) — retired here: no duplicate
+    buffers, one birth math, one checkpoint footprint. Long-range concepts
+    enter the trunk only through the UCL.
 
     Flow:
-      L1.write(summary)  -> overwrite oldest (fast)
-      L2.write(summary)  -> overwrite oldest or consumed (fast)
-      L3.write(l2_key)   -> if birth/update, mark L2 slot as consumed
+      L1.write(summary)  -> overwrite oldest (fast, immediate)
+      L2.write(summary)  -> novelty-gated slots (short-term)
 
     Integration points:
-    - forward(h, tokens, step, mat_gate): read from L1+L2+L3 at each position
-    - write_boundary(embedding): called at sentence boundaries
+    - forward(h, tokens, step, mat_gate): read from L1+L2 at each position
     - reset(): clear all memory (for new sequence)
     """
     def __init__(self, D: int, bridge_dim: int,
                  l1_slots: int = 3, l2_slots: int = 16,
-                 l3_concepts: int = 8, l3_birth_threshold: float = 0.7,
                  min_write_maturation: float = 0.3,
                  softmax_free: bool = True,
                  cfg=None,
@@ -508,15 +351,13 @@ class StreamingMemoryBank(nn.Module):
 
         # Compute τ-priors from tau_config if available
         if tau_config is not None:
-            mem_tau = tau_config.mem_tau  # (3,) — [L1_tau, L2_tau, L3_tau]
+            mem_tau = tau_config.mem_tau  # (3,) percentiles — the bank uses the fast pair
             # Normalize to reasonable range for hybrid_gate temperature
             l1_tau_prior = (mem_tau[0] / tau_config.mem_tau_ref).clamp(0.1, 5.0).item()
             l2_tau_prior = (mem_tau[1] / tau_config.mem_tau_ref).clamp(0.1, 5.0).item()
-            l3_tau_prior = (mem_tau[2] / tau_config.mem_tau_ref).clamp(0.1, 5.0).item()
         else:
             l1_tau_prior = 0.5  # L1 = fast (low tau → precision)
             l2_tau_prior = 1.0  # L2 = balanced
-            l3_tau_prior = 2.0  # L3 = slow (high tau → diversity)
 
         # L1: rolling buffer (immediate, ~last K diverse sentences)
         self.l1 = L1Buffer(D, bridge_dim, n_slots=l1_slots, softmax_free=softmax_free,
@@ -526,14 +367,9 @@ class StreamingMemoryBank(nn.Module):
         self.l2 = L2Bank(D, bridge_dim, n_slots=l2_slots, softmax_free=softmax_free,
                          tau_prior=l2_tau_prior)
 
-        # L3: emergent concepts (long-range, ~8 concepts from L2 clustering)
-        self.l3 = L3Concepts(D, bridge_dim, n_concepts=l3_concepts,
-                             birth_threshold=l3_birth_threshold, softmax_free=softmax_free,
-                             tau_prior=l3_tau_prior)
-
-        # Fusion gate: combine L1 + L2 + L3 + current state
+        # Fusion gate: combine L1 + L2 + current state
         self.fusion = nn.Sequential(
-            nn.Linear(D * 4, D),
+            nn.Linear(D * 3, D),
             nn.GELU(),
             nn.Linear(D, D),
         )
@@ -544,7 +380,7 @@ class StreamingMemoryBank(nn.Module):
         # Injection scale (starts small, grows if helpful)
         self.log_scale = nn.Parameter(torch.tensor(-2.0))
         # U6: τ-consistent fusion: per-level importance scales with τ_norm
-        self._fusion_tau_alpha = nn.Parameter(torch.zeros(4))  # learnable per-level τ-modulation
+        self._fusion_tau_alpha = nn.Parameter(torch.zeros(3))  # learnable per-level τ-modulation
 
         # Track sentence boundaries
         self._in_sentence = True
@@ -583,34 +419,23 @@ class StreamingMemoryBank(nn.Module):
                         if _can_write:
                             l2_slot = self.l2.write(summary)
 
-                        # Write to L3 (concept clustering from L2 key+val)
-                        # If L3 writes (birth/update), mark L2 slot as consumed
-                        if _can_write and l2_slot >= 0:
-                            l2_key = self.l2.keys[l2_slot]  # (bridge_dim,)
-                            l2_val = self.l2.val_norm(self.l2.vals[l2_slot])  # (bridge_dim,) — normalized
-                            conf = self.l2.slot_novelty[l2_slot].item()
-                            wrote_l3 = self.l3.write(l2_key, l2_val=l2_val, confidence=conf)
-                            if wrote_l3:
-                                # L3 consumed this L2 slot — mark for overwrite
-                                self.l2.mark_consumed(l2_slot)
-
                         sent_start = t + 1
 
         # Read from all levels
         mem_l1 = self.l1.read(h)  # (B, L, D)
         mem_l2 = self.l2.read(h)  # (B, L, D)
-        mem_l3 = self.l3.read(h)  # (B, L, D)
+
 
         # U6 (audit M11 made it real): _fusion_tau_alpha is an actual
-        # learnable PER-LEVEL modulation — exp(offset) on each [h, L1, L2, L3]
+        # learnable PER-LEVEL modulation — exp(offset) on each [h, L1, L2]
         # block before fusion, zero-init ⇒ identity (checkpoint-safe). The
         # parameter previously existed, sat in the optimizer and modulated
         # nothing.
         alpha = self._fusion_tau_alpha.to(h.dtype).exp()        # (4,), ≈1 at init
         w = torch.stack([alpha[0] * h, alpha[1] * mem_l1,
-                         alpha[2] * mem_l2, alpha[3] * mem_l3], dim=-2)
+                         alpha[2] * mem_l2], dim=-2)
         D = h.shape[-1]
-        combined = w.reshape(*h.shape[:-1], 4 * D)               # (B, L, 4D)
+        combined = w.reshape(*h.shape[:-1], 3 * D)               # (B, L, 3D)
         fused = self.fusion(combined)  # (B, L, D)
 
         # Injection with bounded scale
@@ -633,13 +458,13 @@ class StreamingMemoryBank(nn.Module):
         """Clear all memory (for new sequence)."""
         self.l1.reset()
         self.l2.reset()
-        self.l3.reset()
+
 
     def get_diagnostics(self) -> dict:
         """Return diagnostic info for logging."""
         l1s = self.l1.get_stats()
         l2s = self.l2.get_stats()
-        l3s = self.l3.get_stats()
+
         return {
             'l1_write_idx': self.l1._write_idx,
             'l1_overwrites': l1s['n_overwrites'],
@@ -652,11 +477,6 @@ class StreamingMemoryBank(nn.Module):
             'l2_age_mean': self.l2.slot_age.mean().item(),
             'l2_key_scale': l2s['key_scale'],
             'l2_val_scale': l2s['val_scale'],
-            'l3_n_concepts': l3s['n_active'],
-            'l3_n_births': l3s['n_births'],
-            'l3_n_updates': l3s['n_updates'],
-            'l3_confidence_mean': l3s['confidence_mean'],
-            'l3_val_scale': l3s['val_scale'],
             'mem_scale': torch.tanh(self.log_scale).item(),
         }
 
@@ -667,7 +487,7 @@ class StreamingMemoryBank(nn.Module):
 
         Called between generation steps to reduce memory footprint.
         Uses tau-adaptive compression: L1 (volatile) gets uniform8,
-        L2/L3 (stable) get sparse top-k.
+        L2 (stable) gets sparse top-k.
         """
         from .tau_compression import compress_uniform8, compress_sparse_topk
 
@@ -694,22 +514,6 @@ class StreamingMemoryBank(nn.Module):
         idx_pos, idx_vals, meta = compress_sparse_topk(vals.unsqueeze(0), k=min(128, vals.shape[-1]))
         self._l2_vals_compressed = {'pos': idx_pos, 'vals': idx_vals, 'meta': meta,
                                     'shape': vals.shape, 'dtype': vals.dtype}
-
-        # L3 concept_keys: stable → sparse_topk-64
-        if not hasattr(self, '_l3_keys_compressed'):
-            self._l3_keys_compressed = None
-        ck = self.l3.concept_keys.data
-        idx_pos, idx_vals, meta = compress_sparse_topk(ck.unsqueeze(0), k=min(64, ck.shape[-1]))
-        self._l3_keys_compressed = {'pos': idx_pos, 'vals': idx_vals, 'meta': meta,
-                                    'shape': ck.shape, 'dtype': ck.dtype}
-
-        # L3 concept_vals: stable → sparse_topk-64
-        if not hasattr(self, '_l3_vals_compressed'):
-            self._l3_vals_compressed = None
-        cv = self.l3.concept_vals.data
-        idx_pos, idx_vals, meta = compress_sparse_topk(cv.unsqueeze(0), k=min(64, cv.shape[-1]))
-        self._l3_vals_compressed = {'pos': idx_pos, 'vals': idx_vals, 'meta': meta,
-                                    'shape': cv.shape, 'dtype': cv.dtype}
 
     def decompress_state(self) -> None:
         """Decompress internal state after compression.
@@ -739,20 +543,6 @@ class StreamingMemoryBank(nn.Module):
                                                    (1,) + c['shape'], c['dtype'])
             self.l2.vals.data.copy_(decompressed.squeeze(0))
 
-        # L3 concept_keys
-        if hasattr(self, '_l3_keys_compressed') and self._l3_keys_compressed is not None:
-            c = self._l3_keys_compressed
-            decompressed = decompress_sparse_topk(c['pos'], c['vals'], c['meta'],
-                                                   (1,) + c['shape'], c['dtype'])
-            self.l3.concept_keys.data.copy_(decompressed.squeeze(0))
-
-        # L3 concept_vals
-        if hasattr(self, '_l3_vals_compressed') and self._l3_vals_compressed is not None:
-            c = self._l3_vals_compressed
-            decompressed = decompress_sparse_topk(c['pos'], c['vals'], c['meta'],
-                                                   (1,) + c['shape'], c['dtype'])
-            self.l3.concept_vals.data.copy_(decompressed.squeeze(0))
-
     def compression_stats(self) -> dict:
         """Get compression statistics."""
         import sys
@@ -775,18 +565,6 @@ class StreamingMemoryBank(nn.Module):
         orig_bytes += self.l2.vals.numel() * 4
         if hasattr(self, '_l2_vals_compressed') and self._l2_vals_compressed is not None:
             c = self._l2_vals_compressed
-            comp_bytes += c['pos'].numel() * 2 + c['vals'].numel() + 8
-
-        # L3 concept_keys
-        orig_bytes += self.l3.concept_keys.numel() * 4
-        if hasattr(self, '_l3_keys_compressed') and self._l3_keys_compressed is not None:
-            c = self._l3_keys_compressed
-            comp_bytes += c['pos'].numel() * 2 + c['vals'].numel() + 8
-
-        # L3 concept_vals
-        orig_bytes += self.l3.concept_vals.numel() * 4
-        if hasattr(self, '_l3_vals_compressed') and self._l3_vals_compressed is not None:
-            c = self._l3_vals_compressed
             comp_bytes += c['pos'].numel() * 2 + c['vals'].numel() + 8
 
         ratio = orig_bytes / max(comp_bytes, 1)

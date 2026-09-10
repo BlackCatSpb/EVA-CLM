@@ -11,7 +11,7 @@ from .bridge import SemanticBridge
 from .maturation import MaturationController
 from .layer_bridge_gate import LayerBridgeGate
 from .embedding import PartitionedEmbedding, LmHead, PartitionedHead, SigmoidCodedHead, CognitiveCodedHead
-from .reasoning import ReasoningMemory, ThinkingTokenHead, ReasoningTokens, ReasoningGate
+from .reasoning import ReasoningMemory, ReasoningGate
 from .vsa_utils import dct_basis, zeckendorf_codes, sparse_block_codes, vsa_prefix_scan
 from .memory_bank import StreamingMemoryBank
 from .concept_layer import UnifiedConceptLayer
@@ -63,7 +63,6 @@ class EVAStack(nn.Module):
         self.explicit_reasoning = getattr(cfg, 'explicit_reasoning', False)
         if self.explicit_reasoning:
             self.reasoning_memory = ReasoningMemory(cfg.D, max_steps=getattr(cfg, 'reasoning_max_steps', 8))
-            self.thinking_head = ThinkingTokenHead(cfg.D)
             self.reasoning_gate = None
             if getattr(cfg, 'reasoning_adaptive', False):
                 self.reasoning_gate = ReasoningGate(cfg.D, max_steps=getattr(cfg, 'reasoning_max_steps', 8), know_dim=8)
@@ -147,8 +146,6 @@ class EVAStack(nn.Module):
             bridge_dim=getattr(cfg, 'mem_bridge_dim', getattr(cfg, 'bridge_dim', 256)),
             l1_slots=getattr(cfg, 'mem_l1_slots', 3),
             l2_slots=getattr(cfg, 'mem_l2_slots', 32),
-            l3_concepts=getattr(cfg, 'mem_l3_concepts', 8),
-            l3_birth_threshold=getattr(cfg, 'mem_l3_birth_threshold', 0.85),
             min_write_maturation=getattr(cfg, 'mem_min_write_mat', 0.3),
             cfg=cfg,
             tau_config=self.tau_config,
@@ -417,26 +414,33 @@ class EVAStack(nn.Module):
                     # the head). (B,L,1) -> (B,L,1,1) broadcasts over (G,Kmax).
                     probe_out = probe_out * self._last_salience.unsqueeze(-1)
                 fresh_i = probe_out.mean(dim=(0, 1), keepdim=True)  # (1,1,G,Kmax), grad
-                # Use tau_config.intent_alpha — v2 formula: 1 − exp(−tau_l/tau_min)
-                # fresh_i keeps gradient (probe is trainable via CE); bus is detached (cross-step).
-                _alpha_i = self.tau_config.intent_alpha[i].detach()
-                # U8: τ-scheduled per-expert α DEVIATION: base·(1 + (2σ(w)−1)(2τ−1)).
-                # Centered (audit M11): sigmoid(0)=0.5 used to apply an UNDOCUMENTED
-                # +0.5·(2τ−1) shift at init (α halved at shallow layers vs the v2
-                # formula the comment documents); w=0 now means exactly 'v2 base'.
-                # NOTE: w only feeds the next-step carried streams (no-BPTT
-                # streaming contract), so its gradient is intentionally not
-                # wired through time; learning it would require the block to
-                # consume its own blended slot — a design decision (see README
-                # U8 + audit report).
+                # Intent-stream carry coefficient: classic EMA whose carry
+                # fraction is the layer's OWN τ (horizon=τ_l): a = 1 − 1/τ_l.
+                # Audit decision #4 exposed the old form: intent_alpha(v2)=
+                # 1−exp(−τ_l/τ_min) saturates to 1.0 for τ_l ≥ 64·τ_min, so the
+                # deep-layer streams were frozen at their zero-init FOREVER
+                # (fresh never entered; 'slow integration' meant 'never').
+                # 1−1/τ keeps the ordering (deep carries longer) while every
+                # stream always admits 1/τ of new content. intent_alpha keeps
+                # its amplitude-authority role in the mirror.
+                _tau_l_i = self.tau_config.tau_l[i].detach().clamp(min=2.0)
+                _alpha_i = (1.0 - 1.0 / _tau_l_i)
+                # U8: τ-scheduled per-expert DEVIATION of the carry fraction:
+                # centered (2σ(w)−1) so w=0 means exactly the τ-horizon base.
                 _expert_mod = (2.0 * torch.sigmoid(self._w_alpha_expert) - 1.0) * (2.0 * self.tau_config.tau_norm[i].item() - 1.0)
-                _alpha_i_per_expert = (_alpha_i * (1.0 + _expert_mod)).clamp(0.0, 1.0)  # (G,)
+                _alpha_i_per_expert = (_alpha_i * (1.0 + _expert_mod)).clamp(0.0, 0.999)  # (G,)
                 _a = _alpha_i_per_expert.view(1, 1, -1, 1)  # (1, 1, G, 1)
                 intent_streams[i] = _a * _bus_carried[i] + (1.0 - _a) * fresh_i
                 # Streaming cross-layer bus (Bus): network-wide gist = mean over
                 # layers; FRESH for j<=i, CARRIED for j>i. Self-term (fresh_i)
                 # keeps the probe trainable; others give cross-layer communication.
-                _bus_running = _bus_running + fresh_i
+                # U8 LEARNABLE (audit decision #4): layer i additionally injects
+                # its per-expert-gated carried stream (fresh + α·carried, α=0
+                # when cold ⇒ step-0 identical). _w_alpha_expert therefore gets a
+                # same-step CE gradient through the mirror intent gate, while the
+                # probe keeps FULL fresh weight (a (1−α)·fresh own-term would
+                # have decoupled the probe exactly at the deep layers where α≈1).
+                _bus_running = _bus_running + fresh_i + _a * _bus_carried[i]
                 _bus_le_carried = _bus_le_carried + _bus_carried[i]
                 bus_i = (_bus_running + (_bus_sum - _bus_le_carried)) / n_layers  # (1,1,G,Kmax)
                 with torch.no_grad():
@@ -533,9 +537,13 @@ class EVAStack(nn.Module):
                 _pen = layer.mirror._cached_pred_error_norm
                 _resvar = layer.mirror._residual_var_ema.mean() if hasattr(layer.mirror, '_residual_var_ema') else None
                 _mat = mat_gate[0].item() if mat_gate is not None else 1.0
+                # Audit decision #5: the UCL writes during INFERENCE too —
+                # 'инференс = обучение' (README §1.4): consolidation is gated
+                # by maturation/confidence/novelty, not by train-mode. Eval
+                # contamination is quarantined by the M8 buffer snapshot.
                 _col_out = self.concept_layer(
                     h, hp=_hp, pen=_pen, resvar=_resvar,
-                    mat_gate=_mat, allow_write=self.training,
+                    mat_gate=_mat, allow_write=True,
                     gate=layer.mirror._cached_gate,
                     tau_norm=self.tau_config.tau_norm[0].item(),
                 )

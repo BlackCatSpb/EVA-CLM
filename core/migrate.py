@@ -68,4 +68,24 @@ def migrate_state_dict(
                 sd[name] = torch.tensor(1.0)
                 changed += 1
 
+    # Audit decisions #1/#2 migrations for the old-format checkpoints:
+    #  - thinking_head.* removed from the model  → drop the stale keys
+    #  - memory_bank.l3.* removed (UCL is the single concept store) → drop
+    #  - memory_bank.fusion.0.weight (D,4D) → (D,3D): drop the L3 column block
+    #  - memory_bank._fusion_tau_alpha (4,) → (3,)
+    for k in [key for key in sd
+              if key.startswith('thinking_head.') or key.startswith('memory_bank.l3.')]:
+        del sd[k]
+        changed += 1
+    fw = 'memory_bank.fusion.0.weight'
+    if fw in sd and sd[fw].dim() == 2:
+        D = sd[fw].shape[0]
+        if sd[fw].shape[1] == 4 * D:
+            sd[fw] = sd[fw][:, :3 * D].contiguous()
+            changed += 1
+    fa = 'memory_bank._fusion_tau_alpha'
+    if fa in sd and sd[fa].numel() == 4:
+        sd[fa] = sd[fa][:3].contiguous()
+        changed += 1
+
     return sd, changed

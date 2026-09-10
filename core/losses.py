@@ -392,8 +392,13 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             stack._cached_losses['mb_l1_overwrites'] = _mbd['l1_overwrites']
             stack._cached_losses['mb_l2_overwrites'] = _mbd['l2_overwrites']
             stack._cached_losses['mb_l2_consumed'] = _mbd['l2_consumed']
-            stack._cached_losses['mb_l3_births'] = _mbd['l3_n_births']
-            stack._cached_losses['mb_l3_updates'] = _mbd['l3_n_updates']
+            # decision #2: concept counters now come from the SINGLE concept
+            # store (UnifiedConceptLayer) — the retired bank-L3 keys keep their
+            # log labels so analyze.py dashboards stay readable.
+            if getattr(stack, 'concept_layer', None) is not None:
+                _ucld = stack.concept_layer.get_diagnostics()
+                stack._cached_losses['mb_l3_births'] = _ucld['concept_n_births']
+                stack._cached_losses['mb_l3_updates'] = _ucld['concept_n_updates']
             stack._cached_losses['mb_scale'] = _mbd['mem_scale']
         except Exception:
             pass
@@ -450,22 +455,23 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         aux_dict['gradalign'] = gradalign_term
     if log_scale_reg != 0:
         aux_dict['ls_reg'] = log_scale_reg
-    # ─── Memory bank log_tau: regularize toward prior + enforce L1 < L2 < L3 ───
+    # ─── Memory bank log_tau: regularize toward prior + enforce L1 < L2 ───
+    # (decision #2: the L3 tier of the hierarchy is the UCL, which owns its
+    #  own τ-knobs; the bank enforces only its remaining two levels)
     mem_tau_reg = 0.0
     if stack.memory_bank is not None:
         for level_name, mem_level in [('l1', stack.memory_bank.l1),
-                                       ('l2', stack.memory_bank.l2),
-                                       ('l3', stack.memory_bank.l3)]:
+                                       ('l2', stack.memory_bank.l2)]:
             if hasattr(mem_level, 'log_tau') and mem_level.log_tau.requires_grad:
                 # Soft weight-decay toward the initialized prior
                 if hasattr(mem_level, '_init_log_tau'):
                     mem_tau_reg = mem_tau_reg + (mem_level.log_tau - mem_level._init_log_tau).pow(2).mean()
                 else:
                     mem_tau_reg = mem_tau_reg + mem_level.log_tau.pow(2).mean() * 0.01
-        # Soft penalty: L1_tau should not exceed L3_tau (inversion = broken hierarchy)
-        if (hasattr(stack.memory_bank.l1, 'log_tau') and hasattr(stack.memory_bank.l3, 'log_tau')
-                and stack.memory_bank.l1.log_tau.requires_grad and stack.memory_bank.l3.log_tau.requires_grad):
-            inversions = F.relu(stack.memory_bank.l1.log_tau - stack.memory_bank.l3.log_tau)
+        # Soft penalty: L1_tau (fast) should not exceed L2_tau (slow)
+        if (hasattr(stack.memory_bank.l1, 'log_tau') and hasattr(stack.memory_bank.l2, 'log_tau')
+                and stack.memory_bank.l1.log_tau.requires_grad and stack.memory_bank.l2.log_tau.requires_grad):
+            inversions = F.relu(stack.memory_bank.l1.log_tau - stack.memory_bank.l2.log_tau)
             mem_tau_reg = mem_tau_reg + inversions.mean() * 0.1
     if mem_tau_reg != 0:
         aux_dict['mem_tau_reg'] = mem_tau_reg

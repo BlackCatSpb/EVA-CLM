@@ -736,6 +736,7 @@ def test_no_unregistered_dead_parameters():
     state = None
     for it in range(8):
         x = torch.randint(1, m.cfg.vocab, (1, 64))
+        x[:, 31] = 2  # deterministic SEP boundary (id 2) so L1 writes happen
         with torch.no_grad():
             h0 = m.embed_tokens(x)
             o0, _, _, _ = m(h0, state, step=20000 + it, tokens=x)
@@ -749,9 +750,7 @@ def test_no_unregistered_dead_parameters():
         opt.step()
         m._reasoning_buffer, m._reasoning_count = r
     ALLOW_REASONS = {
-        '_w_alpha_expert': 'U8 value-only on carried streams (no cross-step BPTT by design)',
         '._vsa_tau_log': 'standalone fallback ladder; excluded from the optimizer (M7)',
-        'thinking_head': 'not wired to supervision — open design decision (audit report)',
         'memory_bank.l2.': 'slot-event params: random data without real SEP boundaries keeps the L2 bank empty',
         'memory_bank.l3.': 'concept-value path needs accumulated concepts',
         'exact_memory': 'participates only while the precision gate is open (soft STE keeps the opener alive)',

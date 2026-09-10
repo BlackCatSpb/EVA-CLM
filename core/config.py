@@ -300,8 +300,6 @@ class WideBindConfig:
     memory_bank: bool = False       # enable streaming memory bank
     mem_l1_slots: int = 3           # L1 rolling buffer slots (immediate)
     mem_l2_slots: int = 32          # L2 learned bank slots (short-term)
-    mem_l3_concepts: int = 8        # L3 emergent concept slots (long-range)
-    mem_l3_birth_threshold: float = 0.85  # cosine sim threshold for concept birth
     mem_min_write_mat: float = 0.3  # min maturation before writes allowed (like private_mem)
     mem_bridge_dim: int = 256       # memory bank bridge dim (matches bridge_dim)
     concept_birth_novelty_threshold: float = 0.15  # birth only if d_min > threshold (best_sim < 1-threshold)
