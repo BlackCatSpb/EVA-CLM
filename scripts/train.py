@@ -467,7 +467,19 @@ def train(cfg=None, resume_path=None):
                         _mets['ig_eff'] = float(sum(_ige) / len(_ige))
             except Exception:
                 pass
-            if watchdog.check(ce_val, step, _mets):
+            _rb = watchdog.check(ce_val, step, _mets)
+            # M14b soft veto (mirror of notebook): >4 rel-margins over the
+            # fast-EMA CE level = escalation fuel, skip the gradient.
+            if not _rb:
+                _fc = watchdog._stats.get('ce')
+                if _fc:
+                    _soft_thr = _fc[0] * (1.0 + 4.0 * watchdog.rel_margin)
+                    if ce_val > _soft_thr:
+                        print(f'  [veto:soft] step {step}: ce={ce_val:.2f} > {_soft_thr:.2f} — skipped')
+                        h = out = ce_loss = aux_dict = None
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+            if _rb:
                 # free the current step graph BEFORE rebuilding state — the
                 # next forward must not run on top of retained activations
                 # (live-incident fix, see notebook cell 10)
