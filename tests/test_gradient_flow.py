@@ -98,24 +98,32 @@ class TestBackwardGradientPresence:
                 assert p.grad is not None, f'layer {i}.mirror.{n} missing grad'
 
     def test_mirror_w_sal_grad_with_salience(self):
-        """w_sal only gets gradient when salience is provided externally."""
+        """w_sal is DEAD without salience and LIVE with matching salience
+        (audit M11: the old body was `pass` — a permanently-green test)."""
         model = _make_model(intent_bridge=True)
-        x = torch.randint(0, SMALL['vocab'], (1, 8), device=device)
+        x = torch.randint(1, SMALL['vocab'], (1, 8), device=device)
         h = model.embed_tokens(x)
-        # Compute salience manually (mimics training loop's observe_output)
-        with torch.no_grad():
-            out, _, _, _ = model(h, step=5000)
-            sal = model.compute_salience(model.lm_head(out))
-            model._last_salience = sal
-        # Now forward with salience active
-        out, _, _, _ = model(h, step=5000)
+        # (a) no salience yet → w_sal must NOT receive gradient
+        out, _, _, _ = model(h, step=5000, tokens=x)
         loss = model.compute_loss(out[:, :-1], x[:, 1:])
         loss.backward()
         for i, layer in enumerate(model.layers):
-            if hasattr(layer.mirror, 'w_sal') and layer.mirror._intent_bridge:
-                # w_sal gets grad only when salience is passed to mirror forward
-                # This depends on _last_salience being set AND matching batch dims
-                pass  # gradient may or may not flow depending on salience shape match
+            if hasattr(layer.mirror, 'w_sal'):
+                assert layer.mirror.w_sal.grad is None or \
+                    float(layer.mirror.w_sal.grad.abs().sum()) == 0.0, \
+                    'w_sal received grad without salience (contract broken)'
+        model.zero_grad(set_to_none=True)
+        # (b) salience set with matching batch/seq → w_sal must receive grad
+        h = model.embed_tokens(x)  # fresh graph (previous backward freed it)
+        with torch.no_grad():
+            out0, _, _, _ = model(h, step=5000, tokens=x)
+            model._last_salience = model.compute_salience(model.lm_head(out0))
+        out, _, _, _ = model(h, step=5000, tokens=x)
+        loss = model.compute_loss(out[:, :-1], x[:, 1:])
+        loss.backward()
+        live = [float(layer.mirror.w_sal.grad.abs().sum())
+                for layer in model.layers if hasattr(layer.mirror, 'w_sal')]
+        assert sum(live) > 0.0, 'w_sal dead even WITH salience (regression)' 
 
     def test_bind_proj_grad(self):
         model = _make_model()
@@ -611,8 +619,8 @@ class TestMemoryBankGradient:
         out, _, _, _ = model(h, step=100000, tokens=x)
         loss = model.compute_loss(out[:, :-1], x[:, 1:])
         loss.backward()
-        assert model.memory_bank.log_scale.grad is not None or \
-               model.memory_bank.log_scale.numel() > 0
+        assert model.memory_bank.log_scale.grad is not None, \
+            'memory_bank.log_scale never reached (or-numer-tautology was vacuous)'
 
 
 # ═══════════════════════════════════════════════════════════════════════

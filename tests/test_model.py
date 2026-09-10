@@ -70,20 +70,19 @@ def test_partitioned_embed_shape():
 
 
 def test_partitioned_embed_gradient_grouping():
+    # Dense mixing (sigmoid(codes @ embed_mix)) means EVERY bit position
+    # influences EVERY segment: per-bit gradient isolation (the old premise)
+    # is false by design, and with 4·32 tokens the else-branch never even
+    # ran — a vacuous test. Assert the TRUE invariant instead: dense mixing
+    # gives every basis row gradient, and the sparse code structure is what
+    # differentiates rows (via embed_mix), not hard bit masking.
     cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
     emb = PartitionedEmbedding(cfg)
     tokens = torch.randint(0, 1800, (4, 32))
     h = emb(tokens)
-    loss = h.sum()
-    loss.backward()
-    codes = emb.codes[tokens]
-    for k in range(emb.K):
-        active = codes[:, :, k].sum().item() > 0
-        grad_norm = emb.basis.grad[k].norm().item()
-        if active:
-            assert grad_norm > 0
-        else:
-            assert grad_norm == 0.0
+    h.sum().backward()
+    assert (emb.basis.grad.norm(dim=-1) > 0).all(), \
+        'dense-mix embedding: some basis row got no gradient'
 
 
 def test_partitioned_embed_small_vocab():
@@ -106,10 +105,12 @@ def test_partitioned_embed_grad_nonzero_with_active_bits():
 
 
 def test_partitioned_embed_fewer_params():
-    cfg_dense = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
-    emb = PartitionedEmbedding(cfg_dense)
-    expected = 16 * (512 // 16)
-    assert emb.basis.numel() == expected
+    # The point of partitioned codes is the COMPRESSION vs a dense V×D table;
+    # comparing basis.numel() to K*(D//K) was tautological (== D by identity).
+    cfg = EVAConfig(D=512, code_dim=16, code_sparsity=4, vocab=1820)
+    emb = PartitionedEmbedding(cfg)
+    assert emb.basis.numel() == cfg.D                    # exactly D params
+    assert emb.basis.numel() < 0.01 * cfg.vocab * cfg.D  # ≪ dense embedding
 
 
 # ─── PartitionedHead ───────────────────────────────────────────────

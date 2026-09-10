@@ -601,20 +601,27 @@ class StreamingMemoryBank(nn.Module):
         mem_l2 = self.l2.read(h)  # (B, L, D)
         mem_l3 = self.l3.read(h)  # (B, L, D)
 
-        # Fusion: combine current + L1 + L2 + L3
-        combined = torch.cat([h, mem_l1, mem_l2, mem_l3], dim=-1)  # (B, L, 4D)
+        # U6 (audit M11 made it real): _fusion_tau_alpha is an actual
+        # learnable PER-LEVEL modulation — exp(offset) on each [h, L1, L2, L3]
+        # block before fusion, zero-init ⇒ identity (checkpoint-safe). The
+        # parameter previously existed, sat in the optimizer and modulated
+        # nothing.
+        alpha = self._fusion_tau_alpha.to(h.dtype).exp()        # (4,), ≈1 at init
+        w = torch.stack([alpha[0] * h, alpha[1] * mem_l1,
+                         alpha[2] * mem_l2, alpha[3] * mem_l3], dim=-2)
+        D = h.shape[-1]
+        combined = w.reshape(*h.shape[:-1], 4 * D)               # (B, L, 4D)
         fused = self.fusion(combined)  # (B, L, D)
 
         # Injection with bounded scale
         scale = torch.tanh(self.log_scale)  # in (-1, 1)
 
-        # U6: τ-consistent fusion scaling — modulate injection by τ_norm
+        # τ-consistent injection schedule (tensor, no CPU sync):
+        # τ-low layers (fast, shallow): less memory injection
+        # τ-high layers (slow, deep): more memory injection
         if self.tau_config is not None and hasattr(self.tau_config, 'tau_norm'):
             tau_norm = self.tau_config.tau_norm.mean()
-            # τ-low layers (fast, shallow): less memory injection
-            # τ-high layers (slow, deep): more memory injection
-            tau_fusion_scale = 0.3 + 0.7 * tau_norm.item()
-            scale = scale * tau_fusion_scale
+            scale = scale * (0.3 + 0.7 * tau_norm)
 
         # When maturation too low, bypass memory bank entirely (no-op)
         if not _can_write:

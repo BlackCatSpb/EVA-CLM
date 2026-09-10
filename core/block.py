@@ -247,8 +247,16 @@ class EVABlock(nn.Module):
         self.w_mu_mem = nn.Parameter(torch.randn(cfg.D))
         
         # ─── Conv ───
+        # Audit M11: causality is implemented EXPLICITLY by prepending the
+        # streamed conv_state (kernel−1 zeros at stream start) — the module
+        # must not add its own padding on top (padding=47 + manual cat(47)
+        # double-shifted the window to h[t−94..t−47]: blind to the last 47
+        # tokens and STRICTLY zero for sequences shorter than 94 — exactly the
+        # zero-grad the dead-parameter sweep reported). Mirror.conv_smooth
+        # (padding=0 + F.pad) already uses this correct pattern.
         self.conv = nn.Conv1d(cfg.D, cfg.D, kernel_size=cfg.conv_kernel,
-                              padding=cfg.conv_kernel - 1, groups=cfg.D, bias=False)
+                              padding=0, groups=cfg.D, bias=False)
+        self._conv_pad: int = cfg.conv_kernel - 1
         nn.init.kaiming_normal_(self.conv.weight, mode='fan_in', nonlinearity='linear')
         
         # ─── Spectral (self-organizing frequency filters) ───
@@ -330,7 +338,7 @@ class EVABlock(nn.Module):
         S = self._n_scales
         
         # Consistent NaN state shapes (prevent ndim mismatch in next step)
-        _nan_conv = torch.zeros(B, D, self.conv.padding[0], device=device) * NaN
+        _nan_conv = torch.zeros(B, D, self._conv_pad, device=device) * NaN
         _nan_mem = torch.zeros(B, S * D, device=device) * NaN
         
         # Transfer stale mirror cache (with shape & dtype check)
@@ -344,11 +352,11 @@ class EVABlock(nn.Module):
         
         # ─── Conv ───
         if conv_state is None:
-            conv_state = torch.zeros(B, D, self.conv.padding[0], device=device, dtype=h.dtype)
+            conv_state = torch.zeros(B, D, self._conv_pad, device=device, dtype=h.dtype)
         h_perm = h.transpose(1, 2)
         h_conv = self.conv(torch.cat([conv_state, h_perm], dim=-1))
         h_conv = h_conv[..., :L].transpose(1, 2)
-        conv_state_out = h_perm[:, :, -(self.conv.padding[0]):]
+        conv_state_out = h_perm[:, :, -self._conv_pad:]
         h = h + h_conv
         if _chk(h, 'conv'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         if self.training:
@@ -529,9 +537,17 @@ class EVABlock(nn.Module):
             # Гейт встроен тензорной маской (не python-if): статический граф.
             with torch.autocast(device_type=h.device.type, enabled=False):
                 precision = self.precision_gate(h.float())
-                gate = (precision.mean() > self.precision_threshold).to(h.dtype)
+                hard = (precision.mean() > self.precision_threshold).to(h.dtype)
+                # Audit M11: a purely boolean gate DEADLOCKS — the moment the
+                # mean drops below the threshold, gradients die for the gate
+                # AND exact_memory, so nothing can ever reopen it (observed as
+                # permanently-zero grads). Straight-through: forward stays the
+                # hard switch; d/d(precision) flows through the soft term, so
+                # the opener can always learn to re-engage exact memory.
+                # value: hard; grad w.r.t. precision.mean(): 1 (even while 0)
+                soft_gate = hard + (precision.mean() - precision.mean().detach())
                 exact = self.exact_memory(h.float())
-                h = h + (precision * exact * gate).to(h.dtype)
+                h = h + (precision * exact * soft_gate).to(h.dtype)
             if self.training:
                 self._precision_mean = precision.mean()
 

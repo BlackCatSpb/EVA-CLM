@@ -720,6 +720,56 @@ def test_reasoning_gate_init():
     assert abs(float(out[..., 1:].mean())) < 0.3, 'later gates start near 0'
 
 
+# ── M11 DEAD-PARAMETER DETECTOR: unregistered zero-grad params fail loudly ───
+def test_no_unregistered_dead_parameters():
+    """8-step full-objective SGD on a capability-on mini model; every parameter
+    that receives no gradient must be on the explicit reason-allowlist
+    (audit M11 / A5: 'architecturally dead' must be DECLARED, not discovered
+    by chance; any NEW silently-dead param — renamed path, broken wiring —
+    fails this test)."""
+    m = _stack(intent_bridge=True, memory_bank=True, bridge_conn=0.1,
+               unified_concept_layer=True, explicit_reasoning=True)
+    for b in m.layers:                      # keep the exact-memory path open
+        with torch.no_grad():
+            b.precision_gate.gate.bias.fill_(3.0)
+    opt = torch.optim.SGD(m.parameters(), lr=0.02)
+    state = None
+    for it in range(8):
+        x = torch.randint(1, m.cfg.vocab, (1, 64))
+        with torch.no_grad():
+            h0 = m.embed_tokens(x)
+            o0, _, _, _ = m(h0, state, step=20000 + it, tokens=x)
+            m.observe_output(m.lm_head(o0))          # salience for next step
+        h = m.embed_tokens(x)
+        out, state, gs, r = m(h, state, step=20000 + it, tokens=x)
+        loss, aux = m.compute_losses(out, x, h_emb=h)
+        total = loss + sum(v for v in aux.values() if isinstance(v, torch.Tensor))
+        opt.zero_grad(set_to_none=True)
+        total.backward()
+        opt.step()
+        m._reasoning_buffer, m._reasoning_count = r
+    ALLOW_REASONS = {
+        '_w_alpha_expert': 'U8 value-only on carried streams (no cross-step BPTT by design)',
+        '._vsa_tau_log': 'standalone fallback ladder; excluded from the optimizer (M7)',
+        'thinking_head': 'not wired to supervision — open design decision (audit report)',
+        'memory_bank.l2.': 'slot-event params: random data without real SEP boundaries keeps the L2 bank empty',
+        'memory_bank.l3.': 'concept-value path needs accumulated concepts',
+        'exact_memory': 'participates only while the precision gate is open (soft STE keeps the opener alive)',
+        'precision_gate': 'depends on gate state per step',
+        'concept_layer.log_tau_': 'write-side knobs fire only on confident novel events',
+        'concept_layer._log_tau_': 'same conf-gated write path',
+        'w_sal': 'needs external salience (covered by the dedicated test above)',
+    }
+    dead = []
+    for n, p in m.named_parameters():
+        if p.grad is not None and float(p.grad.abs().sum()) > 0.0:
+            continue
+        if not any(k in n for k in ALLOW_REASONS):
+            dead.append(n)
+    assert not dead, 'UNREGISTERED dead parameters (new silent zero-grad?): ' \
+                     + ', '.join(dead[:12])
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

@@ -362,15 +362,16 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
                 _taus_items.append(1.0)
         with torch.no_grad():
             _gates_t = torch.tensor(_gates_items)
+            _gates_std = (_gates_t.std().item() if _gates_t.numel() > 1 else 0.0)
             stack._cached_losses['lbg_mean'] = _gates_t.mean().item()
-            stack._cached_losses['lbg_std'] = _gates_t.std().item()
+            stack._cached_losses['lbg_std'] = _gates_std
             stack._cached_losses['lbg_min'] = _gates_t.min().item()
             stack._cached_losses['lbg_max'] = _gates_t.max().item()
             stack._cached_losses['lbg_tau'] = sum(_taus_items) / len(_taus_items) if _taus_items else 0.0
             stack._cached_losses['lbg_global_ready'] = 1.0 if _gr else 0.0
             _lbg_aux = {
                 'layer_gate_mean': _gates_t.mean().item(),
-                'layer_gate_std': _gates_t.std().item(),
+                'layer_gate_std': _gates_std,
                 'layer_gate_min': _gates_t.min().item(),
                 'layer_gate_max': _gates_t.max().item(),
                 'lbg_global_ready': 1.0 if _gr else 0.0,

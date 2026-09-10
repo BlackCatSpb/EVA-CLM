@@ -420,8 +420,16 @@ class EVAStack(nn.Module):
                 # Use tau_config.intent_alpha — v2 formula: 1 − exp(−tau_l/tau_min)
                 # fresh_i keeps gradient (probe is trainable via CE); bus is detached (cross-step).
                 _alpha_i = self.tau_config.intent_alpha[i].detach()
-                # U8: τ-modulated expert alpha: base * (1 + sigmoid(w) * (2·τ_norm - 1))
-                _expert_mod = torch.sigmoid(self._w_alpha_expert) * (2.0 * self.tau_config.tau_norm[i].item() - 1.0)
+                # U8: τ-scheduled per-expert α DEVIATION: base·(1 + (2σ(w)−1)(2τ−1)).
+                # Centered (audit M11): sigmoid(0)=0.5 used to apply an UNDOCUMENTED
+                # +0.5·(2τ−1) shift at init (α halved at shallow layers vs the v2
+                # formula the comment documents); w=0 now means exactly 'v2 base'.
+                # NOTE: w only feeds the next-step carried streams (no-BPTT
+                # streaming contract), so its gradient is intentionally not
+                # wired through time; learning it would require the block to
+                # consume its own blended slot — a design decision (see README
+                # U8 + audit report).
+                _expert_mod = (2.0 * torch.sigmoid(self._w_alpha_expert) - 1.0) * (2.0 * self.tau_config.tau_norm[i].item() - 1.0)
                 _alpha_i_per_expert = (_alpha_i * (1.0 + _expert_mod)).clamp(0.0, 1.0)  # (G,)
                 _a = _alpha_i_per_expert.view(1, 1, -1, 1)  # (1, 1, G, 1)
                 intent_streams[i] = _a * _bus_carried[i] + (1.0 - _a) * fresh_i
