@@ -8,9 +8,16 @@ Handles old checkpoints that carry pre-BottleneckBind keys:
 Usage:
     sd, changed = migrate_state_dict(sd, model)
 
-Numerically equivalent to the previous behavior:
-  - W_out: first rows copied, tail zeroed
-  - bind_coh_gate = 0.0 (coherence disabled)
+Migration values (audit M10 — honest about what each choice means):
+  - W_out: first rows copied, tail zeroed (numeric continuity for the shared
+    span; the extra rows start inert)
+  - bind_coh_gate = 0.0 — coherence gate closed: the legacy forward had no
+    coherence modulation, so 0 disables the new term (exact equivalence)
+  - freq_scale = 1.0 — the legacy spiral ran with implicit unit frequency
+    scale; NOTE this is NOT the fresh-init value (2*pi, TrajectorySpiralBind
+    __init__), so a migrated model keeps the old frequency range instead of
+    jumping 6.28x — equivalence with the LEGACY checkpoint, not with a new
+    model. Re-anneal if the wider range is desired.
   - freq_scale = 1.0 (legacy frequency scale)
 """
 from __future__ import annotations

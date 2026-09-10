@@ -170,9 +170,12 @@ class LiveInference:
     def think(self, n_steps: int = 1, h: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Run internal self-dialogue steps.
 
-        If h is None, feeds a zero activation (minimal "think" token).
-        Between steps, the last output is fed as next input so the
-        internal state evolves continuously.
+        If h is None AND there is no pending input, feeds a zero activation
+        (the deliberate minimal "think" stimulus). Between steps and ACROSS
+        calls (generate()), the caller feeds the previous output back as h so
+        the internal state evolves continuously (audit M9: generate() used to
+        pass h=None every token, so every generated step 'thought' on an empty
+        input instead of the previous token — corrupted autoregressive decode).
 
         Returns the final hidden state after n_steps.
         """
@@ -229,18 +232,22 @@ class LiveInference:
 
     def generate(self, prompt_ids: torch.Tensor, gen_len: int = 100, think_steps: int = 0) -> list[int]:
         """Convenience: think (optional) -> prefill -> generate tokens."""
-        self.respond(self.model.embed_tokens(prompt_ids))
+        last_hidden = self.respond(self.model.embed_tokens(prompt_ids))
 
         for _ in range(think_steps):
-            self.think()
+            last_hidden = self.think()
 
         tokens: list[int] = []
-        h = None  # will use last output from respond
-        for _ in range(gen_len):
-            out = self.think(n_steps=1, h=h)
-            logits = self.model.lm_head(out)
-            next_id = logits[:, -1].argmax(dim=-1).item()
-            tokens.append(next_id)
-            h = None  # think() will use its own loopback
+        # Audit M9: feed the ACTUAL previous token's embedding back every step
+        # (was h=None ⇒ a zero vector each step, so generation ran on empty
+        # inputs and only the carried state mattered), and never build graphs.
+        with torch.no_grad():
+            h: Optional[torch.Tensor] = last_hidden[:, -1:, :]
+            for _ in range(gen_len):
+                out = self.think(n_steps=1, h=h)
+                logits = self.model.lm_head(out)
+                next_tok = logits[:, -1].argmax(dim=-1, keepdim=True)
+                tokens.append(int(next_tok.item()))
+                h = self.model.embed_tokens(next_tok)
 
         return tokens

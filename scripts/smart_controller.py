@@ -178,7 +178,9 @@ class SmartController:
 
     def sample(self, logits, temp, top_p, top_k, rep_pen):
         logits = logits.clone()
-        for rid in list(set(self.recent))[-self.rep_window:]:
+        # order-preserving window (audit M10): set() iterated in arbitrary
+        # order — the penalty hit random tokens instead of the recent ones
+        for rid in self.recent[-self.rep_window:]:
             logits[rid] -= rep_pen
         if temp != 1.0:
             logits = logits / temp

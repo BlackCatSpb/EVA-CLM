@@ -17,10 +17,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
 
 
-REMOVABLE_PATTERNS = {'V_dct', 'codes'}
+# EXACT buffer names that are deterministic functions of cfg and are
+# regenerated on decompress (audit M10: substring patterns dropped ANY key
+# containing e.g. 'codes' and never verified re-creation — a future
+# '*_codes' buffer would vanish silently under strict=False loads).
+REMOVABLE_SUFFIXES = ('.V_dct', 'embed.codes', 'lm_head.codes')
 
 def is_removable(k: str) -> bool:
-    return any(p in k for p in REMOVABLE_PATTERNS)
+    return k.endswith(REMOVABLE_SUFFIXES)
 
 def is_scalar_gate(k: str, v: Optional[torch.Tensor] = None) -> bool:
     """True for b_i/b_d ONLY if tensor is still uniform (safe to scalar-fold)."""
@@ -93,7 +97,11 @@ def dequantize_tensor_channel(indices: torch.Tensor, mins: torch.Tensor, scales:
     dim = 0 if orig_shape[0] == n_ch else (1 if len(orig_shape) > 1 and orig_shape[1] == n_ch else 0)
     for i in range(n_ch):
         if scales[i] == 0.0:
-            sl = torch.full((orig_shape[1] if dim == 0 else orig_shape[0],), mins[i].item(), dtype=dtype)
+            # constant channel: fill the FULL cross-section (audit M10 — the
+            # old 1-D slice was wrong for ≥3-D tensors: (d1,) does not match
+            # a (d1,d2) channel plane)
+            cross = tuple(orig_shape[:dim] + orig_shape[dim + 1:])
+            sl = torch.full(cross, mins[i].item(), dtype=dtype)
         else:
             sl = indices.select(dim, i).float() * scales[i] + mins[i]
         restored.select(dim, i).copy_(sl)
@@ -169,7 +177,8 @@ class FCF_CPR:
         
         for k, v in sd.items():
             if is_removable(k):
-                continue  # skip entirely
+                meta.setdefault('__removable__', []).append(k)
+                continue  # skip entirely (deterministic; re-added on load)
             
             if is_scalar_gate(k, v):
                 result[k] = v[0:1].clone()
@@ -246,6 +255,14 @@ class FCF_CPR:
         sd['embed.codes'] = codes.clone()
         sd['lm_head.codes'] = codes.clone()
         
+        # Verify the registry closed: every dropped removable key must be
+        # re-created (fail LOUD instead of hiding behind strict=False).
+        missing = [k for k in meta.get('__removable__', []) if k not in sd]
+        if missing:
+            raise KeyError(
+                f'compression registry gap: {len(missing)} removable buffer(s) '
+                f'were dropped but not re-created, e.g. {missing[:3]} — add '
+                f'their regeneration to decompress_sd')
         return sd
     
     def save_compressed(self, ckpt: dict[str, Any], save_path: str) -> int:

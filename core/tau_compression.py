@@ -75,6 +75,10 @@ def decompress_uniform8(idx, t_min, scale, shape, dtype):
 
 
 def compress_sparse_topk(t: torch.Tensor, k: int = 128) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if t.shape[-1] > 65536:
+        # uint16 index storage: >65536 vocabulary would silently wrap indices
+        # (audit M10 — explicit instead of corrupt).
+        raise ValueError(f'compress_sparse_topk: vocab {t.shape[-1]} > 65536 (uint16 index cap)')
     topk_vals, topk_idx = t.topk(k, dim=-1)
     vmin, vmax = topk_vals.min().item(), topk_vals.max().item()
     scale = (vmax - vmin) / 255.0 if vmax > vmin else 1.0
@@ -86,7 +90,9 @@ def decompress_sparse_topk(idx_pos, idx_vals, meta, shape, dtype):
     B, L, V = shape
     vmin, scale = meta[0].item(), meta[1].item()
     vals = idx_vals.float() * scale + vmin
-    result = torch.full((B, L, V), float('-inf'), dtype=dtype)
+    # device must follow the tensors (audit M10: torch.full without device=
+    # built a CPU result, so the CUDA scatter_ crashed / desynced silently).
+    result = torch.full((B, L, V), float('-inf'), dtype=dtype, device=idx_vals.device)
     result.scatter_(-1, idx_pos.long(), vals.to(dtype))
     return result
 

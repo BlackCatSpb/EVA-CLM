@@ -16,9 +16,12 @@ import torch
 def load_cfg_and_model(ckpt_path, codebase=None):
     if codebase is not None:
         sys.path.insert(0, codebase)
-    from core import model as _mod, config as _cfg
-    CfgCls = getattr(_cfg, 'EVAConfig', getattr(_cfg, 'WideBandConfig', None))
-    ModelCls = getattr(_mod, 'EVAStack', getattr(_mod, 'WideBandStack', None))
+    from core import stack as _mod, config as _cfg
+    # audit M10: 'core.model' moved to archive/ and the fallback names had
+    # typos (WideBand→WideBind); resolve the real exports with getattr
+    # fallbacks so this tool runs again on current checkpoints.
+    CfgCls = getattr(_cfg, 'EVAConfig', getattr(_cfg, 'WideBindConfig', None))
+    ModelCls = getattr(_mod, 'EVAStack', getattr(_mod, 'WideBindStack', None))
     if CfgCls is None or ModelCls is None:
         raise ImportError(f'Cannot find Config/Model class in {codebase or "."}')
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)

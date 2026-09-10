@@ -403,8 +403,12 @@ class EVABlock(nn.Module):
         decay = (d_s_vec * d_mod_vec).clamp(min=0.01, max=1.0)  # per-scale per-channel, floor 0.01 cap 1.0
 
         # Dynamic write modulation (per-expert K-space conditioning)
+        # Audit M10 (A1): the per-expert write modulation ran ONLY in
+        # training, so streaming-inference memory writes followed a different
+        # rule than training writes. The stale (previous-step) hp cache is
+        # causally legal at eval too — run both paths identically.
         hp_cached = self.mirror._cached_hp
-        if (hp_cached is not None and self.training
+        if (hp_cached is not None
                 and hp_cached.shape[0] == B and hp_cached.shape[1] == L):
             g = self.mirror.G
             d = self.mirror.d
