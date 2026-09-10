@@ -88,4 +88,15 @@ def migrate_state_dict(
         sd[fa] = sd[fa][:3].contiguous()
         changed += 1
 
+    # decision #3: the logit-cache K/V/logit→hidden projections were V×D
+    # (65536×D); the code-space replacements are K×D with different shapes —
+    # old weights cannot migrate (different semantics), drop them so the
+    # cache re-inits (zero gate ⇒ identity ⇒ safe).
+    for k in [key for key in list(sd)
+              if key.startswith('logit_cache.attention.k_proj_l.')
+              or key.startswith('logit_cache.attention.v_proj_l.')
+              or key.startswith('logit_cache.logit_to_hidden.')]:
+        del sd[k]
+        changed += 1
+
     return sd, changed

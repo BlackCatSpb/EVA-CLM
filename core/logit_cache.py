@@ -2,8 +2,10 @@
 logit_cache.py — Per-scale LogitCache with dual-mode: training + inference.
 
 Training mode:
-  - Stores hidden states h (full, no compression)
-  - Gradient flows through cache → model learns to produce useful representations
+  - Stores hidden states h; the CURRENT step's entry is live (gradient flows),
+    PAST entries are detached on retrieve — back-propagating through the
+    already-freed graphs of previous steps raised
+    "backward through the graph a second time" (audit decision #3).
   - Memory: D × 4 bytes/token = 10 KB/token (seq_len=128 → 1.3 MB)
 
 Inference mode:
@@ -37,12 +39,17 @@ class LogitCache(nn.Module):
     Inference: stores compressed logits for memory efficiency.
     """
 
-    def __init__(self, V: int, D: int, max_tokens: int = 1_000_000,
+    def __init__(self, V: int, D: int, max_entries: int = 64,
                  n_scales: int = 4, device: torch.device = torch.device('cpu')):
         super().__init__()
         self.V = V
         self.D = D
-        self.max_tokens = max_tokens
+        # Audit decision #3: each stored entry is a FULL (B, L, D) tensor —
+        # the old `max_tokens` cap counted ENTRIES while its name (and the
+        # 102_400 config value) promised tokens: a 102400-"token" cache is
+        # 102400 × L × D floats. Capped by entries now; window semantics live
+        # in retrieve(n=…steps).
+        self.max_entries = max_entries
         self.n_scales = n_scales
         self.device = device
 
@@ -72,13 +79,13 @@ class LogitCache(nn.Module):
         if training:
             # Store h directly (no compression, gradient flows - NO detach!)
             self._h_cache.append(h_or_logits)
-            if len(self._h_cache) > self.max_tokens:
+            if len(self._h_cache) > self.max_entries:
                 self._h_cache.pop(0)
         else:
             # Store compressed logits (no gradient)
             compressed = self._compress(h_or_logits)
             self._logit_cache.append(compressed)
-            if len(self._logit_cache) > self.max_tokens:
+            if len(self._logit_cache) > self.max_entries:
                 self._logit_cache.pop(0)
 
         self._position += 1
@@ -97,6 +104,10 @@ class LogitCache(nn.Module):
             if not self._h_cache:
                 return None
             entries = self._h_cache[-n:] if n else self._h_cache
+            # Past steps: detached (their graphs are freed after opt.step);
+            # the newest entry may be the live current-step tensor.
+            if len(entries) > 1:
+                entries = [e.detach() for e in entries[:-1]] + [entries[-1]]
             return torch.cat(entries, dim=1)
         else:
             if not self._logit_cache:
@@ -168,11 +179,26 @@ class LogitAttention(nn.Module):
     """
 
     def __init__(self, D: int, V: int, n_heads: int = 8,
-                 max_cache_len: int = 1024):
+                 max_cache_len: int = 1024, codes: torch.Tensor | None = None,
+                 sparsity: float = 1.0):
         super().__init__()
         self.D = D
         self.V = V
         self.n_heads = n_heads
+        # ── audit decision #3: code-space logit projections ──
+        # The old K/V/logit→hidden maps were V×D (3×65536×2560 ≈ 503M dead
+        # params, contradicting README §1.1 'no big d×vocab matrices'). The
+        # head's own sparse block code is the native VSA view of the logit
+        # field: logits are summarized by per-BIT evidence (V→K matmul with
+        # the fixed binary codebook = free), and everything learnable is K→D
+        # (32×2560).
+        if codes is not None:
+            self.register_buffer('codes_t', codes.float().T.contiguous(), persistent=False)  # (K,V)
+            self.K_bits = int(codes.shape[1])
+        else:
+            self.codes_t = None
+            self.K_bits = None
+        self._bit_norm = float(max(sparsity, 1e-6))
         self.head_dim = D // n_heads
         assert D % n_heads == 0, f"D={D} must be divisible by n_heads={n_heads}"
 
@@ -181,9 +207,14 @@ class LogitAttention(nn.Module):
         self.k_proj_h = nn.Linear(D, D, bias=False)  # h → D
         self.v_proj_h = nn.Linear(D, D, bias=False)  # h → D
 
-        # Projections for logits (inference mode)
-        self.k_proj_l = nn.Linear(V, D, bias=False)  # logits → D
-        self.v_proj_l = nn.Linear(V, D, bias=False)  # logits → D
+        # Projections for the CODE-SPACE logit summary (inference mode):
+        # (…,K) → D instead of the retired V×D matrices.
+        if self.codes_t is not None:
+            self.k_proj_l = nn.Linear(self.K_bits, D, bias=False)
+            self.v_proj_l = nn.Linear(self.K_bits, D, bias=False)
+        else:
+            self.k_proj_l = None
+            self.v_proj_l = None
 
         self.out_proj = nn.Linear(D, D, bias=False)
 
@@ -208,6 +239,11 @@ class LogitAttention(nn.Module):
         # Initialize: start as no-op (cache_gate ≈ 0)
         nn.init.zeros_(self.cache_gate[-2].weight)
         nn.init.zeros_(self.cache_gate[-2].bias)
+
+    def bit_profile(self, logits: torch.Tensor) -> torch.Tensor:
+        """Per-bit evidence of a logit field, in the head's sparse block code.
+        (…,V) → (…,K); fixed codebook matmul, O(1) parameters, tanh-bounded."""
+        return torch.tanh(logits / 10.0) @ self.codes_t / self._bit_norm
 
     def forward(self, h: torch.Tensor, cache: LogitCache,
                 training: bool = True,
@@ -250,16 +286,20 @@ class LogitAttention(nn.Module):
         Q = self.q_proj(h)
 
         # Project K, V from cached data
-        positions = torch.arange(M, device=h.device).unsqueeze(0).expand(B, -1)
+        # position ids modulo the embedding table (the old arange(M) raised
+        # IndexError once the entry-window exceeded max_cache_len at L>2)
+        positions = (torch.arange(M, device=h.device)
+                     % self.pos_enc.num_embeddings).unsqueeze(0).expand(B, -1)
 
         if training:
             # h mode: project h → D
             K = self.k_norm(self.k_proj_h(cached)) + self.pos_enc(positions)
             V_cache = self.v_norm(self.v_proj_h(cached))
         else:
-            # logits mode: project logits → D
-            K = self.k_norm(self.k_proj_l(cached)) + self.pos_enc(positions)
-            V_cache = self.v_norm(self.v_proj_l(cached))
+            # logits mode: summarize into the code space, project K → D
+            prof = self.bit_profile(cached)
+            K = self.k_norm(self.k_proj_l(prof)) + self.pos_enc(positions)
+            V_cache = self.v_norm(self.v_proj_l(prof))
 
         # Multi-head attention
         Q = Q.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
@@ -299,15 +339,20 @@ class LogitCacheAttention(nn.Module):
     """
 
     def __init__(self, D: int, V: int, n_layers: int = 24,
-                 max_tokens: int = 1_000_000, n_heads: int = 8,
-                 scheduled_sampling_ratio: float = 0.05):
+                 max_entries: int = 64, n_heads: int = 8,
+                 scheduled_sampling_ratio: float = 0.05,
+                 codes: torch.Tensor | None = None, sparsity: float = 1.0):
         super().__init__()
-        self.cache = LogitCache(V, D, max_tokens, n_scales=4)
-        self.attention = LogitAttention(D, V, n_heads)
+        self.cache = LogitCache(V, D, max_entries, n_scales=4)
+        self.attention = LogitAttention(D, V, n_heads, codes=codes, sparsity=sparsity)
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
 
-        # Project logits to hidden space (for inference mode)
-        self.logit_to_hidden = nn.Linear(V, D, bias=False)
+        # Project the CODE-SPACE logit summary to hidden space (inference
+        # mode). Was V×D xavier; now K×D — decision #3 (K known only when
+        # codes are provided; keep a small fallback of zeros to avoid a dead
+        # giant matrix when they are not).
+        _kdim = int(codes.shape[1]) if codes is not None else 64
+        self.logit_to_hidden = nn.Linear(_kdim, D, bias=False)
         nn.init.xavier_uniform_(self.logit_to_hidden.weight, gain=0.01)
 
     def forward(self, h: torch.Tensor, logits: torch.Tensor,
@@ -332,7 +377,7 @@ class LogitCacheAttention(nn.Module):
         # use inference-mode (compressed logits) during training to align
         # train/inference representations.
         use_inference_mode = False
-        if training and self.scheduled_sampling_ratio > 0:
+        if training and self.scheduled_sampling_ratio > 0 and logits is not None:
             if torch.rand(1).item() < self.scheduled_sampling_ratio:
                 use_inference_mode = True
 
@@ -354,11 +399,23 @@ class LogitCacheAttention(nn.Module):
             h_augmented = h
 
         # In inference mode: also project cached logits to hidden space
-        if not training or use_inference_mode:
+        if (not training or use_inference_mode) and self.attention.codes_t is not None:
             cached_logits = self.cache.retrieve(n=1, training=False)
             if cached_logits is not None:
-                cached_h = self.logit_to_hidden(cached_logits)
+                cached_h = self.logit_to_hidden(self.attention.bit_profile(cached_logits))
                 if not torch.isnan(cached_h).any():
                     h_augmented = h_augmented + cached_h
 
         return h_augmented, logits
+
+    def augment(self, h: torch.Tensor) -> torch.Tensor:
+        """Training/inference-loop integration (decision #3).
+
+        Stores the current hidden state (the live newest entry keeps a
+        same-step gradient; older entries detach on retrieve) and attends
+        the cache over it. cache_gate is zero-init ⇒ output == h until CE
+        learns to consult the cache — identity at init, checkpoint/rollback
+        safe.
+        """
+        out = self.forward(h, logits=None, training=True, use_cache=True)[0]
+        return out if torch.isfinite(out).all() else h

@@ -387,6 +387,8 @@ def train(cfg=None, resume_path=None):
                     model.bridge.bridge_stream.zero_()  # reset bridge memory at document boundary
                 if getattr(model, 'memory_bank', None) is not None:
                     model.memory_bank.reset()  # reset streaming banks at document boundary
+                if getattr(model, 'logit_cache', None) is not None:
+                    model.logit_cache.cache.clear()  # new document ⇒ empty cache (decision #3)
                 if model.explicit_reasoning:
                     model.reset_reasoning()  # new document: new chain
             stream = streams[stream_idx]
@@ -621,6 +623,9 @@ def evaluate(model, streams, cfg, device):
     # working memory; (c) adaptive=False matches the notebook (controller
     # buffers must not learn from val); (d) fresh state per batch.
     _rt_snap = model.snapshot_runtime_buffers()
+    _lc = getattr(model, 'logit_cache', None)
+    if _lc is not None:
+        _lc.cache.clear()  # val windows must not enter the train cache (decision #3)
     if getattr(model, 'explicit_reasoning', False):
         model.reset_reasoning()
     total_loss = 0.0
@@ -641,6 +646,8 @@ def evaluate(model, streams, cfg, device):
         total_loss += loss.item()
         total_steps += 1
     
+    if _lc is not None:
+        _lc.cache.clear()
     model.restore_runtime_buffers(_rt_snap)
     model.train()
     return total_loss / max(total_steps, 1)

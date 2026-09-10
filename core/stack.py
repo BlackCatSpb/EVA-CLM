@@ -181,13 +181,23 @@ class EVAStack(nn.Module):
         # ─── Logit Cache with Attention (long-context memory) ───
         # Dual-mode: stores h during training (gradient flows), logits during inference (compressed).
         # VSA-driven compression: model LEARNS vsa_scales to control compression per scale.
+        # Decision #3 (включить): re-plumbed in CODE SPACE (per-bit evidence
+        # via the head's own sparse block codebook — the retired design used
+        # three V×D matrices ≈503M dead params, against README §1.1) and
+        # integrated into forward via augment() below (cache_gate zero-init
+        # ⇒ identity at resume; entries of past steps are detached on
+        # retrieve — same-step gradient only, honoring the no-BPTT contract).
+        # max_tokens (102_400, counted in ENTRIES despite the name → each
+        # entry is a full (B,L,D) tensor) became a sane max_entries window.
         self.logit_cache = LogitCacheAttention(
             D=cfg.D,
             V=cfg.vocab,
-            max_tokens=getattr(cfg, 'logit_cache_max_tokens', 102_400),
+            max_entries=getattr(cfg, 'logit_cache_max_entries', 64),
             n_heads=getattr(cfg, 'logit_cache_n_heads', 8),
             scheduled_sampling_ratio=getattr(cfg, 'logit_cache_scheduled_sampling', 0.05),
-        ) if getattr(cfg, 'logit_cache_enabled', False) else None
+            codes=getattr(self.lm_head, 'codes', None),
+            sparsity=float(getattr(cfg, 'code_sparsity', 4)),
+        ) if getattr(cfg, 'logit_cache_enabled', True) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,
                 context_mem=None, allow_write=None, step=None,
@@ -668,6 +678,12 @@ class EVAStack(nn.Module):
                 h = 0.5 * h + 0.5 * h2
                 reasoning_buffer, reasoning_count = rb
                 self._triad_passes = _triad_depth + 1
+
+        # ─── Logit cache augmentation (decision #3, integrated) ───
+        # Runs in TRAIN and INFERENCE alike; zero-init cache_gate ⇒ h passes
+        # through unchanged until CE learns to consult the cache.
+        if self.logit_cache is not None:
+            h = self.logit_cache.augment(h)
 
         return h, new_state, global_state, (reasoning_buffer, reasoning_count)
 
