@@ -58,7 +58,7 @@ class ZeckendorfEmbedding(nn.Module):
         super().__init__()
         codes: torch.Tensor = zeckendorf_codes(cfg.vocab)
         K: int = codes.shape[1]
-        self.register_buffer('codes', codes)
+        self.register_buffer('codes', codes, persistent=False)
         self.proj: nn.Linear = nn.Linear(K, cfg.D, bias=False)
         nn.init.xavier_uniform_(self.proj.weight)
     
@@ -86,7 +86,7 @@ class PartitionedEmbedding(nn.Module):
         super().__init__()
         codes: torch.Tensor = sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
         self.K: int = codes.shape[1]
-        self.register_buffer('codes', codes)
+        self.register_buffer('codes', codes, persistent=False)
         
         D: int = cfg.D
         assert D % self.K == 0, f'D={D} must be divisible by K={self.K}'
@@ -137,7 +137,7 @@ class LmHead(nn.Module):
         super().__init__()
         codes: torch.Tensor = zeckendorf_codes(cfg.vocab)
         K: int = codes.shape[1]
-        self.register_buffer('codes', codes)
+        self.register_buffer('codes', codes, persistent=False)
         self.proj: nn.Linear = nn.Linear(cfg.D, K, bias=False)
         nn.init.xavier_uniform_(self.proj.weight)
     
@@ -163,7 +163,7 @@ class PartitionedHead(nn.Module):
         super().__init__()
         codes: torch.Tensor = sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
         self.K: int = codes.shape[1]
-        self.register_buffer('codes', codes)
+        self.register_buffer('codes', codes, persistent=False)
         
         D: int = cfg.D
         assert D % self.K == 0
@@ -189,7 +189,7 @@ class SigmoidCodedHead(nn.Module):
         codes: torch.Tensor = sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
         self.K: int = codes.shape[1]
         self.S: int = cfg.code_sparsity
-        self.register_buffer('codes', codes)
+        self.register_buffer('codes', codes, persistent=False)
         D: int = cfg.D
         assert D % self.K == 0
         d: int = D // self.K
@@ -281,7 +281,7 @@ class CognitiveCodedHead(nn.Module):
         self.vocab: int = cfg.vocab
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
         self._k_mirror: int = k_mirror
-        self.register_buffer('codes', codes)
+        self.register_buffer('codes', codes, persistent=False)
         if embed_basis is not None:
             self.readout = embed_basis
             self.tie_readout: bool = True

@@ -136,7 +136,9 @@ class BottleneckBind(nn.Module):
 
         # --- cascade mix ---
         if self.mode == "cascade":
-            self.mix_logit: nn.Parameter = nn.Parameter(fib_sigmoid_init(self.S).log() - (1 - fib_sigmoid_init(self.S)).log())
+            # B1: fib_sigmoid_init ALREADY returns log-odds — the old double
+            # inverse took log(negative) → 100% NaN outputs for mode='cascade'.
+            self.mix_logit: nn.Parameter = nn.Parameter(fib_sigmoid_init(self.S).clone())
             self.log_tau: nn.Parameter = nn.Parameter(torch.tensor(1.0))  # shared tau for hybrid mixing
 
     def _tie_hook(self, module: nn.Linear, inp: tuple) -> None:

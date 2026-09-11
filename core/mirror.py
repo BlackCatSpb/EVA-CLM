@@ -496,9 +496,13 @@ class GroupedCognitiveMirror(nn.Module):
             self._cached_pred_error_norm = pred_error_norm.detach()
         else:
             self._pred_loss_term = None   # eval: never hold a training graph
+            self._cached_pred_error_norm = pred_error_norm.detach()   # B1: fresh (B,L) for UCL
+            self._cached_hp = hp.detach()
         if self.training:
-            if self._cached_hp_buf.shape[0] != B:
-                _seq_max = self._cached_hp_buf.shape[1]
+            _bh = self._cached_hp_buf.shape[0]
+            _bs = self._cached_hp_buf.shape[1]
+            if _bh != B or L > _bs:          # B1: grow on batch AND on longer seq
+                _seq_max = max(_bs, L)
                 self._cached_hp_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
                 self._cached_pred_k_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
                 self._cached_pred_error_norm_buf = torch.zeros(B, _seq_max, device=hp.device)

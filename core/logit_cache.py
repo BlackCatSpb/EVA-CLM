@@ -71,10 +71,11 @@ class LogitCache(nn.Module):
         self._kv_h: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self._position = 0
 
-    def get_k(self, scale_idx: int) -> int:
-        """Get adaptive k value for scale (VSA-driven)."""
-        base_k = BASE_K[scale_idx]
-        k = int(base_k * torch.sigmoid(self.vsa_scales[scale_idx]).item())
+    def get_k(self, scale_idx: int = 0) -> int:
+        """Adaptive k (VSA-driven). B1: driven by ALL four learned scales
+        (vsa_scales[1:] were dead parameters) around the mean base budget."""
+        base_k = float(sum(BASE_K)) / len(BASE_K)
+        k = int(base_k * torch.sigmoid(self.vsa_scales.detach()).mean().item())
         return max(k, 8)
 
     def store(self, h_or_logits: torch.Tensor, training: bool = True) -> None:
@@ -221,7 +222,9 @@ class LogitAttention(nn.Module):
         # the fixed binary codebook = free), and everything learnable is K→D
         # (32×2560).
         if codes is not None:
-            self.register_buffer('codes_t', codes.float().T.contiguous(), persistent=False)  # (K,V)
+            # B1: (V,K) — bit_profile is logits(…,V) @ codes_t(V,K); the old
+            # transpose made EVERY inference-mode forward raise a shape error.
+            self.register_buffer('codes_t', codes.float().contiguous(), persistent=False)  # (V,K)
             self.K_bits = int(codes.shape[1])
         else:
             self.codes_t = None

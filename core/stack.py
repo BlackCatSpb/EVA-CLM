@@ -77,6 +77,10 @@ class EVAStack(nn.Module):
         # intent_state параллелен global_state; эксперты «ловят» его через
         # zero-init w_intent/b_intent (см. mirror.py). default-off → модель нетронута.
         self.intent_bridge = getattr(cfg, 'intent_bridge', False)
+        # B1: mirror geometry needed even with the bridge off (bus_head_proj /
+        # _w_alpha_expert below referenced them only inside the if — build crash)
+        self._n_experts = int(self.layers[0].mirror.G)
+        self._K_max = max(int(l.mirror.k) for l in self.layers)
         if self.intent_bridge:
             # Per-head intent probe: h -> (G, k) per expert. Mirror k VARIES
             # per layer, so we project to G*K_max and slice per layer below.
@@ -95,7 +99,7 @@ class EVAStack(nn.Module):
         # readout -> a "template of connections hidden->projector" (free cache
         # without a cache, complement to VSA memory). Zero-init => head unchanged
         # at start (checkpoint-safe); bus inputs are detached (no cross-step BPTT).
-        _head_K = getattr(self.lm_head, 'K', self._n_experts)
+        _head_K = getattr(self.lm_head, 'K', int(self.layers[0].mirror.G))
         self.bus_head_proj = nn.Linear(self._n_experts * self._K_max, _head_K, bias=False)
         nn.init.zeros_(self.bus_head_proj.weight)
         # U8: τ-modulated intent bridge alpha
@@ -221,6 +225,8 @@ class EVAStack(nn.Module):
         # сброс всех внутренних состояний (иначе device-side assert / shape miss)
         if state is not None and any(s is not None for s in state):
             s0 = next(s for s in state if s is not None)
+            if isinstance(s0, tuple):
+                s0 = next((t for t in s0 if isinstance(t, torch.Tensor)), None)
             sB = s0.shape[0] if isinstance(s0, torch.Tensor) else -1
             if sB != B:
                 state = [None] * len(self.layers)
@@ -541,8 +547,8 @@ class EVAStack(nn.Module):
             # Called once after first layer to read/write concepts from expert K-space.
             # Injects concept-augmented signal into h for all subsequent layers.
             if (self.concept_layer is not None and i == 0
-                    and hasattr(layer.mirror, '_cached_hp')
-                    and layer.mirror._cached_hp is not None):
+                    and getattr(layer.mirror, '_cached_hp', None) is not None
+                    and layer.mirror._cached_hp.shape[:2] == h.shape[:2]):
                 _hp = layer.mirror._cached_hp
                 _pen = layer.mirror._cached_pred_error_norm
                 _resvar = layer.mirror._residual_var_ema.mean() if hasattr(layer.mirror, '_residual_var_ema') else None
@@ -962,9 +968,23 @@ class EVAStack(nn.Module):
         # load — a NaN-poisoned EMA after rollback means an instant NaN zombie
         # (the skip-step loop never recovers). Scrub any non-finite buffer.
         with torch.no_grad():
+            tc = getattr(self, 'tau_config', None)
+            if tc is not None:
+                for _bn, _bv in (('_log_tau_min', math.log(tc.tau_min)),
+                                 ('_log_tau_range', math.log(tc.tau_max / tc.tau_min))):
+                    _b = getattr(tc, _bn, None)
+                    if _b is not None and not torch.isfinite(_b).all():
+                        _b.fill_(_bv)          # recompute, never zero
             for b in self.buffers():
                 if b.is_floating_point() and not torch.isfinite(b).all():
                     b.nan_to_num_(nan=0.0, posinf=1e4, neginf=-1e4)
+            for l in self.layers:              # non-buffer holders survive load_state_dict
+                mir = getattr(l, 'mirror', None)
+                if mir is not None:
+                    for _an in ('_cached_hp', '_cached_pred_k', '_cached_pred_error_norm',
+                                '_pred_loss_term', '_cached_gate', '_traj_state'):
+                        if hasattr(mir, _an):
+                            setattr(mir, _an, None)
 
     def snapshot_runtime_buffers(self) -> dict:
         """Detached copies of EVERY buffer (incl. persistent=False).
@@ -976,15 +996,40 @@ class EVAStack(nn.Module):
         memory (and vice versa), cross-contaminating the VSA 'document state'.
         Parameters are not touched by eval (no optimizer step) → buffers only.
         """
-        return {k: v.detach().clone() for k, v in self.named_buffers()}
+        snap = {k: v.detach().clone() for k, v in self.named_buffers()}
+        _ex = {}
+        for _an in ('_last_bus', '_intent_stream'):        # B1: non-buffer streaming state
+            _a = getattr(self, _an, None)
+            if isinstance(_a, torch.Tensor):
+                _ex[_an] = _a.detach().clone()
+            elif isinstance(_a, (list, tuple)):
+                _ex[_an] = [t.detach().clone() if isinstance(t, torch.Tensor) else t for t in _a]
+        snap['__attrs__'] = _ex
+        return snap
 
     def restore_runtime_buffers(self, snap: dict) -> None:
         own = dict(self.named_buffers())
         with torch.no_grad():
             for k, v in snap.items():
+                if k == '__attrs__':
+                    continue
                 buf = own.get(k)
                 if buf is not None and buf.shape == v.shape:
                     buf.copy_(v)
+            for _an, _v in (snap.get('__attrs__') or {}).items():   # B1 restore path
+                _cur = getattr(self, _an, None)
+                if isinstance(_v, list) and isinstance(_cur, list):
+                    for _i2, _t in enumerate(_v):
+                        if _i2 < len(_cur) and isinstance(_t, torch.Tensor) \
+                                and isinstance(_cur[_i2], torch.Tensor) \
+                                and _cur[_i2].shape == _t.shape:
+                            _cur[_i2].copy_(_t)
+                        else:
+                            _cur[_i2] = _t
+                elif isinstance(_v, torch.Tensor):
+                    setattr(self, _an, _v.clone())
+                else:
+                    setattr(self, _an, _v)
 
     def cache_size_mb(self) -> float:
         """Get current cache size in MB."""

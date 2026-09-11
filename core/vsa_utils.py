@@ -54,6 +54,9 @@ def fib_sigmoid_init(n, fib_vals=None):
 
 
 
+_CODES_CACHE = {}
+
+
 def sparse_block_codes(vocab=50000, K=32, S=6):
     """Sparse block codes: ровно S единиц из K на каждый токен.
     
@@ -69,6 +72,12 @@ def sparse_block_codes(vocab=50000, K=32, S=6):
     """
     from math import comb
     total = comb(K, S)
+    if vocab > total:   # B1: loud instead of IndexError deep inside combinadic
+        raise ValueError(f'sparse_block_codes: vocab {vocab} > C({K},{S}) = {total}; '
+                         f'enlarge K or reduce S')
+    key = (int(vocab), int(K), int(S))
+    if key in _CODES_CACHE:
+        return _CODES_CACHE[key].clone()
     # Фиксированная случайная перестановка всех C(K, S) индексов
     perm = torch.randperm(total, generator=torch.Generator().manual_seed(42))
     codes = torch.zeros(vocab, K)
@@ -81,7 +90,8 @@ def sparse_block_codes(vocab=50000, K=32, S=6):
                 c += 1
             codes[v, c] = 1.0
             n -= comb(c, i)
-    return codes
+    _CODES_CACHE[key] = codes
+    return codes.clone()
 
 
 # ─── VSA Prefix Scan ───────────────────────────────────────────────────

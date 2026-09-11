@@ -354,9 +354,13 @@ class EVABlock(nn.Module):
         if conv_state is None:
             conv_state = torch.zeros(B, D, self._conv_pad, device=device, dtype=h.dtype)
         h_perm = h.transpose(1, 2)
-        h_conv = self.conv(torch.cat([conv_state, h_perm], dim=-1))
-        h_conv = h_conv[..., :L].transpose(1, 2)
+        _full = torch.cat([conv_state, h_perm], dim=-1)
+        if _full.shape[-1] < self._conv_pad + L:      # B1: defensive left-pad
+            _full = F.pad(_full, (self._conv_pad + L - _full.shape[-1], 0))
+        h_conv = self.conv(_full)[..., -L:].transpose(1, 2)       # B1: [-L:] == [:L] when aligned
         conv_state_out = h_perm[:, :, -self._conv_pad:]
+        if conv_state_out.shape[-1] < self._conv_pad:              # B1: fixed-width carry
+            conv_state_out = F.pad(conv_state_out, (self._conv_pad - conv_state_out.shape[-1], 0))
         h = h + h_conv
         if _chk(h, 'conv'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         if self.training:

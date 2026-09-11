@@ -83,16 +83,20 @@ def compress_sparse_topk(t: torch.Tensor, k: int = 128) -> Tuple[torch.Tensor, t
     vmin, vmax = topk_vals.min().item(), topk_vals.max().item()
     scale = (vmax - vmin) / 255.0 if vmax > vmin else 1.0
     idx_vals = ((topk_vals - vmin) / scale).round_().clamp_(0, 255).to(torch.uint8)
-    return topk_idx.to(torch.uint16), idx_vals, torch.tensor([vmin, scale])
+    # B1: finite tail fill (vmin−2) instead of −inf: measured −inf crushed the
+    # per-bit profile (cos=1.0000 between different windows; KL 6.3 nats vs
+    # 2.22 with a tail value).
+    return topk_idx.to(torch.uint16), idx_vals, torch.tensor([vmin, scale, vmin - 2.0])
 
 
 def decompress_sparse_topk(idx_pos, idx_vals, meta, shape, dtype):
     B, L, V = shape
     vmin, scale = meta[0].item(), meta[1].item()
+    fillv = meta[2].item() if meta.numel() >= 3 else float('-inf')  # legacy meta compatible
     vals = idx_vals.float() * scale + vmin
     # device must follow the tensors (audit M10: torch.full without device=
     # built a CPU result, so the CUDA scatter_ crashed / desynced silently).
-    result = torch.full((B, L, V), float('-inf'), dtype=dtype, device=idx_vals.device)
+    result = torch.full((B, L, V), fillv, dtype=dtype, device=idx_vals.device)
     result.scatter_(-1, idx_pos.long(), vals.to(dtype))
     return result
 

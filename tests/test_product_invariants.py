@@ -480,7 +480,8 @@ def test_concept_gate_param_used():
     outs = []
     for gv in (0.0, 1.0):
         m = _stack()
-        o = None
+        m.concept_layer.read_scale.data.fill_(0.0)   # B1: probe gate mechanism at σ(0),
+        o = None                                    # not at the identity-init scale σ(-4)
         for it in range(10):
             x = torch.randint(1, m.cfg.vocab, (1, 8))
             h = m.embed_tokens(x)

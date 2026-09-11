@@ -85,7 +85,9 @@ class UnifiedConceptLayer(nn.Module):
         self.out_proj = nn.Linear(D, D)          # D → D (read output gate)
 
         # ─── Learnable read scale ───
-        self.read_scale = nn.Parameter(torch.tensor(0.0))
+        # B1: identity-at-init injection (σ(-4)≈0.018) per the cache-gate
+        # doctrine; σ(0)=0.5 injected half the concept signal at step 0.
+        self.read_scale = nn.Parameter(torch.tensor(-4.0))
 
         # ─── Persistent state ───
         self.register_buffer('concept_age', torch.zeros(S))
@@ -363,6 +365,12 @@ class UnifiedConceptLayer(nn.Module):
         # ─── Output ───
         scale = torch.sigmoid(self.read_scale)
         out = read * u_gate * c_gate * scale
+        # B1: per-position amplitude bound — measured 5-6×‖h‖ injection at
+        # wake-up (read of unnormalized vals): the branch could dominate the
+        # residual stream overnight. Cap at 25% of the local trunk norm.
+        _o = out.detach().norm(dim=-1, keepdim=True)
+        _hn = h.detach().norm(dim=-1, keepdim=True)
+        out = out * (0.25 * _hn / (_o + 1e-8)).clamp(max=1.0)
 
         # Cache birth gate for diagnostics
         if write_event.any():
