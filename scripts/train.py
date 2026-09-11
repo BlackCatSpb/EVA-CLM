@@ -146,6 +146,10 @@ def train(cfg=None, resume_path=None):
         cfg = EVAConfig()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    try:  # M16: expandable segments (env var alone is too late on some hosts)
+        torch.cuda.memory._set_allocator_settings('expandable_segments:True')
+    except Exception:
+        pass
     dtype = torch.float32  # no AMP for stability
     
     if device == 'cuda':
@@ -612,6 +616,17 @@ def train(cfg=None, resume_path=None):
                                            for l in model.layers]).mean().item()
                 except Exception:
                     pass
+            # M16 memory governor (mirror of the notebook): VRAM pulse ->
+            # reversible gradient checkpointing, hysteresis 0.85/0.70.
+            if device == 'cuda' and step % max(cfg.log_interval, 1) == 0:
+                _cap16 = torch.cuda.get_device_properties(0).total_memory
+                _v16 = torch.cuda.memory_reserved() / _cap16
+                if _v16 > 0.85 and not cfg.gradient_checkpointing:
+                    cfg.gradient_checkpointing = True
+                    print(f'  [memgov] VRAM {_v16:.0%} -> checkpointing ON')
+                elif _v16 < 0.70 and cfg.gradient_checkpointing:
+                    cfg.gradient_checkpointing = False
+                    print(f'  [memgov] VRAM {_v16:.0%} -> checkpointing OFF')
                 print(f'  step={step:>6} loss={ce_loss.item():.4f} mod_mlp={mod_scl:.3f} lr={current_lr:.2e} '
                       f'tok/s={tok_s:.0f} stream={stream_idx} '
                       f'ms={mean_mirror_scale:.3f} mr={mean_ratio:.4f} | {aux_str}{gate_str}')
