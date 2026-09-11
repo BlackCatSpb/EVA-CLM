@@ -86,19 +86,35 @@ _TAU_DEV_SUBSTR = ("tau_config.", "_tau_l_dev")
 
 def _adamp_project(u: torch.Tensor, w: torch.Tensor,
                    delta: Optional[float] = None, eps: float = 1e-8) -> torch.Tensor:
-    """AdamP-фильтр на шаге Adam — IN-PLACE, без полномерных аллокаций.
+    """AdamP per-row projection (B2 rewrite, audit C).
 
-    u — "сырое" Adam-направление m/denom (как в оригинале: до коррекции bc1);
-    w — текущий вес. Порог δ=2/√D — null-полоса косинуса двух случайных
-    векторов размерности D: проекция идёт только когда радиальной компоненты
-    статистически нет (|cos|<δ), и тогда она почти не меняет u (renorm ≤1.0002).
-    При |cos|≥δ радиальный сигнал значим — направление не искажается
-    (в т.ч. антисогласованные cos<0: старый unilateral-gate проецировал их и
-    перенормировкой усилял касательный шум до 7×).
-    """
-    D = u.numel()
+    The previous global-flavoured variant was INVERTED against the paper: it
+    projected only when |cos|<δ (fire on structureless noise at ≤1e-7 effect,
+    94% of steps; and skip exactly the radial-collapse case where protection
+    matters — measured ‖W‖ −99.9% under collapse pressure, same as plain).
+    Now: fan-in ROWS, project when |cos| ≥ δ = 2/√fan_in (radially significant
+    ⇒ remove the radial component, renormalize to the original row norm —
+    paper semantics). Under the row-independent noise model P(fire) ≈ 4.6% and
+    the projected component is beyond-noise by construction. Scalars/1-D are
+    excluded (no geometry to preserve)."""
+    if u.dim() < 2:
+        return u
+    rows = u.shape[0]
+    W = w.reshape(rows, -1)
+    U = u.reshape(rows, -1)
+    wn = W.norm(dim=1, keepdim=True)
+    un = U.norm(dim=1, keepdim=True)
+    cos = (U * W).sum(dim=1, keepdim=True) / (un * wn + eps)
     if delta is None:
-        delta = 2.0 / math.sqrt(max(D, 4))
+        delta = 2.0 / math.sqrt(max(W.shape[1], 4))
+    sel = (cos.abs() >= delta) & (wn > 0)                     # (rows,1)
+    n_hat = W / (wn + eps)
+    E = U - (cos * un) * n_hat                                  # row-wise GS (full projection magnitude)
+    en = E.norm(dim=1, keepdim=True)
+    E = torch.where(en > eps, E / (en + eps) * un, torch.zeros_like(E))
+    out = torch.where(sel, E, U).reshape_as(u)
+    u.copy_(out)
+    return u
     uf = u.reshape(-1)
     wf = w.reshape(-1)
     wn = float(wf.norm())
@@ -273,8 +289,13 @@ class EVAAdamW(Optimizer):
                     mask = torch.mul(u, g).gt_(0)
                     u.mul_(mask)
                     # Ренорм только на null-полосе доли согласий (0.5±2σ, σ=√(0.25/D)).
+                    # B2 (audit C): the mask keeps a fraction ρ of coords ⇒ surviving
+                    # ENERGY is ~ρ·total ⇒ compensate with ÷√ρ, not ÷ρ. Measured at the
+                    # random-sign floor the old form inflated ‖step‖ ×1.41 and biased
+                    # direction (cos=0.45 vs noise); anisotropic oscillation was 3-3.8×
+                    # worse than plain Adam; ÷√ρ restores parity (0.029→0.012 osc std).
                     floor = 0.5 * max(0.5, 1.0 - 2.0 / math.sqrt(max(mask.numel(), 4)))
-                    u.div_(mask.mean().clamp_min(floor))
+                    u.div_(mask.mean().clamp_min(floor).sqrt())
                 if tscale is not None and tscale != 1.0:
                     u.mul_(tscale)
                 if cap is not None:

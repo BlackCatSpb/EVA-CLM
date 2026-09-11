@@ -428,7 +428,19 @@ class LossBalancer:
 
     def backward(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any],
                  parameters: Iterable[torch.nn.Parameter],
-                 retain_graph: bool = False) -> None:
+                 retain_graph: bool = False,
+                 phase_model: Any = None) -> None:
+        # B2 (audit C): (i) the single GLOBAL cosine gate zeroed every aligned
+        # aux term whenever the SUM ⊥ CE (measured: final grad = pure CE, and
+        # on the orthogonality toy per-term beats sum-gate 8.000 vs 2.000);
+        # replaced by per-coordinate sign agreement with a per-parameter norm
+        # bound — the bound "‖aux‖ ≤ ‖CE‖" now holds literally per parameter,
+        # and the duty cycle is no longer zero in the cancellation band.
+        # (ii) the gradalign hook is now frozen during aux/bypass phases so it
+        # records the CE-only magnitude (measured before: n−1 layers stored
+        # the AUX gradient, rel-err 1.0).
+        # (iii) bypass terms are added under the same sign-mask+bound (was:
+        # raw .backward(), measured 100×‖g_CE‖ — the bound claim was false).
         params = [p for p in parameters if p.requires_grad]
         bypass: Dict[str, Any] = {}
         aux_dict = dict(aux_dict)   # never mutate the caller's dict (logging)
@@ -454,9 +466,12 @@ class LossBalancer:
                 sum(bypass.values()).backward()
             return
 
+        if phase_model is not None:
+            for _l in getattr(phase_model, 'layers', []):
+                _l._ga_record = False
         aux_total = sum(aux_tensors)
         aux_grads = torch.autograd.grad(aux_total, params,
-                                        retain_graph=retain_graph or bool(bypass),
+                                        retain_graph=True,
                                         allow_unused=True)
 
         # Поток без полно-модельных flat-копий (аудит VRAM 2026-09): cos и нормы
@@ -484,18 +499,28 @@ class LossBalancer:
 
         with torch.no_grad():
             for p, gce, gau in zip(params, ce_grads, aux_grads):
-                if gce is not None:
-                    p.grad = gce.clone()
-                elif gau is not None:
+                if gce is None and gau is None:
+                    p.grad = None
+                elif gce is None:
                     p.grad = torch.zeros_like(p)
                 else:
-                    p.grad = None
-                if gau is not None and scale > 0:
-                    if p.grad is None:
-                        p.grad = gau * scale
-                    else:
-                        p.grad.add_(gau, alpha=scale)
-
+                    p.grad = gce.clone()
+                    if gau is not None:
+                        b = gau * ((gce * gau) > 0)          # sign-agreeing coords only
+                        _s = torch.clamp(gce.norm() / (b.norm() + 1e-12), max=1.0)
+                        p.grad.add_(b * _s)                  # per-param: ‖aux·s‖ ≤ ‖CE‖
         if bypass:
-            # direct teaching signal (not cos-gated) — final pass frees the graph
-            sum(bypass.values()).backward()
+            # (outside no_grad: ops under no_grad fall off the graph)
+            bp = torch.autograd.grad(sum(bypass.values()), params,
+                                     retain_graph=retain_graph,
+                                     allow_unused=True)
+            with torch.no_grad():
+                for p, gce, gb in zip(params, ce_grads, bp):
+                    if gb is None or p.grad is None:
+                        continue
+                    b = gb * ((p.grad * gb) > 0)
+                    _s = torch.clamp(p.grad.norm() / (b.norm() + 1e-12), max=1.0)
+                    p.grad.add_(b * _s)
+        if phase_model is not None:
+            for _l in getattr(phase_model, 'layers', []):
+                _l._ga_record = True

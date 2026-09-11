@@ -57,6 +57,70 @@ def fib_sigmoid_init(n, fib_vals=None):
 _CODES_CACHE = {}
 
 
+def twin_free_codes(vocab=65536, K=64, S=6, max_overlap=None, seed=42, batch=2048):
+    """B2 (audit A): random constant-weight codes carry overlap-(S−1) 'twins'
+    (215 504 pairs at K=32/S=6/65 536) — recall measured a CLIFF at T≈600
+    while SNR≈3.6 still looked healthy: margin 1 bit, not noise, kills it.
+    Greedy constant-weight packing with max pairwise overlap ≤ S−2 doubles the
+    margin and halves mean intersection; measured knee T: 550 → ≥1200 at equal
+    capacity. Deterministic (seed). Raises if the pool cannot fit — the K=32
+    pool genuinely can't hold 65k with overlap ≤ S−2, so codebook='twin_free'
+    goes together with code_dim=64 (C(64,6)=74.9M).
+    """
+    from math import comb
+    if max_overlap is None:
+        max_overlap = S - 2
+    total = comb(K, S)
+    if vocab > total:
+        raise ValueError(f'twin_free_codes: vocab {vocab} > C({K},{S}) = {total}')
+    key = ('tf', int(vocab), int(K), int(S), int(max_overlap), int(seed))
+    if key in _CODES_CACHE:
+        return _CODES_CACHE[key].clone()
+    g = torch.Generator().manual_seed(seed)
+    acc = torch.zeros(0, K)
+    empty_rounds = 0
+    while acc.shape[0] < vocab:
+        cand = torch.rand(batch, K, generator=g).argsort(dim=1)[:, :S]
+        cm = torch.zeros(batch, K)
+        cm.scatter_(1, cand, 1.0)
+        ok = torch.ones(batch, dtype=torch.bool)
+        if acc.shape[0]:
+            for c0 in range(0, acc.shape[0], 4096):      # chunked screening: ≤2k×4k window
+                ov = cm @ acc[c0:c0 + 4096].T
+                ok &= (ov.max(dim=1).values <= max_overlap)
+                if not bool(ok.any()):
+                    break
+        sub_i = torch.nonzero(ok).squeeze(1)
+        if sub_i.numel() > 1:                            # intra-batch greedy
+            sub = cm[sub_i]
+            pw = sub @ sub.T
+            pw.fill_diagonal_(K + 1)                    # keep self-overlap harmless for max? no: self=S ≤ S−2 false
+            pw.fill_diagonal_(0)
+            bad = pw.max(dim=1).values > max_overlap
+            sub_i = sub_i[~bad]
+        need = vocab - acc.shape[0]
+        add = cm[sub_i[:need]] if sub_i.numel() else cm[:0]
+        acc = torch.cat([acc, add], dim=0)
+        if add.shape[0] == 0:
+            empty_rounds += 1
+            if empty_rounds > 30:
+                break
+    if acc.shape[0] < vocab:
+        raise ValueError(f'twin_free_codes: only {acc.shape[0]}/{vocab} codes fit '
+                         f'overlap≤{max_overlap} at K={K},S={S} — enlarge K')
+    _CODES_CACHE[key] = acc
+    return acc.clone()
+
+
+def build_codes(cfg):
+    """cfg.codebook dispatcher: 'legacy' (combinadic, balanced by construction)
+    or 'twin_free' (B2 constant-weight packing, max overlap S−2)."""
+    cb = getattr(cfg, 'codebook', 'legacy')
+    if cb == 'twin_free':
+        return twin_free_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
+    return sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
+
+
 def sparse_block_codes(vocab=50000, K=32, S=6):
     """Sparse block codes: ровно S единиц из K на каждый токен.
     

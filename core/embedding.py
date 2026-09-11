@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .config import EVAConfig
-from .vsa_utils import zeckendorf_codes, sparse_block_codes
+from .vsa_utils import zeckendorf_codes, sparse_block_codes, build_codes
 from .adaptive_gate import hybrid_gate
 
 
@@ -84,7 +84,7 @@ class PartitionedEmbedding(nn.Module):
     """
     def __init__(self, cfg: EVAConfig) -> None:
         super().__init__()
-        codes: torch.Tensor = sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
+        codes: torch.Tensor = build_codes(cfg)
         self.K: int = codes.shape[1]
         self.register_buffer('codes', codes, persistent=False)
         
@@ -95,11 +95,21 @@ class PartitionedEmbedding(nn.Module):
         # Rank expansion: mixing matrix M (K×K) с ортогональной инициализацией
         # codes → sigmoid(M·codes) даёт плотные коэффициенты, каждый бит влияет на все сегменты
         self.embed_mix: nn.Parameter = nn.Parameter(torch.zeros(self.K, self.K))
-        nn.init.orthogonal_(self.embed_mix)
+        # B2 (audit A): with a random orthogonal M the embed→head roundtrip
+        # measured top-1 = 0.000 EVEN AT T=1 (SNR 9e12): the bit-sum decoder
+        # cannot invert random mixing, so the identity path starts dead and
+        # must be un-learned from noise. Near-identity init: σ(2Mc) keeps the
+        # code support (z_k high ⇔ k∈c) while the 0.05G perturbation breaks
+        # exact code symmetry. Measured: T=1 roundtrip 0.000 → 1.000.
+        nn.init.eye_(self.embed_mix)
+        _mg = torch.Generator().manual_seed(7)
+        with torch.no_grad():
+            self.embed_mix.add_(torch.randn(self.K, self.K, generator=_mg) * 0.05)
         self.register_buffer('_mix_scale', torch.tensor(2.0), persistent=False)
         
-        self.basis: nn.Parameter = nn.Parameter(torch.randn(self.K, d))
-        nn.init.xavier_uniform_(self.basis, gain=0.5)
+        _bgen = torch.Generator().manual_seed(5)
+        self.basis: nn.Parameter = nn.Parameter(_orth_rows(torch.randn(self.K, d, generator=_bgen)))
+        self._embed_rope_on = bool(getattr(cfg, 'embed_rope', False))  # B2
         self._rope_theta: float = getattr(cfg, 'rope_theta', 1000000.0)
         self._rope_scaling: float = getattr(cfg, 'rope_scaling', 1.0)
         self.rope: RotaryEmbedding = RotaryEmbedding(D, theta=self._rope_theta, scaling=self._rope_scaling)
@@ -126,9 +136,28 @@ class PartitionedEmbedding(nn.Module):
         B, L = tokens.shape
         # Внешнее произведение вместо einsum (стабильно под AMP на любых GPU)
         out: torch.Tensor = (codes.unsqueeze(-1) * self.basis.view(1, 1, self.K, -1)).reshape(B, L, -1)
-        out = self.rope(out)
+        # B2 (agent-A identity-path finding): RoPE-on-embedding is off by default.
+        # In an attention-free trunk positions are intrinsic to the stream (conv,
+        # scan read the time axis directly); the rope tag bought nothing and it
+        # broke the basis tying: the head computes <R_t e, r>, scrambling the
+        # code roundtrip (measured top-1 0.03). Kept behind cfg.embed_rope for A/B.
+        if self._embed_rope_on:
+            out = self.rope(out)
         return out
 
+
+
+def _orth_rows(A: torch.Tensor, gain: float = 1.0) -> torch.Tensor:
+    """B2 (agent-A): segment-addressed code reads need <B_i, B_k> to vanish for
+    i != k — otherwise the per-bit margin (z_hi - z_lo)*||B||^2 (~0.3) drowns in
+    cross-talk (measured: tied-basis code top-1 = 0.03 at init). Orthonormal
+    rows when K <= d (QR of the transposed block), unit rows otherwise."""
+    K, d = A.shape
+    if K <= d:
+        Q, _R = torch.linalg.qr(A.T)
+        A = Q.T.contiguous()
+    A = A / A.norm(dim=1, keepdim=True).clamp_min(1e-8)
+    return A * (gain ** 0.5)
 
 
 class LmHead(nn.Module):
@@ -146,6 +175,24 @@ class LmHead(nn.Module):
 
 
 
+
+
+def _readout_rotated(head: nn.Module, B: int, L: int, D: int) -> torch.Tensor:
+    """B2 (agent-A roundtrip finding): the embedding applies RoPE AFTER
+    z⊗basis, so the TIED readout sitting unrotated computes ⟨R·e, r⟩ — not
+    position-invariant (measured code top-1 = 0.000 even at T=1). Rotating the
+    readout with the SAME rope recovers ⟨R e, R r⟩ = ⟨e, r⟩ exactly because R
+    is orthogonal; the code identity path is then alive at initialization."""
+    r = head.readout                                   # (K, d)
+    big = torch.zeros(1, L, D, device=r.device, dtype=r.dtype)
+    big.view(1, L, head.K, -1).copy_(r.view(1, 1, head.K, -1))
+    rp = getattr(head, '_embed_rope', None)
+    if rp is None:
+        return big.reshape(1, L, head.K, -1)          # broadcasts over B
+    big = rp(big.expand(B, L, D))
+    return big.reshape(B, L, head.K, -1)
+
+
 class PartitionedHead(nn.Module):
     """D-space -> vocab logits via segment-addressed readout + per-token bias.
     
@@ -159,11 +206,13 @@ class PartitionedHead(nn.Module):
     Если embed_basis передан (PartitionedEmbedding.basis), readout делится с ним
     (weight tying encode/decode). Иначе — собственный readout.
     """
-    def __init__(self, cfg: EVAConfig, embed_basis: Optional[nn.Parameter] = None) -> None:
+    def __init__(self, cfg: EVAConfig, embed_basis: Optional[nn.Parameter] = None,
+                 rope: Optional[nn.Module] = None) -> None:
         super().__init__()
-        codes: torch.Tensor = sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
+        codes: torch.Tensor = build_codes(cfg)
         self.K: int = codes.shape[1]
         self.register_buffer('codes', codes, persistent=False)
+        self._embed_rope = rope
         
         D: int = cfg.D
         assert D % self.K == 0
@@ -172,8 +221,8 @@ class PartitionedHead(nn.Module):
         if embed_basis is not None:
             self.readout = embed_basis  # shared reference
         else:
-            self.readout: nn.Parameter = nn.Parameter(torch.randn(self.K, d))
-            nn.init.xavier_uniform_(self.readout, gain=0.5)
+            _rgen = torch.Generator().manual_seed(6)
+            self.readout: nn.Parameter = nn.Parameter(_orth_rows(torch.randn(self.K, d, generator=_rgen)))
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
     
     def forward(self, h: torch.Tensor) -> torch.Tensor:
@@ -184,11 +233,13 @@ class PartitionedHead(nn.Module):
 
 
 class SigmoidCodedHead(nn.Module):
-    def __init__(self, cfg: EVAConfig, embed_basis: Optional[nn.Parameter] = None) -> None:
+    def __init__(self, cfg: EVAConfig, embed_basis: Optional[nn.Parameter] = None,
+                 rope: Optional[nn.Module] = None) -> None:
         super().__init__()
-        codes: torch.Tensor = sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
+        codes: torch.Tensor = build_codes(cfg)
         self.K: int = codes.shape[1]
         self.S: int = cfg.code_sparsity
+        self._embed_rope = rope
         self.register_buffer('codes', codes, persistent=False)
         D: int = cfg.D
         assert D % self.K == 0
@@ -196,8 +247,8 @@ class SigmoidCodedHead(nn.Module):
         if embed_basis is not None:
             self.readout = embed_basis
         else:
-            self.readout: nn.Parameter = nn.Parameter(torch.randn(self.K, d))
-            nn.init.xavier_uniform_(self.readout, gain=0.5)
+            _rgen = torch.Generator().manual_seed(6)
+            self.readout: nn.Parameter = nn.Parameter(_orth_rows(torch.randn(self.K, d, generator=_rgen)))
         prop: torch.Tensor = codes.mean(dim=0)
         self.register_buffer('_prop', prop)
         # Code-prior init (the _prop buffer was computed and left dead): with
@@ -272,9 +323,10 @@ class SigmoidCodedHead(nn.Module):
 
 
 class CognitiveCodedHead(nn.Module):
-    def __init__(self, cfg: EVAConfig, embed_basis: Optional[nn.Parameter] = None, k_mirror: int = 32) -> None:
+    def __init__(self, cfg: EVAConfig, embed_basis: Optional[nn.Parameter] = None, k_mirror: int = 32,
+                 rope: Optional[nn.Module] = None) -> None:
         super().__init__()
-        codes: torch.Tensor = sparse_block_codes(cfg.vocab, K=cfg.code_dim, S=cfg.code_sparsity)
+        codes: torch.Tensor = build_codes(cfg)
         self.K: int = codes.shape[1]
         self.S: int = cfg.code_sparsity
         self.d: int = cfg.D // self.K
@@ -282,12 +334,13 @@ class CognitiveCodedHead(nn.Module):
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
         self._k_mirror: int = k_mirror
         self.register_buffer('codes', codes, persistent=False)
+        self._embed_rope = rope
         if embed_basis is not None:
             self.readout = embed_basis
             self.tie_readout: bool = True
         else:
-            self.readout: nn.Parameter = nn.Parameter(torch.randn(self.K, self.d))
-            nn.init.xavier_uniform_(self.readout, gain=0.5)
+            _rgen = torch.Generator().manual_seed(6)
+            self.readout: nn.Parameter = nn.Parameter(_orth_rows(torch.randn(self.K, self.d, generator=_rgen)))
             self.tie_readout = False
         self.log_temp_base: nn.Parameter = nn.Parameter(torch.zeros(self.K))
         self.w_res: nn.Parameter = nn.Parameter(torch.tensor(0.5))

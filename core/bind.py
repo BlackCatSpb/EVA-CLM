@@ -391,6 +391,16 @@ class TrajectorySpiralBind(nn.Module):
         if traj_state is not None:
             if traj_state.shape[2] != L or traj_state.shape[0] != B:
                 traj_state = None
+        if traj_state is None and self.training and L >= self.n_dims:
+            # B2 (audit A): the trajectory previously fed the spiral either
+            # zeros (seq start — measured grad w_v_re[:,d≥1] ≡ 0) or a
+            # DETACHED cache (cross-position Jacobian exactly 0 — the
+            # 'trajectory' learned nothing through time). In-graph shifts:
+            # ∂out_t/∂h_{t−d} becomes the phase-rotation term the README promises.
+            _hc = hp.permute(0, 2, 1)
+            _chans = [F.pad(_hc, (dd, 0))[:, :, :L].permute(0, 2, 1)
+                      for dd in range(1, self.n_dims)]
+            traj_state = torch.stack(_chans, dim=1)
         if traj_state is None:
             traj_state = torch.zeros(B, self.n_dims - 1, L, K, device=h.device, dtype=h.dtype)
         traj = torch.cat([hp.unsqueeze(1), traj_state], dim=1)  # (B, n_dims, L, K)

@@ -668,6 +668,7 @@ class GroupedCognitiveMirror(nn.Module):
             tau_signal = (log_base + self._tau_signal_log).clamp(
                 min=math.log(0.01), max=2 * math.log(max(self._tau_gate_max, 1.01))).exp()
             w = torch.sigmoid(self._signal_log_weights / tau_signal)
+            self._tau_signal_used = tau_signal.detach() if torch.is_tensor(tau_signal) else float(tau_signal)
         else:
             w = torch.sigmoid(self._signal_log_weights)  # (n_sig,), no sum-to-1 constraint
         
@@ -951,6 +952,7 @@ class GroupedCognitiveMirror(nn.Module):
             tau_signal = (log_base + self._tau_signal_log).clamp(
                 min=math.log(0.01), max=2 * math.log(max(self._tau_gate_max, 1.01))).exp()
             w = torch.sigmoid(self._signal_log_weights / tau_signal)
+            self._tau_signal_used = tau_signal.detach() if torch.is_tensor(tau_signal) else float(tau_signal)
         else:
             w = torch.sigmoid(self._signal_log_weights)
         w_norm = w / (w.sum() + 1e-10)

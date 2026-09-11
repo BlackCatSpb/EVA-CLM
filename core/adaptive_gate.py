@@ -68,7 +68,12 @@ def hybrid_gate(
         # the softmax emphasis survives exactly where the old
         # gate=clamp(sigmoid*(1+r), 0, 1-eps) collapsed confident+emphasized
         # bits onto the eps-cliff (u pinned at ±16.1, emphasis erased).
-        u = logits + torch.log1p(relative)
+        # B2 (audit A): log1p(softmax) adds an UNCENTRED +log(1+1/K) at init,
+        # pushing E[σ(u)] from the declared code prior S/K=0.1875 to 0.2045
+        # (+9.1%) and breaking the factorized branch's prior fixed point
+        # (grad→bit_bias = −8.4 per 512 tokens). Subtract the known constant —
+        # the competitive term is preserved exactly, the bias is not.
+        u = logits + torch.log1p(relative) - math.log1p(1.0 / logits.shape[-1])
         base = F.logsigmoid(-u).sum(dim=dim)
         return u, base
 

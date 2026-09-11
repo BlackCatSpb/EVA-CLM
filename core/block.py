@@ -583,6 +583,8 @@ class EVABlock(nn.Module):
             # One-step-stale by design — same streaming convention as
             # _prev_grad_norm in the mirror.
             def _ga_hook(grad, _blk=self):
+                if not getattr(_blk, '_ga_record', True):
+                    return        # B2: aux/bypass phases must not overwrite the CE target
                 _m = _blk.mirror
                 gg = grad.detach().float().reshape(grad.shape[0], grad.shape[1], _m.G, -1)
                 _blk._gradalign_tgt = gg.pow(2).sum(dim=(0, 1, 3)).sqrt()

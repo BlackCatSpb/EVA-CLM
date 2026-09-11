@@ -69,7 +69,19 @@ class SemanticBridge(nn.Module):
             nn.GELU(),
             nn.Linear(bridge_dim, bridge_dim),
         )
-        self.emb_proj: nn.Linear = nn.Linear(D, bridge_dim)
+        # B2: the InfoNCE target projection is FIXED (buffer, seeded orthogonal),
+        # never learned — a detached target makes its Parameters dead weight
+        # (detector) and their gradient path was the embedding-collapse channel.
+        # B2 (audit C/E): the old cosine-to-embedding loss had a CONSTANT
+        # target (pairwise target cos = 0.9999 measured) → loss floor ≈ 0,
+        # gradient ⊥ CE (cos 0.007), and it regressed x[t+2] not x[t+1].
+        # InfoNCE against the mean-centred, DETACHED next-token pool.
+        import math as _m2
+        self.nce_log_temp = nn.Parameter(torch.tensor(_m2.log(0.296)))  # ln λ⁻²
+        _ew = torch.empty(bridge_dim, D)
+        nn.init.orthogonal_(_ew, generator=torch.Generator().manual_seed(9))
+        self.register_buffer('emb_proj_W', _ew, persistent=False)
+        self.register_buffer('_tgt_mean', torch.zeros(1, bridge_dim))
         self.stream_proj: nn.Linear = nn.Linear(bridge_dim, D)
         self.stream_log_scale: nn.Parameter = nn.Parameter(torch.zeros(1))
         self._inj_alpha: nn.Parameter = nn.Parameter(torch.tensor(1.0))
@@ -175,29 +187,46 @@ class SemanticBridge(nn.Module):
     def loss(
         self, y: torch.Tensor, embed_fn: callable
     ) -> Optional[torch.Tensor]:
-        """Self-supervised bridge loss: each layer predicts the next token embedding.
-
-        Returns the mean over layers of ``1 - cos(s_l[:, :-1], emb_proj(embed(y[:,1:])))``.
-        Returns ``None`` if no predictions were recorded this forward.
+        """Self-supervised bridge loss (B2): each layer's semantic state must
+        identify the NEXT token among the batch's token pool — InfoNCE with
+        mean-centred DETACHED targets (the centering removes the embedding
+        cone the old cosine loss collapsed to; detaching closes the
+        embedding-collapse gradient channel). y[t] = x[t+1], so pred[t]
+        pairs with y[:, :-1] — the previous slice pair regressed x[t+2].
         """
         if self._preds is None or len(self._preds) == 0:
             return None
-        emb: torch.Tensor = embed_fn(y[:, 1:])
-        tgt: torch.Tensor = self.emb_proj(emb)
-        total: torch.Tensor = torch.zeros((), device=tgt.device, dtype=tgt.dtype)
+        emb: torch.Tensor = embed_fn(y[:, :-1])
+        with torch.no_grad():
+            tgt_raw: torch.Tensor = emb @ self.emb_proj_W.T
+            if torch.is_grad_enabled():          # train-only cone EMA
+                self._tgt_mean.mul_(0.99).add_(tgt_raw.mean(dim=(0, 1), keepdim=True), alpha=0.01)
+            tgt: torch.Tensor = F.normalize(tgt_raw - self._tgt_mean, dim=-1)
+        temp = self.nce_log_temp.exp().clamp(0.05, 2.0)
+        total: torch.Tensor = torch.zeros((), device=tgt.device, dtype=torch.float32)
         n: int = 0
         layer_means: list[torch.Tensor] = []
         for s_l in self._preds:
             pred: torch.Tensor = s_l[:, :-1]
-            if pred.shape[1] != tgt.shape[1]:
-                m: int = min(pred.shape[1], tgt.shape[1])
-                pred = pred[:, :m]
-                tgt_ = tgt[:, :m]
-            else:
-                tgt_ = tgt
-            total = total + (1.0 - F.cosine_similarity(pred, tgt_, dim=-1, eps=1e-8).mean())
+            m: int = min(pred.shape[1], tgt.shape[1])
+            pred = F.normalize(pred[:, :m], dim=-1)
+            tgt_ = tgt[:, :m]
+            q = pred.reshape(-1, pred.shape[-1]).float()
+            k = tgt_.reshape(-1, tgt_.shape[-1]).float()
+            sims = (q @ k.T) / temp
+            Nq = sims.shape[0]
+            labels = torch.arange(Nq, device=sims.device)
+            # B2: in a repeating stream the pool contains the SAME token at
+            # other positions — they are true matches, not negatives; without
+            # the mask the loss actively punished them (measured: structured
+            # streams got WORSE than iid under InfoNCE).
+            tok = y[:, :-1].reshape(-1)[:Nq]
+            false_neg = (tok[:, None] == tok[None, :])
+            false_neg &= ~torch.eye(Nq, dtype=torch.bool, device=sims.device)
+            sims = sims.masked_fill(false_neg, float('-inf'))
+            total = total + F.cross_entropy(sims, labels)
             n += 1
-            layer_means.append(pred.mean(dim=(0, 1)))
+            layer_means.append(s_l.detach().mean(dim=(0, 1)))
         loss_val: torch.Tensor = total / max(n, 1)
         if len(layer_means) >= 2:
             stacked: torch.Tensor = F.normalize(torch.stack(layer_means), dim=-1)

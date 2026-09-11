@@ -60,6 +60,8 @@ class WideBindConfig:
     head_normalize: bool = True
     code_dim: int = 32
     code_sparsity: int = 6
+    embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)
+    codebook: str = 'legacy'   # 'twin_free' (B2): max pairwise overlap ≤ S−2, needs code_dim≥64 for full vocab
 
     mirror_k: int = 32
     mirror_k_staircase: bool = True  # True = k_l∈{8,16,32} по третям глубины
@@ -234,7 +236,7 @@ class WideBindConfig:
     diversity_weight: float = 0.001  # ||cov - I||² weight (0=disabled)
     # Nuclear norm regularization for bind W_proj
     nuclear_weight: float = 1e-5  # stochastic ||W||_* weight (0=disabled)
-    orth_weight: float = 1e-4  # ||Ŵ^TŴ - I||² weight (0=disabled)
+    orth_weight: float = 0.0  # B2: was 1e-4=ON with 24× D² gram products (multi-GB) — the other dataclass had documented 0; unified off
     # Surprisal-weighted loss: focus on informative tokens
     surprisal_weight: float = 0.0  # γ, 0=disabled, 0.5=mild, 1.0=aggressive
 

@@ -30,12 +30,12 @@ class EVAStack(nn.Module):
         self.embed = PartitionedEmbedding(cfg)
         head_mode = getattr(cfg, 'head_mode', 'sigmoid_coded')
         if head_mode == 'sigmoid_coded':
-            self.lm_head = SigmoidCodedHead(cfg, embed_basis=self.embed.basis)
+            self.lm_head = SigmoidCodedHead(cfg, embed_basis=self.embed.basis, rope=self.embed.rope)
         elif head_mode == 'cognitive_coded':
-            self.lm_head = CognitiveCodedHead(cfg, embed_basis=self.embed.basis,
+            self.lm_head = CognitiveCodedHead(cfg, embed_basis=self.embed.basis, rope=self.embed.rope,
                                               k_mirror=cfg.mirror_k)
         elif head_mode == 'partitioned':
-            self.lm_head = PartitionedHead(cfg, embed_basis=self.embed.basis)
+            self.lm_head = PartitionedHead(cfg, embed_basis=self.embed.basis, rope=self.embed.rope)
         else:
             raise ValueError(f'Unknown head_mode: {head_mode}')
         

@@ -134,12 +134,29 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         if hasattr(layer, 'bind') and hasattr(layer.bind, 'W_proj'):
             bind_W = layer.bind.W_proj.weight
         if bind_W is not None and bind_W.ndim == 2:
+            # B2 (audit C): the old probe E‖Wv‖·√d ∝ ‖W‖_F — a Frobenius
+            # SHRINKAGE wearing a rank name (same direction as weight decay).
+            # True anti-collapse regularizer: maximize stable rank
+            # SR = ‖W‖_F²/σ̂max² ∈ [1, rank]; penalty = 1 − SR/min(m,n).
+            # σ̂max: one power-iteration step per call (persistent attribute,
+            # no syncs); gradient flows through the Frobenius term only.
             rank_ub = min(bind_W.shape[0], bind_W.shape[1])
-            nuc_iters = max(1, int(math.sqrt(rank_ub)))
-            v = torch.randn(bind_W.shape[1], nuc_iters, device=bind_W.device)
-            Wv = bind_W @ v
-            nuc = Wv.norm(dim=0).mean() * math.sqrt(bind_W.shape[1])
-            nuc_loss = nuc_loss + nuc
+            v = getattr(layer, '_pi_v', None)
+            if v is None or v.shape[0] != bind_W.shape[1]:
+                vv = torch.randn(bind_W.shape[1], device=bind_W.device)
+                v = layer._pi_v = vv / vv.norm()
+            with torch.no_grad():
+                for _pi4 in range(4):        # B2: a single step from a random v is
+                    Wv = bind_W @ v
+                    s_hat = Wv.norm()
+                    v2 = bind_W.t() @ Wv
+                    v.copy_(v2 / (v2.norm() + 1e-12))
+                Wv = bind_W @ v
+                s_hat = Wv.norm()   # not the final estimate; cheap 4-step
+                pass
+            fro2 = bind_W.pow(2).sum()
+            sr = (fro2 / (s_hat.pow(2) + 1e-12)).clamp(1.0, float(rank_ub))
+            nuc_loss = nuc_loss + (1.0 - (sr / rank_ub).clamp(0.0, 1.0))
             n_nuc = n_nuc + 1
     if n_nuc > 0:
         nuc_loss = nuc_loss / n_nuc
@@ -217,7 +234,11 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     signal_entropy = 0.0
     n_sig = 0
     for layer in stack.layers:
-        w = torch.sigmoid(layer.mirror._signal_log_weights)
+        # B2 (audit C): the mirror's ACTUAL gate is σ(θ/τ_signal); the old
+        # entropy regularized σ(θ) — a different, un-traded quantity.
+        _tsl = getattr(layer.mirror, '_tau_signal_used', None)
+        _th = layer.mirror._signal_log_weights if _tsl is None else layer.mirror._signal_log_weights / _tsl
+        w = torch.sigmoid(_th)
         p = w / (w.sum() + 1e-10)  # normalize for entropy
         # MINIMIZE −H ⇒ MAXIMIZE signal entropy (all mirror signals stay
         # in play). The old sign (+H) actively pushed the 5 learnable signal
@@ -431,8 +452,10 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         aux_dict['balance'] = balance_loss
     if diversity_loss != 0:
         aux_dict['diversity'] = diversity_loss
-    if nuc_loss != 0:
-        aux_dict['nuc'] = nuc_loss * getattr(stack.cfg, 'nuclear_weight', 1e-5)
+    if n_nuc > 0:
+        aux_dict['nuc'] = nuc_loss * getattr(stack.cfg, 'nuclear_weight', 1e-5)
+    # (B2: always emit when computed — a first-call penalty of exactly 0
+    #  from the raw power-iteration estimate silently removed the key.)
     if orth_loss != 0:
         aux_dict['orth'] = orth_loss
     if w_m2v_loss != 0:
