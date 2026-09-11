@@ -129,8 +129,15 @@ def apply_tau_lr(model, tau_config=None, ls_mults: Optional[List[float]] = None)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FailureDetector:
-    """Roll back to ``best.pt`` + fresh Adam + LR rewind on a *relative*
-    divergence of ANY monitored signal.
+    """ALARM SENSOR (decision D6): flags *relative* divergence of ANY
+    monitored signal; ``check()`` then returns True and the CALLER STOPS.
+    There is no automatic rollback any more: recovery is a human decision,
+    taken from a clean best.pt (last val-improving save) plus full log
+    forensics. Continuous self-regulation stays in the adaptive layer
+    (MirrorLR damping, AGC, maturation ramps, the M14 soft veto) — a
+    discrete emergency actuator was twice the cause of fatal incidents
+    (fragmented-allocator torch.load OOMs, 2026-09) while never curing a
+    root cause the sensor alone could not already reveal.
 
     The SAME relative rule is applied to CE and to every protective metric
     (diversity, gate_l1, mlp_ratio, effective gate amplitude). Each signal
@@ -170,22 +177,16 @@ class FailureDetector:
     guard is live from ~step 100, not from a hand picked warmup.
     """
 
-    def __init__(self, model: torch.nn.Module, lr_controller,
-                 make_optimizer_fn: Callable[[float], torch.optim.Optimizer],
-                 best_path: str, base_lr: float, k_sigma: float = 3.0,
-                 warmup: int = 2000, recover_max: int = 20,
+    def __init__(self, model: Optional[torch.nn.Module] = None,
+                 k_sigma: float = 3.0,
+                 warmup: int = 2000,
                  cooldown: int = 50, min_consecutive: int = 3,
                  ema_decay: float = 0.99,
                  margins: Optional[Dict[str, float]] = None,
                  floors: Optional[Dict[str, float]] = None) -> None:
         self.model = model
-        self.lr_controller = lr_controller
-        self.make_optimizer_fn = make_optimizer_fn
-        self.best_path = best_path
-        self.base_lr = float(base_lr)
         self.k_sigma = float(k_sigma)  # kept for API compatibility; rule is relative now
         self.warmup = int(warmup)  # kept for API compatibility; bootstrap count governs
-        self.recover_max = int(recover_max)
         self.cooldown = int(cooldown)
         self.min_consecutive = int(min_consecutive)
         self.a = float(ema_decay)
@@ -199,27 +200,14 @@ class FailureDetector:
         self._cooldown = 0
         self._viol: Dict[str, int] = {}  # consecutive violations per signal
         self.recover_count = 0
-        self.optimizer: Optional[torch.optim.Optimizer] = None
         self._stats: Dict[str, List[float]] = {}  # name -> [ema, var, prev, n]
-        # M15: live CPU copy of the rollback target (offered by the loop at
-        # every save/seed/resume). Rollback must NOT torch.load a ~3GB
-        # envelope at divergence time: on the fragmented CUDA caching
-        # allocator (expandable_segments silently unset because Colab
-        # pre-imports torch before cell 1 runs) that unpickle + optimizer
-        # state load is exactly what tipped rollback into OOM twice.
-        self._live_state = None
-
-    def offer_live_state(self, state_dict: Dict[str, torch.Tensor]) -> None:
-        """Register a CPU clone of the current weights as the rollback
-        target. Call after every successful best.pt save and after resume."""
-        self._live_state = {k: v.detach().cpu() for k, v in state_dict.items()}
 
     def state_dict(self) -> Dict[str, Any]:
         """Full watchdog state for the single-best.pt policy (audit M12): the
         per-signal baselines (fast/slow EMAs + sample counts), violation
         streaks and recovery counters must survive a session restart —
         otherwise the detector re-bootstraps blind every resume and forgets
-        the recover_max pressure it already accumulated."""
+        the alarm history it already accumulated."""
         return {
             'recover_count': int(self.recover_count),
             'ce_armed': bool(self.ce_armed),
@@ -310,7 +298,7 @@ class FailureDetector:
             # so without this bypass the run NaN-zombies, skipping every step.
             trigger = True
             self._last_viol_name = 'ce:non-finite'
-            print(f'  [FailureDetector] non-finite CE at step {step} -> forced rollback')
+            print(f'  [FailureDetector] non-finite CE at step {step} -> forced ALARM')
         else:
             for name, value in signals.items():
                 if self._observe(name, value):
@@ -325,54 +313,18 @@ class FailureDetector:
         if not trigger:
             return False
 
-        # Genuine divergence confirmed on some signal.
-        if self._live_state is None and not os.path.exists(self.best_path):
-            print(f'  [FailureDetector] signal spike but no rollback target yet — skipping')
-            # Still scrub runtime buffers: a non-finite spike with no restore
-            # target must not leave NaN EMAs behind to poison later steps (M8).
-            if hasattr(self.model, 'reset_cache'):
-                self.model.reset_cache()
-            self._cooldown = self.cooldown
-            self._viol = {}
-            return False
-        print(f'  [FailureDetector] divergence at step {step}: '
-              f'{" ".join(f"{k}={v:.2g}" for k, v in signals.items())} '
-              f'-> rollback to {"live state" if self._live_state is not None else self.best_path}')
-        if self._live_state is not None:
-            # zero file I/O, zero unpickling of the heavy envelope
-            self.model.load_state_dict(self._live_state, strict=False)
-        else:
-            try:  # weights_only=False: best.pt is a full-state dict incl. cfg
-                ckpt = torch.load(self.best_path, map_location='cpu', weights_only=False)
-            except TypeError:  # torch < 2.4 has no weights_only kwarg
-                ckpt = torch.load(self.best_path, map_location='cpu')
-            self.model.load_state_dict(ckpt['model'], strict=False)
-            del ckpt
-        if getattr(self.model, '_active_depth', None) is not None:
-            from .adaptation import set_active_depth
-            set_active_depth(self.model, self.model._active_depth)
-        self.recover_count += 1
-        new_opt = self.make_optimizer_fn(self.base_lr)  # fresh Adam (no momentum)
-        self.optimizer = new_opt
-        self.lr_controller.optimizer = new_opt
-        self.lr_controller.rewind()
-        if hasattr(self.model, 'reset_cache'):
-            self.model.reset_cache()
-        gc.collect()
-        torch.cuda.empty_cache()
+        # Confirmed sustained relative divergence — SIREN ONLY (decision D6).
+        # The sensor deliberately does not touch weights/optimizer/cache:
+        # returning True instructs the loop to STOP, keeping the post-mortem
+        # (this frame's weights) exactly as the log shows it, and best.pt on
+        # disk remains the last CLEAN val-improving save.
+        self.recover_count += 1                     # alarms raised (key kept)
         self._cooldown = self.cooldown
         self._viol = {}
-        # Re-bootstrap every signal baseline after rollback: model weights were
-        # restored to the pre-crash state and LR is re-warming, so CE/ratios run
-        # ABOVE their value for hundreds of steps. Without clearing _stats the
-        # slow_ema still remembers the pre-crash level and flags the recovery
-        # itself (the Colab "rollback every ~50 steps" loop). Fresh stats give a
-        # full fast-EMA half-life (1/(1-a)) of grace before re-arming.
-        self._stats = {}
-        if self.recover_count > self.recover_max:
-            raise RuntimeError(
-                f'FailureDetector: {self.recover_count} recoveries exceeded '
-                f'max {self.recover_max}; aborting')
+        print(f'  [ALARM] step {step}: '
+              f'{" ".join(f"{k}={v:.2g}" for k, v in signals.items())} — sustained '
+              f'relative divergence (sensor: {self._last_viol_name or "?"}). '
+              f'D6: no auto-rollback; stop, inspect, fix, resume from best.pt.')
         return True
 
 

@@ -625,35 +625,20 @@ def test_snapshot_restore_buffers():
 
 
 # ── M8.2 non-finite CE forces rollback; buffers get scrubbed ────────────────
-def test_nan_ce_forces_rollback(tmp_path=None):
-    import tempfile, pathlib
-    if tmp_path is None:
-        tmp_path = pathlib.Path(tempfile.mkdtemp())
+def test_nan_ce_forces_alarm_without_side_effects():
+    """D6: non-finite CE forces the ALARM (check()->True) — the sensor itself
+    must not swap optimizers, load files or rewrite buffers; the caller stops
+    the run and the NaN state dies with the process (resume reloads weights)."""
     from core.training_control import FailureDetector
-    from core.adaptation import LRController, build_optimizer
     m = _stack()
-    cfg = m.cfg
-    opt = build_optimizer(m, cfg.lr, llrd_decay=1.0, weight_decay=cfg.weight_decay,
-                          optimizer='adamw')
-    sched = LRController(m, opt, cfg=cfg)
-    best = str(tmp_path / 'best.pt')
-    torch.save({'model': m.state_dict()}, best)
-    wd = FailureDetector(m, sched, lambda lr: build_optimizer(
-        m, lr, llrd_decay=1.0, weight_decay=cfg.weight_decay, optimizer='adamw'),
-        best, cfg.lr, warmup=0)
-    # arm the protective chain with finite values
+    wd = FailureDetector(m, warmup=0)
     for i in range(5):
         wd.check(10.0, i, {'mlp_ratio': 1.0})
-    # poison a runtime EMA buffer + NaN CE
-    bus = [b for k, b in dict(m.named_buffers()).items() if b.is_floating_point()]
-    bus[0].fill_(float('nan'))
     fired = wd.check(float('nan'), 100, {'mlp_ratio': 1.0})
-    assert fired, 'non-finite CE did not force rollback'
-    assert wd.optimizer is not opt, 'fresh optimizer not installed'
-    still_nan = any(bool(torch.isnan(b).any()) for b in dict(m.named_buffers()).values()
-                    if b.is_floating_point())
-    assert not still_nan, 'NaN buffers survived the rollback (reset_cache scrub missing)'
-
+    assert fired, 'non-finite CE did not force the alarm'
+    assert not hasattr(wd, 'optimizer'), 'D6 detector must not own an optimizer'
+    assert not hasattr(wd, 'best_path'), 'D6 detector must not touch the filesystem'
+    assert m is not None  # weights untouched by the sensor itself
 
 # ── M8.3 TokenStream contract: wrapped flag + stream.len (train.py) ──────────
 def test_tokenstream_wrapped(tmp_path=None):
@@ -825,17 +810,17 @@ def test_logit_cache_incremental_kv_and_identity_init():
 def test_checkpoint_state_roundtrip():
     """M12 single-best.pt: watchdog & balancer statistics must round-trip —
     a resumed session continues its signal baselines, violation streaks and
-    recover_max pressure instead of silently re-bootstrapping (recover_count
+    alarm history instead of silently re-bootstrapping (recover_count
     was saved by M8 but never RESTORED until now)."""
     from core.training_control import FailureDetector, LossBalancer
     model = torch.nn.Module()
-    wd = FailureDetector(model, None, lambda lr: None, 'nonexistent.pt', 1e-4)
+    wd = FailureDetector(model)
     for i in range(30):                       # stable series: stats build, no trigger
         assert not wd.check(7.0 + 0.001 * i, i)
     wd.ce_armed = True
     sd = wd.state_dict()
     assert 'ce' in sd['stats'] and len(sd['stats']['ce']) == 4
-    wd2 = FailureDetector(model, None, lambda lr: True, 'x.pt', 1e-4)
+    wd2 = FailureDetector(model)
     wd2.load_state_dict(sd)
     assert wd2._stats == wd._stats and wd2.recover_count == wd.recover_count
     assert wd2.ce_armed and wd2._viol == wd._viol
@@ -860,7 +845,7 @@ def test_arm_ce_rebootstraps_warmup_baseline():
     baseline, violation counter zeroed, and only THEN the watch is live."""
     from core.training_control import FailureDetector
     model = torch.nn.Module()
-    wd = FailureDetector(model, None, lambda lr: None, 'nope.pt', 1e-4)
+    wd = FailureDetector(model)
     for i in range(60):                       # ramping (warmup) CE, un-armed
         wd.check(6.0 + 0.05 * i, i)
     assert 'ce' in wd._stats and not wd.ce_armed
@@ -934,35 +919,31 @@ def test_garbage_scanner_detects_synthetic_noise():
                 os.remove(p)
 
 
-def test_live_state_rollback_without_file():
-    """M15: with a live CPU state offered, divergence rollback must NOT touch
-    the filesystem (both live L4 OOM crashes happened in the file-load path).
-    Point best_path at a non-existent file: rollback must still succeed and
-    restore the offered weights."""
+def test_alarm_sensor_never_touches_model():
+    """Decision D6: check() only SOUNDS (returns True after 3 consecutive
+    relative violations) — it must NOT roll weights back, NOT build
+    optimizers, NOT read files, NOT clear its own baselines. The caller
+    stops; recovery is a human call. Cooldown must suppress re-alarm spam."""
     from core.training_control import FailureDetector
-    class _Ctl:
-        optimizer = None
-        def rewind(self): pass
     model = torch.nn.Linear(4, 4)
-    wd = FailureDetector(model, _Ctl(), lambda lr: None, 'no-such-file-9e1f2c.pt', 1e-4)
-    wd.offer_live_state({k: v.detach().cpu().clone() for k, v in model.state_dict().items()})
-    anchor = model.weight.detach().clone()
-    with torch.no_grad():
-        model.weight.add_(10.0)               # corrupt
-    # establish a LOW baseline (bootstrap the signal), then spike. A constant
-    # high value would let slow_EMA converge to it and the relative rule would
-    # never fire — the test must model a real divergence (low → sudden high).
+    wd = FailureDetector(model)
     wd.ce_armed = True
-    for i in range(120):
-        assert not wd.check(6.0, 100 + i)     # warm, stable, no trigger
+    with torch.no_grad():
+        model.weight.add_(10.0)               # corrupt the weights
+    corrupt = model.weight.detach().clone()
+    for i in range(120):                      # warm, stable baseline
+        assert not wd.check(6.0, 100 + i)
     fired = False
     for i in range(20):                       # sudden sustained spike
         fired = wd.check(50.0, 300 + i)
         if fired:
             break
     assert fired and wd.recover_count >= 1
-    assert torch.allclose(model.weight.detach(), anchor, atol=1e-6), \
-        'live-state rollback did not restore weights'
+    assert torch.equal(model.weight.detach(), corrupt), \
+        'D6: sensor touched model state — must be side-effect free'
+    assert wd._stats.get('ce') is not None, 'sensor must NOT wipe its baselines'
+    assert not wd.check(50.0, 400), 'cooldown must gate alarm spam'
+
 
 
 if __name__ == '__main__':

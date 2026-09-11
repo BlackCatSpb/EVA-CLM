@@ -213,10 +213,9 @@ def train(cfg=None, resume_path=None):
                             unfreeze_inc=4, eval_interval=cfg.eval_interval)
     # Aux-loss balancer: spectral alignment (bounds aux grad by ||g_CE||).
     balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval)
-    # Statistical failure detector (3-sigma) + fresh Adam + LR rewind.
-    watchdog = FailureDetector(model, scheduler, _make_opt,
-                               os.path.join(cfg.save_dir, 'best.pt'), cfg.lr,
-                               k_sigma=3.0, warmup=cfg.warmup_steps)
+    # Relative-divergence ALARM sensor (decision D6: detection only — the
+    # loop stops on an alarm; recovery is a human call from a clean best.pt).
+    watchdog = FailureDetector(model, k_sigma=3.0, warmup=cfg.warmup_steps)
     # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
@@ -320,9 +319,7 @@ def train(cfg=None, resume_path=None):
             depth.set_depth(_saved_depth)
         else:
             depth.set_depth(min(8 + (ckpt['step'] // 15000) * 4, cfg.n_layers))  # legacy fallback (pre-fix ckpts)
-        watchdog = FailureDetector(model, scheduler, _make_opt,
-                                   os.path.join(cfg.save_dir, 'best.pt'), cfg.lr,
-                                   k_sigma=3.0, warmup=cfg.warmup_steps)
+        watchdog = FailureDetector(model, k_sigma=3.0, warmup=cfg.warmup_steps)
         print('  Optimizer/scheduler rebuilt FRESH (no momentum restore)')
         start_step = ckpt['step']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
@@ -348,14 +345,6 @@ def train(cfg=None, resume_path=None):
     # Training loop
     os.makedirs(cfg.save_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
-    # M12 single-checkpoint policy: seed best.pt (model-only, step 0) when no
-    # resume checkpoint exists, so pre-first-val divergence has a restore target.
-    _best_path = os.path.join(cfg.save_dir, 'best.pt')
-    if start_step == 0 and not os.path.exists(_best_path):
-        _save_checkpoint_safely({'model': model.state_dict(), 'step': 0,
-                                 'seed': True}, _best_path)
-        print('[EVA] seeded best.pt (step 0) as early-rollback target (M12)')
-    watchdog.offer_live_state(dict(model.state_dict()))  # M15 (post-resume too)
     
     stream_idx = resumed_stream_idx   # continue the data cursor (audit M12)
     if stream_idx >= max(len(streams) - _hold_n, 1):   # pre-M13 cursor (M13)
@@ -481,18 +470,14 @@ def train(cfg=None, resume_path=None):
                         optimizer.zero_grad(set_to_none=True)
                         continue
             if _rb:
-                # free the current step graph BEFORE rebuilding state — the
-                # next forward must not run on top of retained activations
-                # (live-incident fix, see notebook cell 10)
-                h = out = ce_loss = aux_dict = None
-                optimizer = watchdog.optimizer
-                cfg.lr = watchdog.base_lr
-                state = None
-                gs = None
-                model.reset_cache()   # scrub NaN-poisoned runtime EMAs too (M8)
-                optimizer.zero_grad(set_to_none=True)
-                model.zero_grad(set_to_none=True)
-                continue
+                # D6: alarm-only. The run stops; best.pt on disk stays the
+                # last CLEAN val-improving save for the human-led restart.
+                if torch.cuda.is_available():
+                    print(f'  [alarm] cuda mem: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB '
+                          f'reserved={torch.cuda.memory_reserved()/1e9:.2f}GB')
+                print('[EVA] STOPPED ON ALARM (D6): fix the cause, resume from '
+                      'best.pt (last clean val-save). No auto-rollback by design.')
+                sys.exit(2)
 
             # ── Gradient-reactive governance loss ─────────────────────────
             # Moved into core.losses.compute_losses (audit M5): the target
@@ -662,7 +647,6 @@ def train(cfg=None, resume_path=None):
                         'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
                     }, save_path)
                     print(f'  Saved best model to {save_path}')
-                    watchdog.offer_live_state(dict(model.state_dict()))  # M15
                     generate_report(save_path)
             
             # Periodic step_*.pt checkpoints DISABLED: only best.pt is written (saves space).
@@ -737,9 +721,6 @@ if __name__ == '__main__':
     parser.add_argument('--stage-steps', type=int, default=15000, help='unlock next block every N steps (backstop)')
     parser.add_argument('--readiness-full', type=float, default=0.6, help='meta-maturity (differentiation) to unlock deepest block')
     parser.add_argument('--stage-mode', type=str, default='readiness', choices=['readiness', 'fixed'])
-    parser.add_argument('--watchdog-ce', type=float, default=15.0, help='CE above this => rollback + fresh Adam')
-    parser.add_argument('--recover-lr-mult', type=float, default=0.5)
-    parser.add_argument('--recover-max', type=int, default=20)
     parser.add_argument('--no-grad-ckpt', action='store_true',
                         help='Disable gradient checkpointing (avoids CheckpointError if recompute mismatches)')
     parser.add_argument('--bind-K', type=int, default=64)
@@ -791,9 +772,6 @@ if __name__ == '__main__':
         stage_steps=args.stage_steps,
         readiness_full=args.readiness_full,
         stage_mode=args.stage_mode,
-        watchdog_ce=args.watchdog_ce,
-        recover_lr_mult=args.recover_lr_mult,
-        recover_max=args.recover_max,
         max_steps=args.max_steps,
         warmup_steps=args.warmup,
         log_interval=args.log_interval,

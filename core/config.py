@@ -198,9 +198,6 @@ class WideBindConfig:
     stage_steps: int = 15000       # fixed backstop: unlock next block every N steps
     readiness_full: float = 0.6    # meta-maturity (differentiation) that unlocks deepest block
     stage_mode: str = 'readiness'  # 'readiness' (meta-driven) or 'fixed' (schedule only)
-    watchdog_ce: float = 15.0      # CE above this => rollback to best.pt + fresh Adam
-    recover_lr_mult: float = 0.5   # LR multiplier applied on each recovery
-    recover_max: int = 20          # abort after this many recoveries
 
     # w_m2v hierarchy by τ (Proposal IV)
     w_m2v_hierarchy_target: float = 1.0  # m — max target for deep layers

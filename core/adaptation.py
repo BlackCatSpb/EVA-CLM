@@ -42,7 +42,7 @@ Controllers
     Statistical divergence detection (SPC 3σ rule): maintains EWMA + variance of
     CE; flags a genuine explosion only when ``CE > mean + k_sigma·σ`` AND is
     still rising, after an initial warmup.  Replaces the arbitrary
-    ``watchdog_ce = 15.0`` threshold.  On trigger it rolls back to ``best.pt``,
+    relative rule (decision D6).  On trigger it sounds the alarm; the caller stops,
     rebuilds a FRESH Adam (no momentum), and rewinds the LR controller.
 
 * ``GradientClipper``
