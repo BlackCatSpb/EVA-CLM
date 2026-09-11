@@ -201,6 +201,18 @@ class FailureDetector:
         self.recover_count = 0
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self._stats: Dict[str, List[float]] = {}  # name -> [ema, var, prev, n]
+        # M15: live CPU copy of the rollback target (offered by the loop at
+        # every save/seed/resume). Rollback must NOT torch.load a ~3GB
+        # envelope at divergence time: on the fragmented CUDA caching
+        # allocator (expandable_segments silently unset because Colab
+        # pre-imports torch before cell 1 runs) that unpickle + optimizer
+        # state load is exactly what tipped rollback into OOM twice.
+        self._live_state = None
+
+    def offer_live_state(self, state_dict: Dict[str, torch.Tensor]) -> None:
+        """Register a CPU clone of the current weights as the rollback
+        target. Call after every successful best.pt save and after resume."""
+        self._live_state = {k: v.detach().cpu() for k, v in state_dict.items()}
 
     def state_dict(self) -> Dict[str, Any]:
         """Full watchdog state for the single-best.pt policy (audit M12): the
@@ -314,8 +326,8 @@ class FailureDetector:
             return False
 
         # Genuine divergence confirmed on some signal.
-        if not os.path.exists(self.best_path):
-            print(f'  [FailureDetector] signal spike but no best.pt yet — skipping')
+        if self._live_state is None and not os.path.exists(self.best_path):
+            print(f'  [FailureDetector] signal spike but no rollback target yet — skipping')
             # Still scrub runtime buffers: a non-finite spike with no restore
             # target must not leave NaN EMAs behind to poison later steps (M8).
             if hasattr(self.model, 'reset_cache'):
@@ -325,12 +337,17 @@ class FailureDetector:
             return False
         print(f'  [FailureDetector] divergence at step {step}: '
               f'{" ".join(f"{k}={v:.2g}" for k, v in signals.items())} '
-              f'-> rollback to {self.best_path}')
-        try:  # weights_only=False: best.pt is a full-state dict incl. cfg
-            ckpt = torch.load(self.best_path, map_location='cpu', weights_only=False)
-        except TypeError:  # torch < 2.4 has no weights_only kwarg
-            ckpt = torch.load(self.best_path, map_location='cpu')
-        self.model.load_state_dict(ckpt['model'], strict=False)
+              f'-> rollback to {"live state" if self._live_state is not None else self.best_path}')
+        if self._live_state is not None:
+            # zero file I/O, zero unpickling of the heavy envelope
+            self.model.load_state_dict(self._live_state, strict=False)
+        else:
+            try:  # weights_only=False: best.pt is a full-state dict incl. cfg
+                ckpt = torch.load(self.best_path, map_location='cpu', weights_only=False)
+            except TypeError:  # torch < 2.4 has no weights_only kwarg
+                ckpt = torch.load(self.best_path, map_location='cpu')
+            self.model.load_state_dict(ckpt['model'], strict=False)
+            del ckpt
         if getattr(self.model, '_active_depth', None) is not None:
             from .adaptation import set_active_depth
             set_active_depth(self.model, self.model._active_depth)
@@ -341,7 +358,6 @@ class FailureDetector:
         self.lr_controller.rewind()
         if hasattr(self.model, 'reset_cache'):
             self.model.reset_cache()
-        del ckpt
         gc.collect()
         torch.cuda.empty_cache()
         self._cooldown = self.cooldown

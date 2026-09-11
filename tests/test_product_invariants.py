@@ -934,6 +934,37 @@ def test_garbage_scanner_detects_synthetic_noise():
                 os.remove(p)
 
 
+def test_live_state_rollback_without_file():
+    """M15: with a live CPU state offered, divergence rollback must NOT touch
+    the filesystem (both live L4 OOM crashes happened in the file-load path).
+    Point best_path at a non-existent file: rollback must still succeed and
+    restore the offered weights."""
+    from core.training_control import FailureDetector
+    class _Ctl:
+        optimizer = None
+        def rewind(self): pass
+    model = torch.nn.Linear(4, 4)
+    wd = FailureDetector(model, _Ctl(), lambda lr: None, 'no-such-file-9e1f2c.pt', 1e-4)
+    wd.offer_live_state({k: v.detach().cpu().clone() for k, v in model.state_dict().items()})
+    anchor = model.weight.detach().clone()
+    with torch.no_grad():
+        model.weight.add_(10.0)               # corrupt
+    # establish a LOW baseline (bootstrap the signal), then spike. A constant
+    # high value would let slow_EMA converge to it and the relative rule would
+    # never fire — the test must model a real divergence (low → sudden high).
+    wd.ce_armed = True
+    for i in range(120):
+        assert not wd.check(6.0, 100 + i)     # warm, stable, no trigger
+    fired = False
+    for i in range(20):                       # sudden sustained spike
+        fired = wd.check(50.0, 300 + i)
+        if fired:
+            break
+    assert fired and wd.recover_count >= 1
+    assert torch.allclose(model.weight.detach(), anchor, atol=1e-6), \
+        'live-state rollback did not restore weights'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     fails = 0

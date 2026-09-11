@@ -355,6 +355,7 @@ def train(cfg=None, resume_path=None):
         _save_checkpoint_safely({'model': model.state_dict(), 'step': 0,
                                  'seed': True}, _best_path)
         print('[EVA] seeded best.pt (step 0) as early-rollback target (M12)')
+    watchdog.offer_live_state(dict(model.state_dict()))  # M15 (post-resume too)
     
     stream_idx = resumed_stream_idx   # continue the data cursor (audit M12)
     if stream_idx >= max(len(streams) - _hold_n, 1):   # pre-M13 cursor (M13)
@@ -661,6 +662,7 @@ def train(cfg=None, resume_path=None):
                         'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
                     }, save_path)
                     print(f'  Saved best model to {save_path}')
+                    watchdog.offer_live_state(dict(model.state_dict()))  # M15
                     generate_report(save_path)
             
             # Periodic step_*.pt checkpoints DISABLED: only best.pt is written (saves space).
