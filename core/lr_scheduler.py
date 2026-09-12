@@ -134,6 +134,11 @@ class MirrorLRScheduler:
             self._val_ema = val_loss
             self._val_improving = False
             self._lr_damp_steps = 0
+        # B12 (F3-07): _lr_damp_steps postdates the scheduler's pickled state;
+        # a resume from an older best.pt HAS _best_val_loss but NOT the counter
+        # -> first plateau damp raised AttributeError (verified both copies).
+        if not hasattr(self, '_lr_damp_steps'):
+            self._lr_damp_steps = 0
         regress_rel = getattr(self.cfg, 'lr_regress_rel', 0.05)
         improve_thresh = getattr(self.cfg, 'lr_improve_thresh', 0.98)
         if val_loss > self._best_val_loss * (1.0 + regress_rel):

@@ -394,7 +394,11 @@ class TrajectorySpiralBind(nn.Module):
         L: int
         K: int
         B, L, K = hp.shape
-        self._step_count += 1
+        # B12: under gradient_checkpointing the ggeo autograd passes RECOMPUTE
+        # this forward — without the freeze the counter ticks 6-8x per logged
+        # step and escapes the recompute-restore.
+        if not getattr(self, '_ggeo_freeze', False):
+            self._step_count += 1
 
         # Build trajectory: use traj_state only if sequence length matches
         if traj_state is not None:

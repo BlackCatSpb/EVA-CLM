@@ -317,8 +317,11 @@ def train(cfg=None, resume_path=None):
         optimizer = _make_opt(cfg.lr)
         if 'optimizer' in ckpt and ckpt['optimizer'] is not None and not args.no_save_optimizer:
             try:
-                optimizer.load_state_dict(ckpt['optimizer'])
-                print('  Optimizer state restored (momentum preserved)')
+                # B12 (F3-08): positional Adam restore shifts states onto wrong
+                # tensors when param order changes; by-name restorer existed but
+                # was dead code here (the notebook has always used it).
+                _restore_optimizer(optimizer, model, ckpt['optimizer'])
+                print('  Optimizer state restored BY NAME (momentum preserved)')
             except Exception as e:
                 print(f'  [warn] Could not restore optimizer state: {e} — using fresh Adam')
         scheduler = LRController(model, optimizer, cfg=cfg)
@@ -545,7 +548,15 @@ def train(cfg=None, resume_path=None):
             # runs only at log frequency and never touches .grad or the graph.
             if step and step % cfg.log_interval == 0:
                 try:
-                    _gg = balancer.grad_geometry(ce_s, aux_s, model.parameters())
+                    for _m in model.modules():
+                        if hasattr(_m, '_step_count'):
+                            _m._ggeo_freeze = True
+                    try:
+                        _gg = balancer.grad_geometry(ce_s, aux_s, model.parameters())
+                    finally:
+                        for _m in model.modules():
+                            if hasattr(_m, '_step_count'):
+                                _m._ggeo_freeze = False
                     if _gg:
                         print('  [ggeo] ' + '  '.join(
                             f'{k}:{r:.2f}/{c:+.2f}' for k, (r, c) in _gg.items()), flush=True)
@@ -668,12 +679,15 @@ def train(cfg=None, resume_path=None):
             # Eval
             if step > 0 and step % cfg.eval_interval == 0:
                 val_loss = evaluate(model, streams, cfg, device)
-                print(f'  EVAL step={step}: val_loss={val_loss:.4f} val_ppl={math.exp(val_loss):.2e}')
-                if device == 'cuda':
-                    torch.cuda.empty_cache()
-                scheduler.report_val_loss(val_loss)
-                depth.update(step, val_loss)
-                watchdog.arm_ce()  # CE joins the watch once val is trusted (M8; baseline re-bootstrap in arm_ce)
+                if not math.isfinite(val_loss):   # B12 (F3-01): empty pool — skip controllers
+                    print('  EVAL skipped: empty validation pool (NaN) — no reporting', flush=True)
+                else:
+                    print(f'  EVAL step={step}: val_loss={val_loss:.4f} val_ppl={math.exp(val_loss):.2e}')
+                    if device == 'cuda':
+                        torch.cuda.empty_cache()
+                    scheduler.report_val_loss(val_loss)
+                    depth.update(step, val_loss)
+                    watchdog.arm_ce()  # CE joins the watch once val is trusted (M8; re-bootstrap in arm_ce)
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -729,6 +743,12 @@ def evaluate(model, streams, cfg, device, hold_n=None):
     
     # Hold-out eval (audit M13): average over the last `_hold_n` files, each
     # read from its 3/4-region; per-file budget divides 100 batches.
+    # B12 (F3-01): with an empty pool `streams[-1]` raised IndexError before
+    # the NaN path could ever be reached; and 0-steps used to return 0.0.
+    if not streams:
+        model.train()
+        model.restore_runtime_buffers(_rt_snap)
+        return float('nan')
     eval_pool = streams[-hold_n:] if hold_n >= 1 else [streams[-1]]
     for stream in eval_pool:
         if stream.len < cfg.batch_size * cfg.seq_len + 1:
@@ -750,7 +770,10 @@ def evaluate(model, streams, cfg, device, hold_n=None):
         _lc.cache.clear()
     model.restore_runtime_buffers(_rt_snap)
     model.train()
-    return total_loss / max(total_steps, 1)
+    # B12 (F3-01): an empty pool returned 0.0 — a PERFECT score that anchored
+    # _best_val_loss=0 forever and ratcheted LR to its floor with an
+    # unreachable recovery branch. NaN = 'no measurement'.
+    return (total_loss / total_steps) if total_steps else float('nan')
 
 
 if __name__ == '__main__':
@@ -833,5 +856,11 @@ if __name__ == '__main__':
         reset_skip_alpha=args.reset_skip_alpha,
         gradient_checkpointing=(not args.no_grad_ckpt),
     )
-    
+    # B12 (F3-02): __post_init__ recomputes schedule fields from the lambda-domain
+    # and clobbers the constructor kwargs (--warmup 500 arrived as 101). The CLI
+    # is the user; it must win. Apply AFTER construction.
+    cfg.warmup_steps = args.warmup
+    cfg.log_interval = args.log_interval
+    cfg.eval_interval = args.eval_interval
+
     train(cfg, resume_path=args.resume)

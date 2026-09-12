@@ -583,7 +583,14 @@ class LossBalancer:
         if acc_ce is None:
             return {}
         out = {}
-        for name in sorted(aux_dict):
+        # B12 (agent 3, F3-04): alphabetical cap hid half the ledger —
+        # gradalign/pred/intent_tau/signal_ent/w_m2v never appeared in
+        # [ggeo]. Priority first, then the rest alphabetically.
+        PRIORITY = ('gradalign', 'bridge_conn', 'pred', 'diversity', 'branch',
+                    'balance', 'decorr', 'signal_ent', 'intent_tau', 'w_m2v')
+        _names = [n for n in PRIORITY if n in aux_dict] + \
+                 [n for n in sorted(aux_dict) if n not in PRIORITY]
+        for name in _names:
             if len(out) >= max_terms:
                 break
             v = aux_dict[name]

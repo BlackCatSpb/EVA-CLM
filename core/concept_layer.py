@@ -105,7 +105,12 @@ class UnifiedConceptLayer(nn.Module):
         self.register_buffer('_cached_birth_gate', torch.tensor(0.0), persistent=False)
 
         # ─── Uncertainty/contradiction gates (from System A) ───
-        self.log_tau_uncert = nn.Parameter(torch.tensor(1.0))   # uncertainty threshold
+        # B12 (audit 03 F3-05): the threshold lived on the OLD pen scale
+        # (sum-norm over (G,k) ~ 8 at rest). After B10's per-dim RMS pen
+        # (~0.35 typical) exp(1.0)=2.72 made u_gate a permanently-closed
+        # archive (fire-rate 1.000 -> 0.0000 measured). Re-based to ln(0.5):
+        # half-open at typical surprise; still learnable either way.
+        self.log_tau_uncert = nn.Parameter(torch.tensor(-0.6931))   # = ln(0.5)
         self.log_tau_contra = nn.Parameter(torch.tensor(1.0))   # contradiction threshold
         self.uncert_kappa = nn.Parameter(torch.tensor(3.0))     # sharpness
         # U7: τ-learned birth threshold
