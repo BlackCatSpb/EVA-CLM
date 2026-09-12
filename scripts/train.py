@@ -528,6 +528,18 @@ def train(cfg=None, resume_path=None):
             ce_s = ce_loss * gscale
             aux_s = {k: (v * gscale if isinstance(v, torch.Tensor) else v)
                      for k, v in aux_dict.items()}
+            # B6 (GPT-#34): per-aux gradient geometry vs CE — who drives the model,
+            # who fights it, who heats air (printed as name:ratio/cos where ratio
+            # = ||g_aux||/||g_CE||). Costs a full backward pass per term, so it
+            # runs only at log frequency and never touches .grad or the graph.
+            if step and step % cfg.log_interval == 0:
+                try:
+                    _gg = balancer.grad_geometry(ce_s, aux_s, model.parameters())
+                    if _gg:
+                        print('  [ggeo] ' + '  '.join(
+                            f'{k}:{r:.2f}/{c:+.2f}' for k, (r, c) in _gg.items()), flush=True)
+                except Exception as _ge:
+                    print(f'  [ggeo] unavailable: {_ge}', flush=True)
             balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model)
             
             # Adaptive phase scaling: EMA-based mirror/base gradient balance

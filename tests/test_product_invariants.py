@@ -935,6 +935,33 @@ def test_garbage_scanner_detects_synthetic_noise():
                 os.remove(p)
 
 
+def test_b6_grad_geometry_is_exact_diagnostic():
+    """#34 lock: grad_geometry reports EXACT (norm-ratio, cosine) per aux term,
+    never touches .grad, and never consumes the autograd graph (the real
+    backward after it must still work)."""
+    from core.training_control import LossBalancer
+    torch.manual_seed(0)
+    lin = torch.nn.Linear(4, 2, bias=False)
+    x = torch.randn(3, 4)
+    y = torch.randn(3, 2)
+    ce = ((lin(x) - y) ** 2).mean()
+    bal = LossBalancer(align=False)
+    aux = {'aligned': 2.0 * ce, 'opposed': -0.5 * ce}
+    before = [None if p.grad is None else p.grad.clone()
+              for p in lin.parameters()]
+    geo = bal.grad_geometry(ce, aux, lin.parameters())
+    assert set(geo) == {'aligned', 'opposed'}
+    r_a, c_a = geo['aligned']
+    r_o, c_o = geo['opposed']
+    assert abs(r_a - 2.0) < 1e-4 and abs(c_a - 1.0) < 1e-4, geo
+    assert abs(r_o - 0.5) < 1e-4 and abs(c_o + 1.0) < 1e-4, geo
+    after = [p.grad for p in lin.parameters()]
+    assert all((a is None and b is None) or torch.equal(a, b)
+               for a, b in zip(before, after)), '.grad must stay untouched'
+    ce.backward()                          # graph survived the diagnostic
+    assert lin.weight.grad is not None and torch.isfinite(lin.weight.grad).all()
+
+
 def test_b5_warmup_is_not_an_incident():
     """Live incident (2026-09, A100 L4 run): at step 273 the watchdog ALARMED
     on gate_l1 while the model was HEALTHY — the LR warmup ramp legitimately

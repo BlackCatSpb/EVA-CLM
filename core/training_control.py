@@ -495,6 +495,60 @@ class LossBalancer:
             total = total + beta * (v / self.ema_aux.get(k, 1e-8))
         return total
 
+    def grad_geometry(self, ce_loss, aux_dict, parameters, max_terms: int = 8):
+        """B6 (GPT-#34): per-aux gradient geometry against CE.
+
+        Returns {name: (norm_ratio, cos)} where norm_ratio = ||g_aux||/||g_CE||
+        and cos = <g_aux,g_CE>/(||g_aux|| ||g_CE||). Answers the question every
+        audit this session had to guess at: is this auxiliary actually driving
+        the model, fighting CE, or heating air? Pure diagnostic: uses
+        autograd.grad (never touches .grad), leaves the graph intact for the
+        real backward that follows. Cost: one extra backward pass per term —
+        call sites gate it to log_interval frequency.
+        """
+        params = [p for p in parameters if p.requires_grad]
+        if not params:
+            return {}
+        ce_g = torch.autograd.grad(ce_loss, params, retain_graph=True,
+                                   allow_unused=True)
+        acc_ce = None
+        for g in ce_g:
+            if g is None:
+                continue
+            f = g.reshape(-1)
+            d = torch.dot(f, f)
+            acc_ce = d if acc_ce is None else acc_ce + d
+        if acc_ce is None:
+            return {}
+        out = {}
+        for name in sorted(aux_dict):
+            if len(out) >= max_terms:
+                break
+            v = aux_dict[name]
+            if not isinstance(v, torch.Tensor) or not v.requires_grad:
+                continue
+            try:
+                tg = torch.autograd.grad(v, params, retain_graph=True,
+                                         allow_unused=True)
+            except RuntimeError:
+                continue              # term not connected to this graph
+            num = na = nb = None
+            for gce, gt in zip(ce_g, tg):
+                if gce is None or gt is None:
+                    continue
+                a, b = gce.reshape(-1), gt.reshape(-1)
+                da = torch.dot(a, a); db = torch.dot(b, b)
+                dd = torch.dot(a, b)
+                num = dd if num is None else num + dd
+                na = da if na is None else na + da
+                nb = db if nb is None else nb + db
+            if num is None or float(na) == 0.0 or float(nb) == 0.0:
+                out[name] = (0.0, 0.0)
+                continue
+            out[name] = (float(nb.sqrt() / (acc_ce.sqrt() + 1e-12)),
+                         float(num / (na.sqrt() * nb.sqrt() + 1e-12)))
+        return out
+
     def backward(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any],
                  parameters: Iterable[torch.nn.Parameter],
                  retain_graph: bool = False,
