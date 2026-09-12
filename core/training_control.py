@@ -401,6 +401,19 @@ class FailureDetector:
 # Loss balancing — spectral alignment (PCGrad), no cap
 # ─────────────────────────────────────────────────────────────────────────────
 
+def hard_veto_ceiling(vocab: int, factor: float = 2.0) -> float:
+    """B7 (audit 01, F-07): geometry-independent non-learnable-CE ceiling.
+
+    With head_normalize=True the gated CE is a full softmax NLL whose uniform
+    reference is ln(V) — the old K*ln2 formula was correct only for the
+    factorized bit branch and DOUBLED itself when twin_free moved code_dim
+    32->64 (22.2 -> 44.4), silently letting the CE~34 garbage class through.
+    factor=2 preserves the historical calibration EXACTLY (2*ln(65536) =
+    22.18 ~ 32*ln2 = 22.17) while depending on nothing but the vocab.
+    """
+    return factor * math.log(float(vocab))
+
+
 class LossBalancer:
     """Combine CE with auxiliary losses WITHOUT per-loss magic weights.
 

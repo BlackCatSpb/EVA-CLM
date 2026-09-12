@@ -13,7 +13,7 @@ class WideBindConfig:
     D: int = 4096
     n_layers: int = 32
     bind_K: int = 64
-    vocab: int = 50000
+    vocab: int = 65536  # B7: real corpus ids reach 65535 (50000 silently folded 7.8% of FANTASY)
     seq_len: int = 256
     batch_size: int = 2
     lr: float = 3e-4

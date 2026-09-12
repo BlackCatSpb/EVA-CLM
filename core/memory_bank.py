@@ -199,8 +199,12 @@ class L2Bank(nn.Module):
         # LayerNorm for vals to prevent magnitude explosion
         self.val_norm = nn.LayerNorm(bridge_dim)
 
-        self.keys = nn.Parameter(torch.randn(n_slots, bridge_dim) * 0.02)
-        self.vals = nn.Parameter(torch.randn(n_slots, bridge_dim) * 0.02)
+        # B7 (audit 01, F-02): bank CONTENT is state, not weights. As
+        # Parameters they sat in Adam (whose moments went stale under the
+        # .data mutations), were invisible to eval snapshot/restore (F-03),
+        # and document-rotation wiped values the optimizer was chasing.
+        self.register_buffer('keys', torch.randn(n_slots, bridge_dim) * 0.02)
+        self.register_buffer('vals', torch.randn(n_slots, bridge_dim) * 0.02)
 
         self.novelty_gate = nn.Sequential(
             nn.Linear(D, bridge_dim),
@@ -404,7 +408,10 @@ class StreamingMemoryBank(nn.Module):
         is_sep = (tokens == 2)  # SEP token = sentence boundary
 
         # Determine if writes are allowed
-        _can_write = (mat_gate is None) or (mat_gate >= self._min_write_maturation)
+        # B7 (F-03): eval forwards must not consolidate hold-out content
+        # into the bank — writes are training-mode only (reads unaffected).
+        _can_write = self.training and ((mat_gate is None) or
+                                (mat_gate >= self._min_write_maturation))
 
         # Detect boundaries and write to all levels
         with torch.no_grad():

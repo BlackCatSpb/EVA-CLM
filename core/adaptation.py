@@ -463,5 +463,6 @@ class GradientClipper:
 # Re-export (single adaptive module: core/training_control.py)
 # ─────────────────────────────────────────────────────────────────────────────
 from .training_control import (   # noqa: F401,E402
-    FailureDetector, LossBalancer, apply_tau_lr, layer_tau_ctx, mirror_lstats,
+    FailureDetector, LossBalancer, hard_veto_ceiling,
+    apply_tau_lr, layer_tau_ctx, mirror_lstats,
 )

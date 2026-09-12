@@ -12,6 +12,7 @@ import numpy as np
 from torch.serialization import add_safe_globals
 
 from core import EVAConfig, EVAStack, MirrorLRScheduler
+from core.training_control import hard_veto_ceiling
 
 
 def _save_checkpoint_safely(state, path):
@@ -44,17 +45,23 @@ class TokenStream:
     """Memory-mapped uint16 token stream; converted to torch.long per batch."""
     def __init__(self, path):
         self.data = np.memmap(path, dtype=np.uint16, mode='r')
+        self.path = path
         self.len = len(self.data)
-    def get_batch(self, seq_len, batch_size, offset, vocab=50000):
+    def get_batch(self, seq_len, batch_size, offset, vocab=None):
         needed = batch_size * seq_len + 1
         wrapped = offset + needed > self.len
         if wrapped:
             offset = 0
         chunk = self.data[offset:offset + needed]
+        # B7 (audit 01, F-01): the old silent np.clip folded 1.3-7.8% of real
+        # corpus ids (e.g. 25.5M tokens >= 50000 in FANTASY, incl. id 65535)
+        # onto one junk token. A corpus/model mismatch is fatal and LOUD now.
         if vocab is not None:
-            # uint16-файлы могут содержать токены ≥ vocab → device-side assert
-            # в codes[tokens] (index out of bounds); клипим до безопасности.
-            chunk = np.clip(chunk, 0, vocab - 1)
+            _hi = int(chunk.max(initial=0))
+            if _hi >= vocab:
+                raise ValueError(
+                    f'TokenStream: token id {_hi} >= vocab {vocab} in {self.path!r} '
+                    '- corpus and model vocabulary disagree (no silent clipping).')
         x = torch.from_numpy(chunk[:batch_size * seq_len].reshape(batch_size, seq_len).copy())
         y = torch.from_numpy(chunk[1:batch_size * seq_len + 1].reshape(batch_size, seq_len).copy())
         # Audit M8: return an explicit `wrapped` flag. The old 3-tuple made the
@@ -433,7 +440,7 @@ def train(cfg=None, resume_path=None):
             # M14 non-learnable-batch veto (mirror of the notebook): CE above
             # the coded head's uniform-bit NLL = data garbage, not model
             # divergence — skip the gradient, advance the cursor.
-            _ce_uni = float(getattr(model.lm_head, 'K', cfg.bind_K)) * 0.6931471805599453
+            _ce_uni = hard_veto_ceiling(cfg.vocab)
             if ce_val > _ce_uni:
                 print(f'  [veto] step {step}: ce={ce_val:.2f} > {_ce_uni:.1f} uniform-bit NLL — gradient skipped')
                 h = out = ce_loss = aux_dict = None
@@ -751,7 +758,7 @@ if __name__ == '__main__':
     parser.add_argument('--seq-len', type=int, default=256)
     parser.add_argument('--n-layers', type=int, default=24)
     parser.add_argument('--D', type=int, default=4096, help='model width')
-    parser.add_argument('--vocab', type=int, default=50000)
+    parser.add_argument('--vocab', type=int, default=65536)
     parser.add_argument('--mirror-k', type=int, default=32)
     parser.add_argument('--llrd', type=float, default=0.9, help='layer-wise LR decay per depth (deeper=smaller LR)')
     parser.add_argument('--init-active-layers', type=int, default=8, help='blocks trained from step 0 (rest frozen)')
