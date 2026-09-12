@@ -666,7 +666,30 @@ class LossBalancer:
                 # в grad-mode (AGC делает p.grad.mul_ in-place).
                 p.grad = g.clone() if g is not None else None
             if bypass:
-                sum(bypass.values()).backward()
+                # B14 (audit 04 F4-10): raw .backward() here landed a
+                # bypass-only ledger UNBOUNDED on params (measured 51x CE)
+                # and recorded into the gradalign CE target. Sign-mask +
+                # per-param clamp + hook-freeze, exactly like the aligned path.
+                if phase_model is not None:
+                    for _l in getattr(phase_model, 'layers', []):
+                        _l._ga_record = False
+                bg = torch.autograd.grad(sum(bypass.values()), params,
+                                         retain_graph=True, allow_unused=True)
+                with torch.no_grad():
+                    for p, gce, gb in zip(params, ce_grads, bg):
+                        if gce is None and gb is None:
+                            p.grad = None
+                        elif gce is None:
+                            p.grad = torch.zeros_like(p)
+                        else:
+                            p.grad = gce.clone()
+                            if gb is not None:
+                                b = gb * ((gce * gb) > 0)
+                                _sc = torch.clamp(gce.norm() / (b.norm() + 1e-12), max=1.0)
+                                p.grad.add_(b * _sc)
+                if phase_model is not None:
+                    for _l in getattr(phase_model, 'layers', []):
+                        _l._ga_record = True
             return
 
         if phase_model is not None:

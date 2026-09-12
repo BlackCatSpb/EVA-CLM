@@ -120,6 +120,25 @@ class DepthController:
         self.active = set_active_depth(self.model, k)
         return self.active
 
+    def get_state(self) -> Dict[str, Any]:
+        # B14 (audit 04 F4-06): the plateau integrator was orphaned — resume
+        # reset _last_depth_step to -1e9, so the FIRST post-resume plateau
+        # unlocked depth with no eval-interval spacing, and the slope/variance
+        # estimator restarted cold. Serialize all four scalars.
+        return {'active': self.active, 'val_ema': self._val_ema,
+                'val_var': self._val_var, 'prev_val': self._prev_val,
+                'last_depth_step': int(self._last_depth_step)}
+
+    def put_state(self, st):
+        if not st:
+            return
+        self.set_depth(int(st.get('active', self.active)))
+        self._val_ema = st.get('val_ema')
+        self._val_var = st.get('val_var')
+        self._prev_val = st.get('prev_val')
+        if st.get('last_depth_step') is not None:
+            self._last_depth_step = int(st['last_depth_step'])
+
     def update(self, step: int, val_loss: Optional[float] = None) -> int:
         """Call every step.  Depth progression only happens at eval boundaries
         (when ``val_loss`` is provided)."""

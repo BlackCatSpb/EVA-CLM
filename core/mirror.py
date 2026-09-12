@@ -529,8 +529,13 @@ class GroupedCognitiveMirror(nn.Module):
             self._cached_pred_error_norm = pred_error_norm.detach()
         else:
             self._pred_loss_term = None   # eval: never hold a training graph
-            self._cached_pred_error_norm = pred_error_norm.detach()   # B1: fresh (B,L) for UCL
-            self._cached_hp = hp.detach()
+            # B14 (audits 02b F2B-03 + 04 F4-11): eval NO LONGER writes
+            # _cached_pred_error_norm/_cached_hp. The block reads them as
+            # forward inputs (write gate, decay penalty, per-expert write
+            # modulation), so hold-out data was measurably steering the next
+            # training window (rel 0.39 cold / ~0.8% steady) THROUGH the
+            # snapshot-restore contract. Eval now reads the train-carried
+            # caches — the streaming-correct definition of eval, zero leak.
         if self.training:
             _bh = self._cached_hp_buf.shape[0]
             _bs = self._cached_hp_buf.shape[1]

@@ -344,6 +344,7 @@ def train(cfg=None, resume_path=None):
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
         # M12: full-state resume — watchdog/balancer baselines ride in best.pt
         watchdog.load_state_dict(ckpt.get('detector'))
+        depth.put_state(ckpt.get('depth_state'))  # B14 (F4-06)
         if ckpt.get('balancer') is not None:
             balancer.load_state_dict(ckpt['balancer'])
         _m12_rng = ckpt.get('rng')
@@ -476,7 +477,11 @@ def train(cfg=None, resume_path=None):
                         _mets['ig_eff'] = float(sum(_ige) / len(_ige))
             except Exception:
                 pass
-            _rb = watchdog.check(ce_val, step, _mets)
+            # B14 (audit 04 F4-05): warmup-freeze keys off the LR clock
+            # (scheduler._step), not the loop step — veto storms advance
+            # the loop while LR freezes, releasing the B5 freeze into
+            # legitimate mid-warmup drift.
+            _rb = watchdog.check(ce_val, int(getattr(scheduler, '_step', step)), _mets)
             # M14b soft veto (mirror of notebook): >4 rel-margins over the
             # fast-EMA CE level = escalation fuel, skip the gradient.
             if not _rb:
@@ -720,7 +725,7 @@ def train(cfg=None, resume_path=None):
                         'active_depth': depth.active,
                         # M12: one checkpoint carries the FULL restart state
                         'recover_count': watchdog.recover_count,
-                        'detector': watchdog.state_dict(),
+                        'detector': watchdog.state_dict(), 'depth_state': depth.get_state(),
                         'balancer': balancer.state_dict(),
                         'stream_idx': int(stream_idx), 'offset': int(offset),
                         'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),

@@ -87,7 +87,7 @@ class MirrorLRScheduler:
         for layer in self.model.layers:
             ls = layer.mirror.log_scale.data
             vals.append(ls.var().item())
-        if self._ls_fast is None:
+        if self._ls_fast is None or len(self._ls_fast) != n:  # B14 (F4-05 sibling)
             self._ls_fast = list(vals)
             self._ls_slow = list(vals)
             self._ls_mult = [1.0] * n
