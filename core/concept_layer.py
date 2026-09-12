@@ -227,8 +227,8 @@ class UnifiedConceptLayer(nn.Module):
                 # out-of-place index_copy: grad flows through the SOURCE
                 # (in-place put into a non-grad clone drops the graph — M6)
                 it = torch.tensor(upd_idx, device=device)
-                keys = keys.detach().index_copy(0, it, torch.stack(upd_keys))
-                vals = vals.detach().index_copy(0, it, torch.stack(upd_vals))
+                keys = keys.detach().index_copy(0, it, torch.stack(upd_keys).to(keys.dtype))  # B10 bf16 dtype lock (Colab AMP crash)
+                vals = vals.detach().index_copy(0, it, torch.stack(upd_vals).to(vals.dtype))
 
         # ─── Birth new concepts ───
         # Novelty: cosine distance to the nearest slot must exceed the
@@ -257,8 +257,8 @@ class UnifiedConceptLayer(nn.Module):
             _kb = keys if keys.requires_grad else keys.detach()
             _vb = vals if vals.requires_grad else vals.detach()
             keys = _kb.index_copy(
-                0, it, F.normalize(q_n[novel].mean(dim=0), dim=-1).unsqueeze(0))
-            vals = _vb.index_copy(0, it, val_proj[novel].mean(dim=0).unsqueeze(0))
+                0, it, F.normalize(q_n[novel].mean(dim=0), dim=-1).unsqueeze(0).to(_kb.dtype))
+            vals = _vb.index_copy(0, it, val_proj[novel].mean(dim=0).unsqueeze(0).to(_vb.dtype))
             with torch.no_grad():
                 self.concept_count[idx] = 1
                 self.concept_age[idx] = 0.0

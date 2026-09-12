@@ -55,3 +55,12 @@ def test_b10_pen_is_normalized_surprise():
     assert hi < 2.0, f'pen back at inflated scale (max {hi:.2f}) -> ladder killer'
     f = 1.0 - (torch.sigmoid(pen) - torch.sigmoid(torch.zeros_like(pen)))
     assert float(f.min()) > 0.75, f'pen_decay_factor pinned at {float(f.min()):.2f}'
+
+def test_b10_concept_layer_index_copy_is_dtype_explicit():
+    import inspect
+    from core import concept_layer as cl
+    src = inspect.getsource(cl)
+    bad = [l for l in src.splitlines() if 'index_copy(' in l and '.to(' not in l
+           and 'index_copy(0, it' in l]
+    assert not bad, f'regression: dtype-less index_copy: {bad}'
+
