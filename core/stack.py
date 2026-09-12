@@ -391,6 +391,13 @@ class EVAStack(nn.Module):
                 mat_gate = self.maturation.step_gate(step, self._tau_l_dev.detach())
                 mat_gate = torch.maximum(mat_gate, self.maturation.readiness.detach().clone())  # clone: update() writes readiness in-place; detach shares storage
                 _global_ready = self.maturation.global_ready
+                # M11 (audit 02b F2B-04): step-None (eval/inference) reuses
+                # self.maturation.gate — publish the COMBINED gate there, or
+                # eval trains on max(ramp,readiness) while validating on the
+                # raw ramp (measured 0.182 vs 4.2e-4): a systematically
+                # un-woken trunk in val skews every val-gated controller.
+                with torch.no_grad():
+                    self.maturation.gate.data.copy_(mat_gate)
 
         if self.bridge is not None:
             self.bridge.start_forward()

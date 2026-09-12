@@ -408,6 +408,14 @@ class EVABlock(nn.Module):
         # Опорные точки скрещивания спиралей: синхронность фаз усиливает запись
         coh_mean = coherence.mean(dim=-1, keepdim=True)     # (B, L, 1)
         i_gate = i_gate * (1.0 + self.bind_coh_gate * coh_mean.to(i_gate.dtype))
+        # M11: centered (rest = 1.0 = exact ladder; content only shortens).
+        # F2B-02 note (audit 02b): the sigmoid(b_d)~0.88 rest floor does compress
+        # the tau ladder (measured tau_eff 7.5/31/135 vs nominal). CENTERING d_mod
+        # to 1.0 at rest is NOT the fix: it removes the decay floor, memory stops
+        # decaying across a 512-window, downstream norm saturates and
+        # layer_bridge_gate gradients vanish (caught by the dead-parameter
+        # detector in B11). Widening the ladder needs a BOUNDED rest (<1) with
+        # (1-a) write-normalization — a B12 design decision, not a silent edit.
         d_mod = torch.sigmoid(h * self.w_d + self.b_d)      # (B, L, D) — content mod of decay
         if noise_scale > 0 and self.training:
             noise = 1.0 + noise_scale * torch.randn_like(i_gate)
