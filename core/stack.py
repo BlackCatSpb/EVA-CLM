@@ -200,7 +200,8 @@ class EVAStack(nn.Module):
             n_heads=getattr(cfg, 'logit_cache_n_heads', 8),
             scheduled_sampling_ratio=getattr(cfg, 'logit_cache_scheduled_sampling', 0.05),
             codes=getattr(self.lm_head, 'codes', None),
-            sparsity=float(getattr(cfg, 'code_sparsity', 4)),
+            mode=getattr(cfg, 'logit_cache_mode', 'topk'),
+                sparsity=float(getattr(cfg, 'code_sparsity', 4)),
         ) if getattr(cfg, 'logit_cache_enabled', True) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,

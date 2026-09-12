@@ -62,6 +62,7 @@ class WideBindConfig:
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)
+    logit_cache_mode: str = 'topk'   # M18: 'profile' = store z@C on write, no V-work on read
     vsa_decay_floor_k: float = 2.0   # B18 (audit 02b F2B-02): decay floor exp(-k/tau_s);
                                      # content can shorten memory down to tau_s/k, never below.
     embed_center: bool = False   # B9 (audit 02a): remove the 95% common-mode of the codebook (zero-mean codes)

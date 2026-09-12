@@ -66,6 +66,7 @@ class LogitCache(nn.Module):
         # Storage: either h (training) or compressed logits (inference)
         self._h_cache: List[torch.Tensor] = []  # training: store h (detached)
         self._logit_cache: List[Dict] = []  # inference: store compressed logits
+        self._p_cache: list = []   # M18: write-time profiles (B,L,K) fp16
         # write-time k/v encodings for the h entries (owned by LogitAttention's
         # projections, stored HERE so every cache.clear() boundary is complete)
         self._kv_h: List[Tuple[torch.Tensor, torch.Tensor]] = []
@@ -77,6 +78,21 @@ class LogitCache(nn.Module):
         base_k = float(sum(BASE_K)) / len(BASE_K)
         k = int(base_k * torch.sigmoid(self.vsa_scales.detach()).mean().item())
         return max(k, 8)
+
+    def store_profile(self, p: torch.Tensor) -> None:
+        # M18 'profile' mode: store the write-time projection p = tanh(z/10)@C
+        # (K-dim fp16, ~128 B/token). Retrieval then never touches V: legacy
+        # top-k both discards the logit-field tail AND rebuilds (B,M,V) +
+        # V@C on EVERY read step (agent 02a F2A-08, GPT-6 #15-17).
+        self._p_cache.append(p.detach().to(torch.float16))
+        while len(self._p_cache) > self.max_entries:
+            self._p_cache.pop(0)
+
+    def profile_window(self, n: int = None):
+        if not self._p_cache:
+            return None
+        entries = self._p_cache[-n:] if n else list(self._p_cache)
+        return torch.cat(entries, dim=1)
 
     def store(self, h_or_logits: torch.Tensor, training: bool = True) -> None:
         """Store data in cache.
@@ -174,6 +190,7 @@ class LogitCache(nn.Module):
         """Clear the cache."""
         self._h_cache.clear()
         self._logit_cache.clear()
+        self._p_cache.clear()
         self._kv_h.clear()
         self._position = 0
 
@@ -193,7 +210,7 @@ class LogitCache(nn.Module):
         return total_bytes / (1024 * 1024)
 
     def __len__(self) -> int:
-        return max(len(self._h_cache), len(self._logit_cache))
+        return max(len(self._h_cache), len(self._logit_cache), len(self._p_cache))
 
 
 class LogitAttention(nn.Module):
@@ -319,19 +336,26 @@ class LogitAttention(nn.Module):
             V_cache = torch.cat([p[1] for p in pairs[:-1]] + [v_new], dim=1)
             M = K.shape[1]
         else:
-            cached = cache.retrieve(n=min(len(cache), 512), training=False)
-            if cached is None:
-                if return_attention:
-                    return h, None
-                return h
-            M = cached.shape[1]
-            # B8 (audit 02a F2A-08): bit_profile applies its own bounded
-            # tanh(z/10); the outer tanh here DOUBLE-squashed the profile
-            # (effective slope ~1/100, measured floor/signal 42:1).
-            # logits mode: summarize into the code space, project K → D
-            prof = self.bit_profile(cached)
-            K = self.k_norm(self.k_proj_l(prof))
-            V_cache = self.v_norm(self.v_proj_l(prof))
+            # M18: 'profile' mode — cache carries write-time p; read is
+            # p -> (K,V), zero V-space work. Legacy top-k path kept verbatim
+            # as the control arm.
+            prof = cache.profile_window(n=min(len(cache), 512)) if getattr(cache, '_p_cache', None) else None
+            if prof is not None:
+                dt = self.k_proj_l.weight.dtype
+                K = self.k_norm(self.k_proj_l(prof.to(dt)))
+                V_cache = self.v_norm(self.v_proj_l(prof.to(dt)))
+                M = K.shape[1]
+            else:
+                cached = cache.retrieve(n=min(len(cache), 512), training=False)
+                if cached is None:
+                    if return_attention:
+                        return h, None
+                    return h
+                M = cached.shape[1]
+                # logits mode: summarize into the code space, project K -> D
+                prof2 = self.bit_profile(cached)
+                K = self.k_norm(self.k_proj_l(prof2))
+                V_cache = self.v_norm(self.v_proj_l(prof2))
 
         # position ids modulo the embedding table (the old arange(M) raised
         # IndexError once the entry-window exceeded max_cache_len at L>2)
@@ -379,11 +403,13 @@ class LogitCacheAttention(nn.Module):
     def __init__(self, D: int, V: int, n_layers: int = 24,
                  max_entries: int = 64, n_heads: int = 8,
                  scheduled_sampling_ratio: float = 0.05,
-                 codes: torch.Tensor | None = None, sparsity: float = 1.0):
+                 codes: torch.Tensor | None = None, sparsity: float = 1.0,
+                 mode: str = 'topk'):
         super().__init__()
         self.cache = LogitCache(V, D, max_entries, n_scales=4)
         self.attention = LogitAttention(D, V, n_heads, codes=codes, sparsity=sparsity)
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
+        self.mode = str(mode)
 
         # Project the CODE-SPACE logit summary to hidden space (inference
         # mode). Was V×D xavier; now K×D — decision #3 (K known only when
@@ -424,8 +450,11 @@ class LogitCacheAttention(nn.Module):
             # Normal training: store h (gradient flows)
             self.cache.store(h, training=True)
         else:
-            # Inference mode or scheduled sampling: store compressed logits
-            self.cache.store(logits, training=False)
+            # Inference mode or scheduled sampling
+            if self.mode == 'profile' and logits is not None and self.attention.codes_t is not None:
+                self.cache.store_profile(self.attention.bit_profile(logits))   # M18
+            else:
+                self.cache.store(logits, training=False)
 
         # Attend to cache
         # During scheduled sampling, attend to compressed logits (inference mode)
@@ -438,11 +467,15 @@ class LogitCacheAttention(nn.Module):
 
         # In inference mode: also project cached logits to hidden space
         if (not training or use_inference_mode) and self.attention.codes_t is not None:
-            cached_logits = self.cache.retrieve(n=1, training=False)
-            if cached_logits is not None:
-                cached_h = self.logit_to_hidden(self.attention.bit_profile(cached_logits))
-                if not torch.isnan(cached_h).any():
-                    h_augmented = h_augmented + cached_h
+            if self.mode == 'profile' and self.cache._p_cache:   # M18: newest profile is the state
+                cached_h = self.logit_to_hidden(
+                    self.cache._p_cache[-1].to(self.logit_to_hidden.weight.dtype))
+            else:
+                cached_logits = self.cache.retrieve(n=1, training=False)
+                cached_h = (self.logit_to_hidden(self.attention.bit_profile(cached_logits))
+                            if cached_logits is not None else None)
+            if cached_h is not None and not torch.isnan(cached_h).any():
+                h_augmented = h_augmented + cached_h
 
         return h_augmented, logits
 
