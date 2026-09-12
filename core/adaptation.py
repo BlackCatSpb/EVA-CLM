@@ -464,5 +464,6 @@ class GradientClipper:
 # ─────────────────────────────────────────────────────────────────────────────
 from .training_control import (   # noqa: F401,E402
     FailureDetector, LossBalancer, hard_veto_ceiling,
+    codebook_fingerprint, verify_identity_resume,
     apply_tau_lr, layer_tau_ctx, mirror_lstats,
 )
