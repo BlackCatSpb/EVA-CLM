@@ -375,6 +375,8 @@ def train(cfg=None, resume_path=None):
             state = _tstate(ckpt['stream_state'], device)   # streaming continuity
             if ckpt.get('stream_gs') is not None:
                 gs = _tstate(ckpt['stream_gs'], device)
+        if ckpt.get('cuda_rng') is not None and device == 'cuda':   # B16
+            torch.cuda.set_rng_state(ckpt['cuda_rng'])
         _m12_rng = ckpt.get('rng')
         _m12_data_rng = ckpt.get('data_rng')
         resumed_offset = int(ckpt.get('offset', 0) or 0)
@@ -740,6 +742,7 @@ def train(cfg=None, resume_path=None):
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
+                    model.flush_control_pending()   # B16 (audit 05)
                     save_path = os.path.join(cfg.save_dir, f'best.pt')
                     _save_checkpoint_safely({
                         'step': step,
@@ -758,6 +761,7 @@ def train(cfg=None, resume_path=None):
                         'stream_idx': int(stream_idx), 'offset': int(offset),
                         'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
                         'stream_state': _dstate(state), 'stream_gs': _dstate(gs if gs is not None else None),
+                        'cuda_rng': torch.cuda.get_rng_state() if device == 'cuda' else None,  # B16
                     }, save_path)
                     print(f'  Saved best model to {save_path}')
                     try:   # B15 (F5-04): save_html_report wants (ckpt, cfg, model, ...);

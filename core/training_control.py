@@ -216,6 +216,8 @@ class FailureDetector:
         otherwise the detector re-bootstraps blind every resume and forgets
         the alarm history it already accumulated."""
         return {
+            'strikes': getattr(self, '_strikes', 0),   # B16 (audit 05: strikes were session-only)
+            
             'recover_count': int(self.recover_count),
             'ce_armed': bool(self.ce_armed),
             'cooldown': int(self._cooldown),
@@ -228,6 +230,7 @@ class FailureDetector:
         if not sd:
             return
         self.recover_count = int(sd.get('recover_count', self.recover_count))
+        self._strikes = int(sd.get('strikes', getattr(self, '_strikes', 0)))
         self.ce_armed = bool(sd.get('ce_armed', self.ce_armed))
         self._cooldown = int(sd.get('cooldown', 0))
         self._viol = {str(k): int(v) for k, v in (sd.get('viol') or {}).items()}
@@ -398,6 +401,7 @@ class FailureDetector:
         # (this frame's weights) exactly as the log shows it, and best.pt on
         # disk remains the last CLEAN val-improving save.
         self.recover_count += 1                     # alarms raised (key kept)
+        self._strikes = getattr(self, '_strikes', 0) + 1   # B16: D6+ strikes persist
         self._cooldown = self.cooldown
         self._viol = {}
         print(f'  [ALARM] step {step}: '
@@ -448,7 +452,7 @@ def verify_identity_resume(model, ckpt, skipped_keys):
             f'e.g. {ident[:3]} — this checkpoint was trained under DIFFERENT '
             'code/head geometry. Continuing would silently re-initialize token '
             'identity (roundtrip amnesia). Start fresh (FORCE_FRESH=True) or '
-            'write a migration in scripts/migrate.py.')
+            'write a migration script for it.')
     fp_now = codebook_fingerprint(model)
     fp_ckpt = (ckpt or {}).get('code_fp')
     if fp_ckpt is None:

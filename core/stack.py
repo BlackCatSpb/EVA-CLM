@@ -981,6 +981,13 @@ class EVAStack(nn.Module):
 
         return h_augmented, logits_out
 
+    def flush_control_pending(self) -> None:
+        """B16: make every deferred control write durable before a save."""
+        for _l in self.layers:
+            _mir = getattr(_l, 'mirror', None)
+            if _mir is not None and hasattr(_mir, 'flush_control_pending'):
+                _mir.flush_control_pending()
+
     def set_stream_mode(self, on: bool = True) -> None:
         """B10 (audit 02b F2B-01): only true streaming sessions
         (generate/live loops) may read/write the trajectory carry

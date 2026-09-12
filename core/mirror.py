@@ -386,6 +386,20 @@ class GroupedCognitiveMirror(nn.Module):
         with torch.no_grad():
             self.W_out.copy_(self.W_proj.permute(0, 2, 1))
     
+    def flush_control_pending(self) -> None:
+        # B16 (audit 05): apply a pended control-law write before checkpointing
+        # so the deferred step (B13 design) is not silently lost on save.
+        _p = getattr(self, '_alpha_pending', None)
+        if _p is None:
+            return
+        _at, _np = _p
+        with torch.no_grad():
+            self.alpha_diag.data.lerp_(_at, 0.01)
+            if _np is not None:
+                self.alpha_diag.data.add_(_np)
+                self.alpha_diag.data.clamp_(0.01, 0.99)
+        self._alpha_pending = None
+
     def forward(self, h: torch.Tensor, mem_all: torch.Tensor,
                 global_state: Optional[torch.Tensor] = None,
                 diff: Optional[torch.Tensor] = None,
