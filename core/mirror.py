@@ -488,7 +488,13 @@ class GroupedCognitiveMirror(nn.Module):
                                         * alpha_center.unsqueeze(1).expand(-1, k) / G)
                         self.alpha_diag.data.add_(novelty_push)
                         self.alpha_diag.data.clamp_(0.01, 0.99)
-        pred_error_norm = (raw_pred_error / hp_norm).norm(dim=(-2, -1))  # (B, L)
+        # B10 (audit 02b F2B-02): pen was a norm over the whole (G,k) plane
+        # (~sqrt(G*k) x per-dim error, ~8.1 at the operating point) while
+        # pen_decay_factor / igate-boost / UCL thresholds were designed for
+        # a normalized [0,1] surprise. It pinned the decay penalty at its
+        # 0.5 asymptote: every tau collapsed to ~1-2 tokens (window-carry
+        # r=0 measured on all layer x scale pairs). Per-dim RMS now.
+        pred_error_norm = (raw_pred_error / hp_norm).pow(2).mean(dim=(-2, -1)).sqrt()  # (B, L)
         if self.training:
             # pred aux must train the self-prediction path (alpha_diag/W_proj):
             # the OLD cache detached BOTH operands, making 'pred' a pure

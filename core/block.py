@@ -367,17 +367,28 @@ class EVABlock(nn.Module):
             self._cache_conv_out = h_conv  # for branch_loss (with grad)
         
         if isinstance(self.bind, TrajectorySpiralBind):
-            if traj_state is None and self.training:
+            # B10 (audit 02b F2B-01): TRAINING never reads the detached cache.
+            # Reading it shadowed B2's own fix: from window 2 every document ran
+            # on window 1's FROZEN content (measured cross-position Jacobian
+            # exactly 0.0 in steady training), and any eval forward (traj_state
+            # None, no training guard on the write) overwrote the cache with
+            # zeros permanently. The cache is now purely a STREAMING carry: read
+            # only when not training, written only by training or an explicit
+            # stream session — eval neither reads nor writes it.
+            if traj_state is None and not self.training:
                 traj_state = getattr(self, '_traj_state', None)
             if traj_state is not None and (traj_state.shape[2] != L
                                            or traj_state.shape[0] != B):
                 traj_state = None
             bind_out, new_traj, coherence = self.bind(h, traj_state)
             if traj_state is None:
-                self._traj_state = new_traj.detach()
+                if self.training or getattr(self, '_stream_mode', False):
+                    self._traj_state = new_traj.detach()
                 traj_state_out = None
             else:
                 traj_state_out = (0.9 * traj_state + 0.1 * new_traj).detach()
+                if getattr(self, '_stream_mode', False):
+                    self._traj_state = traj_state_out
         else:
             bind_out = self.bind(h)
             coherence = torch.zeros(B, L, K, device=device, dtype=h.dtype)

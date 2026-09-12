@@ -400,7 +400,11 @@ class TrajectorySpiralBind(nn.Module):
         if traj_state is not None:
             if traj_state.shape[2] != L or traj_state.shape[0] != B:
                 traj_state = None
-        if traj_state is None and self.training and L >= self.n_dims:
+        # B10 (audit 02b F2B-01): the in-graph shift must fire in BOTH
+        # modes — gating it on self.training meant eval fed zeros where
+        # train fed shifted windows (a silent train≡eval split, and the
+        # reason the eval forward corrupted the stream cache semantics).
+        if traj_state is None and L >= self.n_dims:
             # B2 (audit A): the trajectory previously fed the spiral either
             # zeros (seq start — measured grad w_v_re[:,d≥1] ≡ 0) or a
             # DETACHED cache (cross-position Jacobian exactly 0 — the

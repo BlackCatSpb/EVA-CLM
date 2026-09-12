@@ -974,6 +974,13 @@ class EVAStack(nn.Module):
 
         return h_augmented, logits_out
 
+    def set_stream_mode(self, on: bool = True) -> None:
+        """B10 (audit 02b F2B-01): only true streaming sessions
+        (generate/live loops) may read/write the trajectory carry
+        cache; windowed training and eval never touch it."""
+        for l in self.layers:
+            l._stream_mode = bool(on)
+
     def reset_cache(self):
         """Clear the logit cache (for new sequence)."""
         if self.logit_cache is not None:
