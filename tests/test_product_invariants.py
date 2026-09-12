@@ -835,7 +835,7 @@ def test_checkpoint_state_roundtrip():
         assert not wd.check(7.0 + 0.001 * i, i)
     wd.ce_armed = True
     sd = wd.state_dict()
-    assert 'ce' in sd['stats'] and len(sd['stats']['ce']) == 4
+    assert 'ce' in sd['stats'] and len(sd['stats']['ce']) == 7  # fast,prev,n,slow,dvar,ph,phmin (B4)
     wd2 = FailureDetector(model)
     wd2.load_state_dict(sd)
     assert wd2._stats == wd._stats and wd2.recover_count == wd.recover_count

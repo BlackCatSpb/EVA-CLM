@@ -184,6 +184,9 @@ class FailureDetector:
                  ema_decay: float = 0.99,
                  margins: Optional[Dict[str, float]] = None,
                  floors: Optional[Dict[str, float]] = None) -> None:
+        # B4 single source: protective-signal margins/floors default HERE.
+        # The notebook used to pass them while train.py ran without — same
+        # sensor, two policies (the 'mirror the notebook' comment lied).
         self.model = model
         self.k_sigma = float(k_sigma)  # kept for API compatibility; rule is relative now
         self.warmup = int(warmup)  # kept for API compatibility; bootstrap count governs
@@ -193,8 +196,10 @@ class FailureDetector:
         self.a_slow = max(self.a, 1.0 - (1.0 - self.a) / 10.0)  # half-life ~700
         self._min_samples = max(3, int(round(1.0 / (1.0 - self.a))))
         self.rel_margin = 0.15  # relative-outlier floor (CE's own; same for all signals)
-        self.margins = dict(margins or {})  # per-signal tighter/looser margins
-        self.floors = dict(floors or {})    # per-signal healthy-band floor (see docstring)
+        self.margins = {'mlp_ratio': 1.0, 'ig_eff': 1.0, 'diversity': 1.0}
+        self.margins.update(margins or {})
+        self.floors = {'mlp_ratio': 2.0, 'ig_eff': 1.5, 'diversity': 5.0}
+        self.floors.update(floors or {})
         self.ce_armed = False  # CE joins the watch after the first val eval
         self._last_viol_name = None  # debug: which signal fired the last viol
         self._cooldown = 0
@@ -240,15 +245,17 @@ class FailureDetector:
         """
         s = self._stats.get(name)
         if s is None:
-            self._stats[name] = [float(value), float(value), 1, float(value)]
+            # [fast, prev, n, slow, dvar, ph_S, ph_min]
+            self._stats[name] = [float(value), float(value), 1, float(value), 0.0, 0.0, 0.0]
             return False
-        fast, prev, n, slow = s
+        fast, prev, n, slow, dvar, ph, phmin = s
         n += 1
         value = float(value)
         if n < self._min_samples:
             fast = self.a * fast + (1 - self.a) * value
             slow = self.a_slow * slow + (1 - self.a_slow) * value
-            s[0], s[1], s[2], s[3] = fast, value, n, slow
+            dvar = self.a * dvar + (1 - self.a) * (value - prev) ** 2
+            s[0], s[1], s[2], s[3], s[4] = fast, value, n, slow, dvar
             return False
         margin = self.margins.get(name, self.rel_margin)
         floor = self.floors.get(name, float('-inf'))
@@ -257,11 +264,29 @@ class FailureDetector:
         # monotonic rise would give "0 consecutive" instead of a sustained watch.
         # Sustained-ness comes from min_consecutive=3; a healthy noise oscillation
         # flips below the threshold within a step, so it never chains 3.
-        viol = (value > slow * (1.0 + margin)) and value >= floor
+        dvar = self.a * dvar + (1 - self.a) * (value - prev) ** 2
+        sig = math.sqrt(max(dvar, 1e-12) / 2.0)          # batch-noise scale
+        # 2%-of-level noise floor: a smooth (synthetic or post-cleanup) series
+        # must not make the PH channel infinitely sensitive.
+        sig = max(sig, 0.02 * max(slow, 1e-6))
+        # B4 (agent C): a fixed relative margin is FAR-roulette — 0.15·CE ≈
+        # 0.84σ of batch noise ⇒ ~5 alarms/1000 healthy steps (MC-verified),
+        # and under D6 every alarm is a STOP. The threshold is now the WIDER
+        # of the relative band and k_sigma·σ̂ — noise-calibrated by structure.
+        # Page-Hinkley second channel catches the slow drifts the margin test
+        # is formally blind to (min detectable slope ~4.2e-4 nat/step; the
+        # live incident drifted ~1e-4): δ=0.01σ̂, h=80σ̂² (measured ARL₀≈2.3k
+        # at σ=0.5 — four orders rarer than the old margin channel).
+        thresh = max(margin * max(slow, 1e-6), self.k_sigma * sig)
+        viol = (value > slow + thresh) and value >= floor
+        ph = max(0.0, ph + (value - prev) - 0.01 * sig)
+        phmin = min(phmin, ph)
+        viol = viol or ((ph - phmin) > 80.0 * sig * sig and value >= floor)
         s[0] = self.a * fast + (1 - self.a) * value
         s[1] = value
         s[2] = n
         s[3] = self.a_slow * slow + (1 - self.a_slow) * value
+        s[4], s[5], s[6] = dvar, ph, phmin
         if name == 'ce' and not self.ce_armed:
             return False  # stats still warm; CE joins the watch once armed
         if viol:
@@ -284,6 +309,15 @@ class FailureDetector:
         ce = float(ce)
         if self._cooldown > 0:
             self._cooldown -= 1
+            # B4: cooldown suppresses TRIGGERS, not OBSERVATION — the old
+            # early-return froze all baselines 50 steps behind (the stale-EMA
+            # head start made the post-cooldown alarm either late or spurious).
+            _sig = {'ce': ce}
+            for _k, _v in (metrics or {}).items():
+                if _v is not None and math.isfinite(float(_v)):
+                    _sig[_k] = float(_v)
+            for _nm, _vv in _sig.items():
+                self._observe(_nm, _vv)
             return False
 
         signals = {'ce': ce}

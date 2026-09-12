@@ -382,10 +382,14 @@ class EVAStack(nn.Module):
                 mat_gate = self.maturation.gate
                 _global_ready = self.maturation.global_ready
             else:
-                # Maturation gate: pure time ramp (deep-first).
-                # bridge_readiness is NOT used — it's a scalar that would
-                # destroy the per-layer gradient by setting all layers equal.
+                # Maturation gate: time ramp (deep-first) raised by the
+                # per-layer readiness EMA — competence can only OPEN EARLIER
+                # (max), never later, so the documented deadlock (gate shut ->
+                # no pred_err signal -> never opens) cannot happen. The old
+                # comment rejecting readiness applied to the bridge's scalar;
+                # maturation.readiness is per-layer (n_layers) and safe.
                 mat_gate = self.maturation.step_gate(step, self._tau_l_dev.detach())
+                mat_gate = torch.maximum(mat_gate, self.maturation.readiness.detach().clone())  # clone: update() writes readiness in-place; detach shares storage
                 _global_ready = self.maturation.global_ready
 
         if self.bridge is not None:
