@@ -195,6 +195,8 @@ class FailureDetector:
         self.a = float(ema_decay)
         self.a_slow = max(self.a, 1.0 - (1.0 - self.a) / 10.0)  # half-life ~700
         self._min_samples = max(3, int(round(1.0 / (1.0 - self.a))))
+        self._cur_step = 0
+        self._warm_frozen = True   # B5: PH state must not survive the warmup regime
         self.rel_margin = 0.15  # relative-outlier floor (CE's own; same for all signals)
         self.margins = {'mlp_ratio': 1.0, 'ig_eff': 1.0, 'diversity': 1.0}
         self.margins.update(margins or {})
@@ -257,6 +259,13 @@ class FailureDetector:
             dvar = self.a * dvar + (1 - self.a) * (value - prev) ** 2
             s[0], s[1], s[2], s[3], s[4] = fast, value, n, slow, dvar
             return False
+        # B5 (live incident step 273): the LR warmup ramp IS a slow drift —
+        # gate_l1 fell 0.49->0.45 over 270 steps while learning HEALTHY, and
+        # the PH channel (dvar EMA still warming, floor-calibrated δ below
+        # real batch jitter) fired D6 roulette. During warmup every channel
+        # observes and never alarms; the non-finite CE bypass in check()
+        # stays live (that is divergence by definition, not a trend).
+        eval_block = self._cur_step < self.warmup
         margin = self.margins.get(name, self.rel_margin)
         floor = self.floors.get(name, float('-inf'))
         # No `rising` requirement: an explosion peaks then DECAYS while staying far
@@ -265,9 +274,15 @@ class FailureDetector:
         # Sustained-ness comes from min_consecutive=3; a healthy noise oscillation
         # flips below the threshold within a step, so it never chains 3.
         dvar = self.a * dvar + (1 - self.a) * (value - prev) ** 2
-        sig = math.sqrt(max(dvar, 1e-12) / 2.0)          # batch-noise scale
-        # 2%-of-level noise floor: a smooth (synthetic or post-cleanup) series
-        # must not make the PH channel infinitely sensitive.
+        sig_real = math.sqrt(max(dvar, 1e-12) / 2.0)     # measured batch noise
+        sig = sig_real                       # deadband scale (floored below)
+        # B5 INVARIANT: the reflected PH walk has stationary mean
+        # E[ph]=sig_real^2/(2*delta); alarm must sit at h = Lam*E[ph] so the
+        # FAR exponent 2*delta*h/sig_real^2 = Lam is CONSTANT regardless of
+        # whether the 2%-floor binds. Old h = c*sig_hat^2 broke exactly when
+        # the floor exceeded real jitter (gate_l1, live alarm at the
+        # min_samples horizon = step 273). delta uses the floored sig (dead
+        # band vs jitter); h uses the measured sig_real (what the walk rides).
         sig = max(sig, 0.02 * max(slow, 1e-6))
         # B4 (agent C): a fixed relative margin is FAR-roulette — 0.15·CE ≈
         # 0.84σ of batch noise ⇒ ~5 alarms/1000 healthy steps (MC-verified),
@@ -279,16 +294,24 @@ class FailureDetector:
         # at σ=0.5 — four orders rarer than the old margin channel).
         thresh = max(margin * max(slow, 1e-6), self.k_sigma * sig)
         viol = (value > slow + thresh) and value >= floor
-        ph = max(0.0, ph + (value - prev) - 0.01 * sig)
+        # B5: δ=0.02σ̂, h=150σ̂² — D6 turns every alarm into a STOP, so the
+        # budget is per-RUN, not per-channel: 5 channels x ARL0(80σ²)≈2.3k
+        # steps = one false stop per ~460 steps (live: 273). The tighter
+        # constants cost ~4 extra steps on a true runaway (detectable slope
+        # 1%/step — the mlp_ratio-doubling kind, which is what PH exists
+        # for; a 1e-4/step drift is information-theoretically above ANY
+        # sane-FAR detector against σ̂-sized batch noise).
+        ph = max(0.0, ph + (value - prev) - 0.02 * sig)
         phmin = min(phmin, ph)
-        viol = viol or ((ph - phmin) > 80.0 * sig * sig and value >= floor)
+        _h = max(230.0 * sig_real * sig_real / sig, 0.05 * max(slow, 1e-6))
+        viol = viol or ((ph - phmin) > _h and value >= floor)
         s[0] = self.a * fast + (1 - self.a) * value
         s[1] = value
         s[2] = n
         s[3] = self.a_slow * slow + (1 - self.a_slow) * value
         s[4], s[5], s[6] = dvar, ph, phmin
-        if name == 'ce' and not self.ce_armed:
-            return False  # stats still warm; CE joins the watch once armed
+        if eval_block or (name == 'ce' and not self.ce_armed):
+            return False  # stats warm silently; watch joins after warmup/first eval
         if viol:
             self._last_viol_name = name
         return viol
@@ -306,6 +329,17 @@ class FailureDetector:
 
     def check(self, ce: float, step: int,
               metrics: Optional[Dict[str, float]] = None) -> bool:
+        self._cur_step = int(step)
+        if self._warm_frozen and self._cur_step >= self.warmup:
+            # B5: releasing the warmup freeze RE-ARMS the drift channels —
+            # ph/ph_min accumulated under the freeze carry the ramp itself
+            # and would instant-fire on the first armed sample (test-verified
+            # at step 1202). The level baselines (fast/slow/dvar) are valid
+            # post-ramp and stay.
+            self._warm_frozen = False
+            for _st in self._stats.values():
+                _st[5] = _st[6] = 0.0
+            self._viol = {}
         ce = float(ce)
         if self._cooldown > 0:
             self._cooldown -= 1

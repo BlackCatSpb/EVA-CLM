@@ -935,6 +935,42 @@ def test_garbage_scanner_detects_synthetic_noise():
                 os.remove(p)
 
 
+def test_b5_warmup_is_not_an_incident():
+    """Live incident (2026-09, A100 L4 run): at step 273 the watchdog ALARMED
+    on gate_l1 while the model was HEALTHY — the LR warmup ramp legitimately
+    fell gate_l1 0.49->0.45 and diversity 0.58->0.26, dvar EMAs were still
+    warming, and PH roulette (5 channels x ARL~2.3k, D6 = STOP) fired.
+    Lock: (a) a full warmup-shaped ramp (drift + real per-step jitter) must
+    produce ZERO alarms while step < warmup; (b) a genuine runaway of the
+    mlp_ratio-doubling kind AFTER warmup must still be caught fast."""
+    from core.training_control import FailureDetector
+    import random
+    random.seed(7)
+    torch.manual_seed(7)
+    model = torch.nn.Linear(4, 4)
+    wd = FailureDetector(model, warmup=1200)
+    wd.ce_armed = True
+    base = {'gate_l1': 0.488, 'diversity': 0.585, 'ce': 6.35,
+            'mlp_ratio': 1.2, 'ig_eff': 0.055}
+    for step in range(1400):
+        m = {k: v + (0.45 - 0.488) * min(step, 1200) / 1200.0
+             if k == 'gate_l1' else
+             v + (0.26 - 0.585) * min(step, 1200) / 1200.0
+             if k == 'diversity' else v for k, v in base.items()}
+        m = {k: v + random.gauss(0.0, 0.015 * (abs(v) if v else 1.0))
+             for k, v in m.items()}          # real batch jitter
+        assert not wd.check(m['ce'], step, m), f'false alarm at step {step}'
+    # armed now: double mlp_ratio every ~50 steps (the classic runaway)
+    v = 1.2
+    fired = None
+    for step in range(1400, 1600):
+        v *= 1.014                             # ~doubling/50
+        if wd.check(6.3, step, {'mlp_ratio': v}):
+            fired = step
+            break
+    assert fired is not None and fired < 1520, 'PH must catch a 1.4%/step creep'
+
+
 def test_alarm_sensor_never_touches_model():
     """Decision D6: check() only SOUNDS (returns True after 3 consecutive
     relative violations) — it must NOT roll weights back, NOT build
@@ -942,7 +978,7 @@ def test_alarm_sensor_never_touches_model():
     stops; recovery is a human call. Cooldown must suppress re-alarm spam."""
     from core.training_control import FailureDetector
     model = torch.nn.Linear(4, 4)
-    wd = FailureDetector(model)
+    wd = FailureDetector(model, warmup=0)  # B5: exercise the armed regime
     wd.ce_armed = True
     with torch.no_grad():
         model.weight.add_(10.0)               # corrupt the weights
