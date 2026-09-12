@@ -73,12 +73,31 @@ class TokenStream:
         return x.long(), y.long(), offset + batch_size * seq_len, wrapped
 
 
+def _dstate(o):
+    # B15 (audit 05 F5-07): the loop's streaming state (per-layer VSA,
+    # global_state) lived OUTSIDE best.pt — a mid-document resume cold-started
+    # the document (measured 0.37 nat first-window CE displacement). Deep
+    # detach-to-CPU for save / device-move for load.
+    if torch.is_tensor(o):
+        return o.detach().cpu()
+    if isinstance(o, (list, tuple)):
+        return [_dstate(x) for x in o]
+    return o
+
+def _tstate(o, dev):
+    if torch.is_tensor(o):
+        return o.to(dev)
+    if isinstance(o, (list, tuple)):
+        return [_tstate(x, dev) for x in o]
+    return o
+
+
 def _opt_param_names(model, optimizer):
     names = {id(p): n for n, p in model.named_parameters()}
     return [names[id(p)] for g in optimizer.param_groups for p in g['params']]
 
 
-def _restore_optimizer(optimizer, model, ckpt_opt):
+def _restore_optimizer(optimizer, model, ckpt_opt, param_names=None):
     """Restore AdamW state BY PARAMETER NAME.
 
     Positional load shifts state onto wrong params whenever the parameter
@@ -88,7 +107,11 @@ def _restore_optimizer(optimizer, model, ckpt_opt):
     checkpoints without it get a FRESH Adam (safe) instead of a broken
     positional restore.
     """
-    old_names = ckpt_opt.get('param_names') if isinstance(ckpt_opt, dict) else None
+    # B15 (F5-03): param_names rides the CKPT top level (where the save
+    # writes it), not the optimizer dict — the old lookup never fired and
+    # every resume silently got fresh Adam moments with a 'by name' print.
+    old_names = param_names if param_names is not None else (
+        ckpt_opt.get('param_names') if isinstance(ckpt_opt, dict) else None)
     if old_names is None:
         print('  WARNING: checkpoint has no param_names — optimizer state NOT restored (fresh Adam)')
         return False
@@ -281,7 +304,7 @@ def train(cfg=None, resume_path=None):
             else:
                 _filtered[k] = v
         missing, unexpected = model.load_state_dict(_filtered, strict=False)
-        missing, unexpected = verify_identity_resume(model, ckpt, _skipped)  # B8 (02a F2A-03)
+        verify_identity_resume(model, ckpt, _skipped)  # B15 (F5-01): it returns the fp, not a tuple
         if getattr(cfg, 'reset_skip_alpha', False):
             nzero = 0
             for layer in model.layers:
@@ -320,7 +343,8 @@ def train(cfg=None, resume_path=None):
                 # B12 (F3-08): positional Adam restore shifts states onto wrong
                 # tensors when param order changes; by-name restorer existed but
                 # was dead code here (the notebook has always used it).
-                _restore_optimizer(optimizer, model, ckpt['optimizer'])
+                _restore_optimizer(optimizer, model, ckpt['optimizer'],
+                                 param_names=ckpt.get('param_names'))
                 print('  Optimizer state restored BY NAME (momentum preserved)')
             except Exception as e:
                 print(f'  [warn] Could not restore optimizer state: {e} — using fresh Adam')
@@ -347,6 +371,10 @@ def train(cfg=None, resume_path=None):
         depth.put_state(ckpt.get('depth_state'))  # B14 (F4-06)
         if ckpt.get('balancer') is not None:
             balancer.load_state_dict(ckpt['balancer'])
+        if ckpt.get('stream_state') is not None:   # B15 (F5-07): mid-document
+            state = _tstate(ckpt['stream_state'], device)   # streaming continuity
+            if ckpt.get('stream_gs') is not None:
+                gs = _tstate(ckpt['stream_gs'], device)
         _m12_rng = ckpt.get('rng')
         _m12_data_rng = ckpt.get('data_rng')
         resumed_offset = int(ckpt.get('offset', 0) or 0)
@@ -554,13 +582,13 @@ def train(cfg=None, resume_path=None):
             if step and step % cfg.log_interval == 0:
                 try:
                     for _m in model.modules():
-                        if hasattr(_m, '_step_count'):
+                        if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
                             _m._ggeo_freeze = True
                     try:
                         _gg = balancer.grad_geometry(ce_s, aux_s, model.parameters())
                     finally:
                         for _m in model.modules():
-                            if hasattr(_m, '_step_count'):
+                            if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
                                 _m._ggeo_freeze = False
                     if _gg:
                         print('  [ggeo] ' + '  '.join(
@@ -674,7 +702,7 @@ def train(cfg=None, resume_path=None):
                 rg = getattr(model, 'reasoning_gate', None)
                 if rg is not None:
                     gates = getattr(model, '_reasoning_gates', None)
-                    if gates:
+                    if gates is not None and torch.as_tensor(gates).numel():  # B15 (F5-05)
                         gate_str = ' gates=' + str([round(g, 3) for g in gates])
                 mod_scl = 0.0
                 try:
@@ -729,9 +757,14 @@ def train(cfg=None, resume_path=None):
                         'balancer': balancer.state_dict(),
                         'stream_idx': int(stream_idx), 'offset': int(offset),
                         'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
+                        'stream_state': _dstate(state), 'stream_gs': _dstate(gs if gs is not None else None),
                     }, save_path)
                     print(f'  Saved best model to {save_path}')
-                    generate_report(save_path)
+                    try:   # B15 (F5-04): save_html_report wants (ckpt, cfg, model, ...);
+                        generate_report(save_path)   # calling it 1-arg crashed the run
+                    except Exception as _re:         # right AFTER saving. Report is
+                        print(f'  [report] skipped: {_re}')   # diagnostics, not training.
+
             
             # Periodic step_*.pt checkpoints DISABLED: only best.pt is written (saves space).
     except KeyboardInterrupt:

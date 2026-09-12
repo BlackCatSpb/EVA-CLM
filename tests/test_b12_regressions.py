@@ -81,7 +81,8 @@ def test_ggeo_freeze_blocks_step_count_side_effects():
 # source locks: train.py by-name restore + post-construction CLI overrides
 def test_train_py_wiring_locks():
     t = open(os.path.join(ROOT, 'scripts', 'train.py'), encoding='utf-8').read()
-    assert "_restore_optimizer(optimizer, model, ckpt['optimizer'])" in t
+    assert "_restore_optimizer(optimizer, model, ckpt['optimizer']," in t or \
+           "_restore_optimizer(optimizer, model, ckpt['optimizer'])" in t
     assert "cfg.warmup_steps = args.warmup" in t
     assert "float('nan')" in t
 
