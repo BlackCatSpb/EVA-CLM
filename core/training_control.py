@@ -392,7 +392,8 @@ class FailureDetector:
         print(f'  [ALARM] step {step}: '
               f'{" ".join(f"{k}={v:.2g}" for k, v in signals.items())} — sustained '
               f'relative divergence (sensor: {self._last_viol_name or "?"}). '
-              f'D6: no auto-rollback; stop, inspect, fix, resume from best.pt.')
+              f'D6+: sensor signal (no auto-rollback, no auto-stop) — '
+              f'caller policy decides (loop: warn once, stop on confirmed second).')
         return True
 
 

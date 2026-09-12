@@ -220,6 +220,7 @@ def train(cfg=None, resume_path=None):
     # Relative-divergence ALARM sensor (decision D6: detection only — the
     # loop stops on an alarm; recovery is a human call from a clean best.pt).
     watchdog = FailureDetector(model, k_sigma=3.0, warmup=cfg.warmup_steps)
+    alarm_strikes = 0
     # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
@@ -474,14 +475,24 @@ def train(cfg=None, resume_path=None):
                         optimizer.zero_grad(set_to_none=True)
                         continue
             if _rb:
-                # D6: alarm-only. The run stops; best.pt on disk stays the
-                # last CLEAN val-improving save for the human-led restart.
+                # D6+ TWO-STRIKE: first confirmed signal WARNS and keeps
+                # training; a second after the full cooldown (divergence STILL
+                # growing) stops. Bounded exposure: M14 vetoes keep exploding
+                # batches out of the weights, best.pt only advances on an
+                # improving isolated eval (B3). In Colab the session is the
+                # scarce resource: a false STOP costs hours, the confirmation
+                # window costs ~cooldown steps.
+                alarm_strikes += 1
                 if torch.cuda.is_available():
                     print(f'  [alarm] cuda mem: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB '
                           f'reserved={torch.cuda.memory_reserved()/1e9:.2f}GB')
-                print('[EVA] STOPPED ON ALARM (D6): fix the cause, resume from '
-                      'best.pt (last clean val-save). No auto-rollback by design.')
-                sys.exit(2)
+                if alarm_strikes < 2:
+                    print(f'  [ALARM:WARN] first signal ({alarm_strikes}/2): continuing; '
+                          'a second confirmed signal will stop the run.', flush=True)
+                else:
+                    print('[EVA] STOPPED ON ALARM (D6+, confirmed twice): resume from '
+                          'best.pt (last clean val-save). No auto-rollback by design.')
+                    sys.exit(2)
 
             # ── Gradient-reactive governance loss ─────────────────────────
             # Moved into core.losses.compute_losses (audit M5): the target
