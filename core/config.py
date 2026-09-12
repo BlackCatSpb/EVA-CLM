@@ -62,6 +62,7 @@ class WideBindConfig:
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)
+    embed_center: bool = False   # B9 (audit 02a): remove the 95% common-mode of the codebook (zero-mean codes)
     codebook: str = 'legacy'   # 'twin_free' (B2): max pairwise overlap ≤ S−2, needs code_dim≥64 for full vocab
 
     mirror_k: int = 32

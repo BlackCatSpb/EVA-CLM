@@ -87,6 +87,11 @@ class PartitionedEmbedding(nn.Module):
         codes: torch.Tensor = build_codes(cfg)
         self.K: int = codes.shape[1]
         self.register_buffer('codes', codes, persistent=False)
+        # B9 (audit 02a measured): sparse 0/1 codes share a large per-bit DC
+        # (mean = S/K); the near-identity mix carries it into every embedding
+        # -> mean pairwise cosine 0.950 (95% of an embedding is ONE shared
+        # vector). Centering the codes removes it. Constant shift absorbed by
+        # the head bias => roundtrip preserved (measured 1.000 either way).
         
         D: int = cfg.D
         assert D % self.K == 0, f'D={D} must be divisible by K={self.K}'
@@ -106,6 +111,16 @@ class PartitionedEmbedding(nn.Module):
         with torch.no_grad():
             self.embed_mix.add_(torch.randn(self.K, self.K, generator=_mg) * 0.05)
         self.register_buffer('_mix_scale', torch.tensor(2.0), persistent=False)
+        self.embed_center: bool = bool(getattr(cfg, 'embed_center', False))
+        if self.embed_center:
+            with torch.no_grad():
+                _cs = codes[:8192].to(torch.float32)
+                _act = torch.sigmoid(_cs @ self.embed_mix * self._mix_scale)
+                self.register_buffer('_sig_mean', _act.mean(0, keepdim=True), persistent=False)
+        # B9 (audit 02a): the 95% common-mode of the embedding is the DC of the
+        # DENSE sigmoid coefficients (all-positive), NOT of the sparse codes —
+        # centering codes left cos 0.935. Estimate the codebook-mean sigmoid
+        # activation (fixed 8k-code sample) and subtract it per forward.
         
         _bgen = torch.Generator().manual_seed(5)
         self.basis: nn.Parameter = nn.Parameter(_orth_rows(torch.randn(self.K, d, generator=_bgen)))
@@ -133,6 +148,15 @@ class PartitionedEmbedding(nn.Module):
         codes: torch.Tensor = self.codes[tokens]  # (B, L, K), sparse binary
         # Dense mixing: sigmoid(scale · M · codes) → каждый бит влияет на все сегменты
         codes = torch.sigmoid(codes @ self.embed_mix * self._mix_scale)
+        if self.embed_center:
+            # Adaptive: _sig_mean starts as the codebook mean of the initial
+            # mix, then EMA-tracks the current coefficient mean as embed_mix
+            # trains (a static estimate would go stale with the geometry).
+            if self.training:
+                with torch.no_grad():
+                    self._sig_mean.mul_(0.999).add_(
+                        codes.detach().reshape(-1, self.K).mean(0) * 0.001)
+            codes = codes - self._sig_mean.to(codes.dtype)
         B, L = tokens.shape
         # Внешнее произведение вместо einsum (стабильно под AMP на любых GPU)
         out: torch.Tensor = (codes.unsqueeze(-1) * self.basis.view(1, 1, self.K, -1)).reshape(B, L, -1)
