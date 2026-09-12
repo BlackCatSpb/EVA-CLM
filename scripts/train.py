@@ -13,7 +13,7 @@ from torch.serialization import add_safe_globals
 
 from core import EVAConfig, EVAStack, MirrorLRScheduler
 from core.training_control import (hard_veto_ceiling, codebook_fingerprint,
-                                verify_identity_resume)
+                                verify_identity_resume, apply_tau_lr)
 
 
 def _save_checkpoint_safely(state, path):
@@ -562,7 +562,19 @@ def train(cfg=None, resume_path=None):
                             f'{k}:{r:.2f}/{c:+.2f}' for k, (r, c) in _gg.items()), flush=True)
                 except Exception as _ge:
                     print(f'  [ggeo] unavailable: {_ge}', flush=True)
-            balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model)
+            # B13 (F4-01): checkpointing RE-RUNS forward inside
+            # backward — freeze recompute-sensitive side effects
+            # (control-law writes, step counters) for the pass.
+            for _m in model.modules():
+                if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
+                    _m._ggeo_freeze = True
+            try:
+                balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model)
+            finally:
+                for _m in model.modules():
+                    if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
+                        _m._ggeo_freeze = False
+
             
             # Adaptive phase scaling: EMA-based mirror/base gradient balance
             phase_scales = []
@@ -613,6 +625,10 @@ def train(cfg=None, resume_path=None):
                 clipper.attach(model)
             if use_amp:
                 scaler.unscale_(optimizer)
+            # B13 (F2B-07 drift closure): the notebook had tau-lr scaling,
+            # train.py never applied it. Same law, same order: BEFORE the clip.
+            ls_mults = getattr(scheduler, '_ls_mult', None)
+            apply_tau_lr(model, getattr(model, 'tau_config', None), ls_mults)
             clipper.clip(model.parameters())
 
             if use_amp:

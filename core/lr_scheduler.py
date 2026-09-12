@@ -100,8 +100,15 @@ class MirrorLRScheduler:
         for i in range(n):
             self._ls_fast[i] = tf * self._ls_fast[i] + (1 - tf) * vals[i]
             self._ls_slow[i] = ts * self._ls_slow[i] + (1 - ts) * vals[i]
-            r = self._ls_fast[i] / max(self._ls_slow[i], 1e-10)
-            mults.append(max(lo, min(hi, 1.0 / r)))
+            # B13 (F4-07): a frozen log_scale layer has var==0 EXACTLY:
+            # r = 0/1e-10 = 0.0 and 1.0/r raised ZeroDivisionError (Python
+            # floats, not tensors). Undefined ratio -> neutral multiplier.
+            _fa, _sl = self._ls_fast[i], self._ls_slow[i]
+            if _fa < 1e-12 and _sl < 1e-12:
+                mults.append(1.0)
+                continue
+            r = _fa / max(_sl, 1e-12)
+            mults.append(max(lo, min(hi, 1.0 / max(r, 1e-12))))
         self._ls_mult = mults
         return mults
 

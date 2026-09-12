@@ -375,7 +375,10 @@ class GroupedCognitiveMirror(nn.Module):
         # Centre-zero so init mlp_mod ≈ baseline; live semantic gate modulates ±beta around it.
         self.bridge_glu_beta = bridge_glu_beta
         # Softmax temperature: >1 = softer (uniform), <1 = sharper (winner-take-all)
-        self.register_buffer('_usefulness_temp', torch.tensor(2.0), persistent=False)
+        # B13 (F4-04): annealed blend temperature was persistent=False ->
+        # every resume silently reset it to 2.0 (mid-warmup state).
+        self.register_buffer('_usefulness_temp', torch.tensor(2.0), persistent=True)
+        self._alpha_pending = None   # B13: deferred alpha write (F4-01)
         # Error-gated damping: порог резонансного демпфирования α на инференсе
         self.register_buffer('_damp_tau', torch.tensor(0.1), persistent=False)
     
@@ -470,24 +473,42 @@ class GroupedCognitiveMirror(nn.Module):
         if self.training:
             with torch.no_grad():
                 override = self._alpha_override.item()
-                if override < 0.1:
+                if override < 0.1 and not getattr(self, '_ggeo_freeze', False):
+                    # B13 (F4-01): flush the previous step's deferred control
+                    # write. The freeze flag is raised around BACKWARD (where
+                    # checkpointing re-runs this forward) and around diagnostic
+                    # re-grads — recompute passes neither flush nor re-pend.
+                    if getattr(self, '_alpha_pending', None) is not None:
+                        _at, _np = self._alpha_pending
+                        self.alpha_diag.data.lerp_(_at, 0.01)
+                        if _np is not None:
+                            self.alpha_diag.data.add_(_np)
+                            self.alpha_diag.data.clamp_(0.01, 0.99)
+                        self._alpha_pending = None
                     residual_var = pred_error.var(dim=(0, 1), unbiased=False)
                     self._residual_var_ema.lerp_(residual_var, 0.01)
                     rv = self._residual_var_ema
                     rv_mean = rv.mean(dim=-1, keepdim=True)
                     relative_var = rv / (rv_mean + 1e-10)
                     alpha_target = torch.sigmoid(2.2 - torch.log(relative_var))
-                    self.alpha_diag.data.lerp_(alpha_target, 0.01)
+                    # B13 (audit 04 F4-01): CONTROL-LAW WRITES DEFERRED via
+                    # _alpha_pending — old in-forward .data writes fired once
+                    # per FORWARD PASS, so checkpointing recompute (and any
+                    # diagnostic re-run) silently doubled the alpha
+                    # self-regulation rate. Semantics: apply the PREVIOUS
+                    # step's computed target (1-step lag at lerp 0.01 is
+                    # immaterial), pend this step's. Recompute passes flush
+                    # and re-pend the SAME value — exactly one application
+                    # per step either way.
+                    _push = None
                     if self._alpha_novelty_weight > 0 and G > 1:
-                        alpha_per_expert = self.alpha_diag.mean(dim=-1)
-                        alpha_center = alpha_per_expert - alpha_per_expert.mean()
-                        alpha_std = alpha_per_expert.std()
-                        boost = max(1.0, 0.1 / (alpha_std + 0.01))
-                        adapted_w = self._alpha_novelty_weight * boost
-                        novelty_push = (adapted_w * 2
-                                        * alpha_center.unsqueeze(1).expand(-1, k) / G)
-                        self.alpha_diag.data.add_(novelty_push)
-                        self.alpha_diag.data.clamp_(0.01, 0.99)
+                        _ape = self.alpha_diag.mean(dim=-1)
+                        _ac = _ape - _ape.mean()
+                        _boost = max(1.0, 0.1 / (_ape.std() + 0.01))
+                        _push = (self._alpha_novelty_weight * _boost * 2
+                                 * _ac.unsqueeze(1).expand(-1, k) / G)
+                    if not getattr(self, '_ggeo_freeze', False):
+                        self._alpha_pending = (alpha_target, _push)
         # B10 (audit 02b F2B-02): pen was a norm over the whole (G,k) plane
         # (~sqrt(G*k) x per-dim error, ~8.1 at the operating point) while
         # pen_decay_factor / igate-boost / UCL thresholds were designed for

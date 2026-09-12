@@ -231,8 +231,13 @@ class FailureDetector:
         self.ce_armed = bool(sd.get('ce_armed', self.ce_armed))
         self._cooldown = int(sd.get('cooldown', 0))
         self._viol = {str(k): int(v) for k, v in (sd.get('viol') or {}).items()}
-        self._stats = {str(k): [float(x) for x in v]
-                       for k, v in (sd.get('stats') or {}).items()}
+        self._stats = {}
+        for _k, _v in (sd.get('stats') or {}).items():
+            _f = [float(x) for x in _v]
+            # B13 (F4-03): pre-B4 pickles carry 4-wide stats [fast,prev,n,slow];
+            # the loader unpacks 7 -> ValueError crash on resume. Pad/truncate.
+            _f = (_f + [0.0, 0.0, 0.0])[:7] if len(_f) < 7 else _f[:7]
+            self._stats[str(_k)] = _f
         self._last_viol_name = sd.get('last_viol_name')
 
     def _observe(self, name: str, value: float) -> bool:
@@ -323,6 +328,12 @@ class FailureDetector:
         against them flags the first healthy CE oscillation and rollback-
         thrashes the run (live L4 incident 2026-09: armed at step 1045,
         false divergence at 1052 -> rollback -> retained-graph OOM)."""
+        # B13 (audit 04 F4-02): the loop calls arm_ce at EVERY eval;
+        # re-bootstrapping pops the 1000+ step CE baseline and re-anchors the
+        # soft-veto band on ONE batch (measured ~339-step false-tightening
+        # window after each easy eval). Arming is a first-val event.
+        if self.ce_armed:
+            return
         self.ce_armed = True
         self._stats.pop('ce', None)
         self._viol.pop('ce', None)
