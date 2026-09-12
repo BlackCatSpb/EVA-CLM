@@ -193,6 +193,8 @@ class EVABlock(nn.Module):
         
         # ─── VSA Memory (multi-scale VSA: S=4 фиксированных τ) ───
         self._n_scales = 4
+        self._vsa_floor_k = float(getattr(cfg, 'vsa_decay_floor_k', 2.0))  # B18
+        self.register_buffer('_pen_ema', torch.zeros(()), persistent=True)  # B18b
         # U1: τ-consistent VSA scales. This copy is the TRAINABLE ladder for
         # standalone blocks (tau_s=None); inside EVAStack the live source is
         # the stack-level _vsa_log_param (tau_s is always passed), and this
@@ -416,7 +418,15 @@ class EVABlock(nn.Module):
         # layer_bridge_gate gradients vanish (caught by the dead-parameter
         # detector in B11). Widening the ladder needs a BOUNDED rest (<1) with
         # (1-a) write-normalization — a B12 design decision, not a silent edit.
-        d_mod = torch.sigmoid(h * self.w_d + self.b_d)      # (B, L, D) — content mod of decay
+        # B18 (audit 02b closure, corrected): the content gate is REST-NORMALIZED,
+        # sigma(h.w_d+b_d)/sigma(b_d) — at rest == 1.0, so the tau ladder IS the
+        # nominal schedule (the old absolute sigma ~0.88-0.99 multiplied every
+        # token and silently divided tau by ~100x across a 512 window). Content
+        # can only SHORTEN memory (clamp<=1); the outer floor d_s^k (below)
+        # guards the extreme end, never the rest regime. Consequence: the
+        # AdaptiveController's b_d->8 lerp becomes benign (modulation -> 1.0).
+        d_mod = (torch.sigmoid(h * self.w_d + self.b_d)
+                 / torch.sigmoid(self.b_d).clamp(min=1e-3)).clamp(max=1.0)  # (B, L, D)
         if noise_scale > 0 and self.training:
             noise = 1.0 + noise_scale * torch.randn_like(i_gate)
             i_gate = i_gate * noise
@@ -424,14 +434,29 @@ class EVABlock(nn.Module):
         # Prediction-error-aware decay modulation (before decay expansion).
         # Centered: pen=0 → factor 1.0 (memory untouched), pen↑ → toward 0.5.
         if pen is not None:
+            # B18b: pen enters as a DEVIATION from its running EMA baseline —
+            # at typical surprise the factor is exactly 1.0 (the old absolute
+            # form sat at ~0.91 at rest and multiplied away another decade of
+            # tau; the dead-parameter detector caught it). w_d_pen keeps a
+            # live gradient as the sensitivity around the baseline.
+            with torch.no_grad():
+                self._pen_ema.mul_(0.999).add_(pen.detach().mean() * 0.001)
+            _pc = pen - self._pen_ema
             d_pen_factor = pen_decay_factor(
-                pen.unsqueeze(-1), self.w_d_pen.unsqueeze(0).unsqueeze(0))
-            d_mod = (d_mod.reshape(B, L, self.mirror.G, self.mirror.d) * d_pen_factor.to(d_mod.dtype).unsqueeze(-1)).reshape(B, L, D)
+                _pc.unsqueeze(-1), self.w_d_pen.unsqueeze(0).unsqueeze(0))
+            d_mod = (d_mod.reshape(B, L, self.mirror.G, self.mirror.d)
+                     * d_pen_factor.to(d_mod.dtype).unsqueeze(-1)).reshape(B, L, D)
 
         # Vectorize over S scales: (B, L, S, D) — expand-views, no materialized copies
         d_s_vec = d_s.view(1, 1, S, 1).expand(B, L, S, D)
         d_mod_vec = d_mod.unsqueeze(2).expand(-1, -1, S, -1)
-        decay = (d_s_vec * d_mod_vec).clamp(min=0.01, max=1.0)  # per-scale per-channel, floor 0.01 cap 1.0
+        decay = (d_s_vec * d_mod_vec).clamp(min=0.01, max=1.0)  # per-scale per-channel
+        # B18: outer floor d_s^k — content can shorten a scale toward tau_s/k
+        # but never veto the ladder shape (k=2 default, 0 disables).
+        _k18 = self._vsa_floor_k
+        if _k18 > 0:
+            decay = torch.maximum(decay, d_s_vec.pow(_k18))
+
 
         # Dynamic write modulation (per-expert K-space conditioning)
         # Audit M10 (A1): the per-expert write modulation ran ONLY in
