@@ -450,9 +450,15 @@ class GroupedCognitiveMirror(nn.Module):
         # Нормализованная ошибка предсказания: relative к ||hp||, а не абсолютная
         hp_norm = hp.norm(dim=-1, keepdim=True).clamp(min=1e-8)
         raw_pred_error = hp - pred_k
-        # Error-gated damping (только инференс): α → 1 когда ||pred_error|| велика
-        # На тренировке (teacher forcing) δ_{t-1}=0, резонанс безвреден.
-        if not self.training:
+        # Error-gated damping: α → 1 when ||pred_error|| is large — it guards
+        # the RESONANCE of autoregressive decoding (δ_{t-1} drifts without
+        # teacher forcing). B3 (agent E + bridge probe): it must NOT fire in
+        # plain eval() — validation is teacher-forced exactly like training,
+        # and a mode-only feature shift silently invalidated every eval-side
+        # signal (measured: bridge_conn 0.26 in train vs 3.72 (< chance) at
+        # eval on the same weights — the probe faced damped inputs).
+        # AR mode is opted in explicitly by generation drivers:
+        if (not self.training) and getattr(self, '_ar_mode', False):
             damp = torch.sigmoid(-raw_pred_error.norm(dim=-1).mean() / self._damp_tau)
             alpha_eff = 1.0 + (alpha_eff - 1.0) * damp
             pred_k = hp_prev * alpha_eff.view(1, 1, G, k)

@@ -172,6 +172,10 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
              bias_alpha=0.0):
     """Generate tokens from prompt string."""
     model.eval()
+    # B3: true autoregressive decoding → enable mirror error-damping
+    # (eval-time validation stays undamped: train/eval feature parity)
+    for _mm in [l.mirror for l in model.layers if getattr(l, 'mirror', None) is not None]:
+        _mm._ar_mode = True
     # Reset cross-call recurrent state so each prompt is independent.
     if hasattr(model, '_last_salience'):
         model._last_salience = None

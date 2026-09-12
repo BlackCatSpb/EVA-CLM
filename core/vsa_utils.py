@@ -56,6 +56,10 @@ def fib_sigmoid_init(n, fib_vals=None):
 
 _CODES_CACHE = {}
 
+# B3: single source for the deviation clamp duplicated as 2.0 literals in two
+# gates (the retired cfg.tau_gate_clamp now actually exists somewhere).
+DEV_CLAMP = 2.0
+
 
 def twin_free_codes(vocab=65536, K=64, S=6, max_overlap=None, seed=42, batch=2048):
     """B2 (audit A): random constant-weight codes carry overlap-(S−1) 'twins'

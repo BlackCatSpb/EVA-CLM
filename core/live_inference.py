@@ -161,6 +161,10 @@ class LiveInference:
         self.global_state: Optional[torch.Tensor] = None
         self.intent_state: Optional[torch.Tensor] = None
         self.step: int = 0
+        # B3: LiveInference IS autoregressive decoding → opt into mirror error-damping
+        # (plain eval() no longer triggers it; train/eval feature parity restored)
+        for _mm in [l.mirror for l in model.layers if getattr(l, 'mirror', None) is not None]:
+            _mm._ar_mode = True
 
         if monitor:
             self.monitor: Optional[MirrorMonitor] = MirrorMonitor(model, max_history=max_history)

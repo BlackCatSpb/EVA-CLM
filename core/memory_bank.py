@@ -67,12 +67,16 @@ def _memory_attention(q: torch.Tensor, k: torch.Tensor, temp: torch.Tensor,
     Returns:
         attn: (B, L, n_slots) — attention weights (sums to 1 per position)
     """
-    scores = (q @ k.T) / math.sqrt(bridge_dim) * temp
+    # B3 (agent D): the old form multiplied raw scores by temp AND fed them to
+    # hybrid_gate (which divides internally) — the two effects cancelled and
+    # entropy moved 1.5% across the whole τ range: the learned temperature was
+    # decorative. One consistent τ in both branches (0.1..10 covers it):
+    scores = (q @ k.T) / math.sqrt(bridge_dim)
 
     if softmax_free:
         attn = hybrid_gate(scores, temp)
     else:
-        attn = F.softmax(scores, dim=-1)
+        attn = F.softmax(scores / temp.clamp(min=0.05), dim=-1)
 
     if age_decay is not None:
         attn = attn * age_decay.unsqueeze(0).unsqueeze(0)

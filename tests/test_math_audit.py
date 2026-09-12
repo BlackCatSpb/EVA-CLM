@@ -69,21 +69,24 @@ class TestTauConfigMath:
         assert torch.allclose(tau_norm, expected, atol=1e-4)
 
     def test_intent_alpha_formula(self):
-        """α_l = 1 - exp(-τ_l / τ_min). Covers [0, 1) when τ_l ∈ [τ_min, ∞).
-        At τ_l=τ_min: α=1-exp(-1)≈0.632. But the first layer's τ_l exceeds τ_min
-        at init because the ladder starts from log(τ_min)+base_inc, so α[0] > 0.632."""
+        """B3 authority change: α_l = 1 - 1/max(τ_l, 2) (classic EMA horizon).
+        The retired v2 (1-e^{-τ/τmin}) saturated to fp32-EXACT 1.0 from ~layer 15,
+        killing every (1-α) channel on the top 40% of the ladder. New contract:
+        monotone, strictly < 1, and 1-α ≥ 1/τ_max > 0 everywhere (grads alive)."""
         tc = TauConfig(n_layers=8, tau_min=8.0)
         tc.update()
         alpha = tc.intent_alpha
-        expected = 1.0 - torch.exp(-tc.tau_l / 8.0)
+        expected = 1.0 - 1.0 / tc.tau_l.clamp(min=2.0)
         assert torch.allclose(alpha, expected, atol=1e-4)
-        # Verify monotonicity: deeper layers → higher α
         for i in range(7):
             assert alpha[i] <= alpha[i+1] + 1e-4
-        # At τ_min, α = 1-exp(-1) ≈ 0.632 (this is the theoretical minimum)
-        # The first layer's τ_l > τ_min at init, so α[0] > 0.632
-        assert alpha[0].item() > 0.6, f'α[0] should be > 0.6, got {alpha[0].item():.4f}'
-        assert alpha[0].item() < 1.0, f'α[0] should be < 1.0, got {alpha[0].item():.4f}'
+        assert float((1.0 - alpha).detach().min()) > 1e-3, '1-α must stay representable at depth'
+        # grad must flow to _tau_dev through the alpha channel (the old formula
+        # gave exactly zero on deep layers)
+        dev = tc._tau_dev
+        assert dev.requires_grad
+        g = torch.autograd.grad((1.0 - alpha).pow(2).sum(), dev, allow_unused=True)[0]
+        assert g is not None and float(g.abs().sum()) > 0
 
     def test_lr_mult_formula(self):
         """lr_mult = (τ_l / τ_ref)^(-γ). Deep layers (high τ) → lower LR."""

@@ -128,17 +128,27 @@ class MaturationController(nn.Module):
         Returns:
             gate: (n_layers,) per-layer maturation values in [0, 1].
         """
+        _tn_live = None
         if self.tau_config is not None:
-            self.tau_norm.data.copy_(self.tau_config.tau_norm.detach())
+            _tn_live = self.tau_config.tau_norm_live()      # B3: grad path to _tau_dev
+            self.tau_norm.data.copy_(_tn_live.detach())
         elif tau_dev is not None:
             self._update_tau_norm(tau_dev)
-        t: float = float(step)
+        t: float = max(float(step), 1.0)
 
+        # B3 (agent D): the linear-time sigmoid saturated to fp32-EXACT 1.0 at
+        # t≈83k (sigmoid(35.5)) and its τ-derivative was 0 by construction
+        # (detach) — wake-up timing was neither learnable nor adjustable late
+        # in a 150k+ budget. Log-time reparameterization keeps the FIRST-ORDER
+        # behavior at t≈T (log t − log T ≈ (t−T)/T ⇒ arg ≈ (t−T)/Δ, same local
+        # slope) while ∂arg/∂log t = T/Δ stays alive forever (grad ~1/t decay).
+        _tn = _tn_live if _tn_live is not None else self.tau_norm
+        _T_eff = self.T0 + self.alpha * (1.0 - _tn) * self.T_delay
         gate: torch.Tensor = torch.sigmoid(
-            (t - (self.T0 + self.alpha * (1.0 - self.tau_norm.detach()) * self.T_delay)) / self.delta_t)
+            (math.log(t) - torch.log(_T_eff.clamp(min=1.0))) * (_T_eff / self.delta_t))
 
-        self.gate.data.copy_(gate)
-        return self.gate
+        self.gate.data.copy_(gate.detach())
+        return gate
 
     @property
     def global_ready(self) -> bool:

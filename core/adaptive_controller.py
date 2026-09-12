@@ -112,16 +112,20 @@ class AdaptiveController:
         if expl is None:
             expl, _ = AdaptiveController.layer_stats(layer)
         b_i_base = -3.0 + expl * 1.5
-        c = 5.83
-        if tau_l is not None:
-            i_target = min(1.0, c / tau_l)
-        else:
+        # B3 (agent D): c := λ⁻⁶·32 ≈ 5.31 replaces the hand-picked 5.83 (the
+        # docstring's own 0.182·32 arithmetic; λ⁻⁶=0.166 is the declared small-
+        # rate domain unit). The −6.0 floor silently COLLAPSED all deep layers
+        # (i_target < e^-3+... unrepresentable via the additive b_i_base) —
+        # softplus⁻¹ is now solved EXACTLY for the target, and b_i_base shifts
+        # the CONTENT modulation around it, so every τ gets its own write rate.
+        c = 0.166 * 32.0
+        if tau_l is None:
             lf = getattr(layer, 'layer_idx', 0) / max(getattr(layer, 'total_layers', 32) - 1, 1)
-            tau_l = 8.0 + 141.0 * lf
-            i_target = min(1.0, c / tau_l)
-        b_i_tau = math.log(max(i_target, 1e-6))
-        b_i = b_i_base + b_i_tau
-        return max(b_i, -6.0)  # floor: i_gate >= softplus(-6.0) ≈ 0.0025
+            tau_l = 8.0 + 504.0 * lf          # B3: matches the real 8..512 ladder (old 141·lf was stale)
+        i_target = min(1.0, c / max(tau_l, 1e-3))
+        i_eff = max(i_target * math.exp(b_i_base), 1e-6)
+        b_i = math.log(math.expm1(i_eff))     # exact softplus⁻¹
+        return b_i
 
     @staticmethod
     def layer_w_mem2v_scale(layer, min_val: float = 0.544, max_val: float = 1.0, diff: Optional[float] = None) -> float:

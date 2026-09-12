@@ -16,7 +16,7 @@ cfg = EVAConfig(
     per_layer_ls_lr=True, ls_ema_fast=0.99, ls_ema_slow=0.999,
     ls_mult_min=0.5, ls_mult_max=2.0, ls_mirror_mult_max=2.0,
     private_mem=True, expert_asymmetry=True, meta_trust=True,
-    grad_clip=0.5, conv_kernel=48, gradient_checkpointing=False,
+    conv_kernel=48, gradient_checkpointing=False,
     head_mode='sigmoid_coded', head_normalize=True,
     bind_twist_mode='trajectory_spiral', bind_traj_dims=3,
     hybrid_alpha_max=0.7, hybrid_alpha_min=0.3, w_pred_scale_init=3.0,

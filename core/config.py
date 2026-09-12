@@ -19,7 +19,8 @@ class WideBindConfig:
     lr: float = 3e-4
     warmup_steps: int = 1000
     weight_decay: float = 0.01
-    grad_clip: float = 0.5
+    # (grad_clip removed B3: AGC ratio c is the live clipper knob; this field
+    # was constructed, logged and never consumed)
     dtype: str = 'float32'
 
     # False = обучать EOS-токен (границы предложений), True = маскировать (старое поведение)
@@ -338,7 +339,7 @@ class WideBindConfig:
     tau_llrd_gamma: float = 0.65      # LLRD exponent: lr_l ∝ (tau_l / tau_ref)^(-gamma)  (γ=0.65 → ~5× spread)
     tau_mem_ref: float = 64.0         # reference τ for memory bank temperatures
     tau_dev_lr_mult: float = 0.2      # LR multiplier for _tau_dev (system-lever: conservative update)
-    tau_gate_clamp: float = 2.0       # unified clamp for adaptive tau deviation in gates
+    # (tau_gate_clamp removed B3: the clamp lives once in vsa_utils.DEV_CLAMP)
     gate_tau_min: float = 0.3         # min temperature for SpectrumGate (mature → precision)
     gate_tau_max: float = 5.0         # max temperature for SpectrumGate (immature → diversity)
 

@@ -558,15 +558,21 @@ def test_tau_ladder_bounded():
     tau = tc.tau_l
     assert torch.isfinite(tau).all()
     ratio = float((tau.max() / tau.min()).detach())
-    # inc ≤ base·softplus(dev_max)/ln2 ⇒ total log-range ×(softplus(dev_max)/ln2)
-    gain = math.log1p(math.exp(-0.3)) / math.log(2.0)      # softplus(0.3)/ln2 ≈ 1.233
-    assert ratio < 400, f'ladder runaway: ratio {ratio:.1e} (bounded design: ≤~170)'
-    # dev=0 identity (checkpoint-safe): exactly the pre-fix uniform ladder
+    # B3: the ladder span is NORMALIZED to [τ_min·(max/min)^{1/(L-1)}, τ_max] —
+    # endpoints exact, so the ratio can never exceed max/min regardless of dev
+    # drift (the old cumsum overshot to 613>τ_max and clamped the top τ_norms).
+    assert ratio < 65.0, f'ladder span escaped: ratio {ratio:.2f} (bound (512/8))'
+    assert abs(float(tau.max().detach()) - 512.0) < 1e-3, 'top endpoint must be exact now'
+    # dev=0 identity (checkpoint-safe): uniform in log, ending EXACTLY at τ_max
     tc0 = TauConfig(n_layers=24, tau_min=8.0, tau_max=512.0, dev_max=0.3)
     tc0.update()
-    base = math.log(512.0 / 8.0) / 23
-    want = torch.tensor([8.0 * math.exp(base * (i + 1)) for i in range(24)])
+    frac = math.log(512.0 / 8.0) / 24.0        # normalized cumsum: (i+1)/24 of the span
+    want = torch.tensor([8.0 * math.exp(frac * (i + 1)) for i in range(24)])
     assert torch.allclose(tc0.tau_l.detach(), want, rtol=1e-5)
+    assert abs(float(tc0.tau_l[-1].detach()) - 512.0) < 1e-3, 'top endpoint must be exact'
+    # τ_norm resolution at depth: only the LAST layer equals 1.0 (old: two)
+    tn = tc0.tau_norm
+    assert int((tn >= 1.0 - 1e-9).sum()) == 1, f'tau_norm ties at the top: {tn[-3:]}'
 
 
 # ── M7.3 τ consumers read the LIVE field, not the init snapshot ──────────────
@@ -579,7 +585,10 @@ def test_tau_consumers_live():
         m(m.embed_tokens(x), step=2, tokens=x)
     snap = float(m.layers[1]._tau_norm)
     with torch.no_grad():
-        m.tau_config._tau_dev.fill_(0.25)
+        # B3: the normalized ladder pins the ENDPOINTS (τ_min/τ_max = documented
+        # physics); _tau_dev now shapes the SPACING — a uniform fill is a null
+        # direction by construction (cs/cs[-1] invariant), so perturb non-uniformly.
+        m.tau_config._tau_dev.copy_(torch.linspace(-0.25, 0.25, 4))
     with torch.no_grad():
         m(m.embed_tokens(x), step=3, tokens=x)
     now = float(m.layers[1]._tau_norm)

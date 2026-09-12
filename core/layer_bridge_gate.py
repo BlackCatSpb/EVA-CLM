@@ -15,6 +15,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from .vsa_utils import DEV_CLAMP
 import torch.nn.functional as F
 import math
 
@@ -41,7 +42,7 @@ class SpectrumGate(nn.Module):
         self.log_tau: nn.Parameter = nn.Parameter(torch.tensor(math.log(tau_init)))
 
     def forward(self, logits: torch.Tensor, tau_external: torch.Tensor | None = None) -> torch.Tensor:
-        _DEV_CLAMP = 2.0  # unified deviation multiplier clamp (0.5..2.0)
+        _DEV_CLAMP = DEV_CLAMP  # unified deviation multiplier clamp (0.5..2.0)
         if tau_external is not None:
             tau = tau_external.clamp(0.1, 10.0) * torch.exp(self.log_tau).clamp(1.0/_DEV_CLAMP, _DEV_CLAMP)
             tau = tau.clamp(0.1, 10.0)

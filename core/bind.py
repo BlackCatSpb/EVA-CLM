@@ -361,11 +361,20 @@ class TrajectorySpiralBind(nn.Module):
         self.register_buffer('_circ_corr_idx', circ_corr, persistent=False)
 
     def _hybrid_alpha(self) -> float:
-        if not self.training:
-            return self.hybrid_alpha_min + (
-                self.hybrid_alpha_max - self.hybrid_alpha_min) * math.exp(-2.0)
-        t = min(1.0, self._step_count.item() / 5000.0)
-        return self.hybrid_alpha_min + (self.hybrid_alpha_max - self.hybrid_alpha_min) * math.exp(-2.0 * t)
+        # B3 (agent A): the old schedule keyed off a CALL-COUNTER buffer
+        # (_step_count incremented even under no_grad → eval output differed
+        # from train by 0.113 rel at the same weights, and the eval branch
+        # carried a second magic constant e^-2). The HRR-vs-outer-product mix
+        # is a POSITION-IN-TIME-SCALE question — and τ_l IS the layer's time
+        # scale: shallow (fast, τ_norm≈0) ⇒ outer-product-dominant (α_max),
+        # deep (slow) ⇒ circulant (α_min). Static per layer, train ≡ eval.
+        _tn = 0.5
+        if getattr(self, '_tau_norm', None) is not None:
+            try:
+                _tn = float(self._tau_norm.item() if torch.is_tensor(self._tau_norm) else self._tau_norm)
+            except Exception:
+                pass
+        return self.hybrid_alpha_min + (self.hybrid_alpha_max - self.hybrid_alpha_min) * (1.0 - _tn)
 
     def _hrr_bind(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         bg: torch.Tensor = b[..., self._circ_conv_idx]  # (B, L, K, K) circular shifts

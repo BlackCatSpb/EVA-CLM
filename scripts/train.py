@@ -517,7 +517,7 @@ def train(cfg=None, resume_path=None):
             ce_s = ce_loss * gscale
             aux_s = {k: (v * gscale if isinstance(v, torch.Tensor) else v)
                      for k, v in aux_dict.items()}
-            balancer.backward(ce_s, aux_s, model.parameters())
+            balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model)
             
             # Adaptive phase scaling: EMA-based mirror/base gradient balance
             phase_scales = []
@@ -730,7 +730,6 @@ if __name__ == '__main__':
     parser.add_argument('--D', type=int, default=4096, help='model width')
     parser.add_argument('--vocab', type=int, default=50000)
     parser.add_argument('--mirror-k', type=int, default=32)
-    parser.add_argument('--grad-clip', type=float, default=0.5)
     parser.add_argument('--llrd', type=float, default=0.9, help='layer-wise LR decay per depth (deeper=smaller LR)')
     parser.add_argument('--init-active-layers', type=int, default=8, help='blocks trained from step 0 (rest frozen)')
     parser.add_argument('--stage-steps', type=int, default=15000, help='unlock next block every N steps (backstop)')
@@ -781,7 +780,6 @@ if __name__ == '__main__':
         mlp_groups=args.mlp_groups,
         mlp_expand=args.mlp_expand,
         lr=args.lr,
-        grad_clip=args.grad_clip,
         llrd=args.llrd,
         init_active_layers=args.init_active_layers,
         stage_steps=args.stage_steps,

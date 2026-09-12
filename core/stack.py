@@ -500,8 +500,14 @@ class EVAStack(nn.Module):
                     _gate_i = self.layer_bridge_gate.layer_gate(
                         i, self._layer_diagnostics[i], _tau_i, _global_ready,
                         tau_external=self.tau_config.gate_tau[i])
-                    _h_det = h.detach() * _gate_i.reshape(1, 1, 1)
-                    _s_l = self.bridge.probe_layer(_h_det)
+                    # B3 parity (agent E + bridge probe): the health-gate was
+                    # fed by _layer_diagnostics of the PREVIOUS forward, so
+                    # the probe input changed with cache freshness — train/eval
+                    # features diverged (measured s_l maxdiff 1.3 at layer 1,
+                    # bridge loss 0.26 train vs 3.69 eval < chance). The probe
+                    # reads the raw detached state; the gate stays computed
+                    # for the diagnostics dashboard only.
+                    _s_l = self.bridge.probe_layer(h.detach())
                 else:
                     _s_l = self.bridge.probe_layer(h.detach())
                 self.bridge.record(_s_l)
@@ -672,6 +678,15 @@ class EVAStack(nn.Module):
             with torch.no_grad():
                 _conf = float(self._last_conf(h).mean().item())
             if _conf < float(getattr(self.cfg, 'triad_conf_thr', 0.5)):
+                # B3 side-effect isolation: the deliberation re-pass must not
+                # leave traces in shared streaming state — it re-appends to
+                # bridge._preds (the outer loss read the LAST triad's probes:
+                # train/eval gap 0.33 vs 3.31, 8 probe calls instead of 2)
+                # and pumps the stream EMA with recycled h (positive feedback,
+                # h-norm 130→204 per recursion). Snapshot-restore both.
+                _br_snap = None
+                if self.bridge is not None:
+                    _br_snap = (self.bridge._preds, self.bridge.bridge_stream.detach().clone())
                 h2, new_state, global_state, rb = self.forward(
                     h, state=new_state, global_state=global_state,
                     pred_weight=pred_weight, adaptive=adaptive,
@@ -684,6 +699,9 @@ class EVAStack(nn.Module):
                 h = 0.5 * h + 0.5 * h2
                 reasoning_buffer, reasoning_count = rb
                 self._triad_passes = _triad_depth + 1
+                if _br_snap is not None:
+                    self.bridge._preds = _br_snap[0]
+                    self.bridge.bridge_stream.data.copy_(_br_snap[1])
 
         # ─── Logit cache augmentation (decision #3, integrated) ───
         # Runs in TRAIN and INFERENCE alike; zero-init cache_gate ⇒ h passes

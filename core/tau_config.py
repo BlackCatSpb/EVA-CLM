@@ -125,8 +125,21 @@ class TauConfig(nn.Module):
         dev_eff = self.dev_max * torch.tanh(self._tau_dev / max(self.dev_max, 1e-6))
         inc = base_inc * F.softplus(dev_eff) / _sp0
 
-        log_tau = self._log_tau_min + torch.cumsum(inc, dim=0)
+        cs = torch.cumsum(inc, dim=0)
+        # B3 (agent D): the raw cumsum overshot the ladder: τ_last = τ_min·exp(Σinc)
+        # = 613 > τ_max=512 (L increments for L−1 gaps), and τ_norm of the TOP TWO
+        # layers clamped to exactly 1.0 (96% of dev draws) — killing U3/U5/U7/U10
+        # resolution at depth AND tieing the deepest schedules. Normalizing by the
+        # final cumsum keeps strict monotonicity (ratio of increasing sums) and
+        # makes the span endpoints exact, so the [0,1] clamp never binds.
+        log_tau = self._log_tau_min + self._log_tau_range * (cs / cs[-1].clamp_min(1e-8))
         return torch.exp(log_tau)
+
+    def tau_norm_live(self) -> torch.Tensor:
+        """B3: τ_norm as a LIVE tensor (grad to _tau_dev) vs the cached buffer
+        that consumers read. The maturation schedule uses it so wake-up timing
+        is learnable and its gradient never dies into a detached copy."""
+        return self._compute_tau_norm(self._compute_tau_ladder())
 
     def _compute_tau_norm(self, tau_l: torch.Tensor) -> torch.Tensor:
         """Log-normalized tau to [0,1] — uniform spread over depth.
@@ -157,12 +170,14 @@ class TauConfig(nn.Module):
     def _compute_intent_alpha(self, tau_l: torch.Tensor) -> torch.Tensor:
         """Per-layer intent EMA alpha.
 
-        v2: alpha = 1 − exp(−tau_l / tau_min)
-          shallow (tau_l≈tau_min): alpha ≈ 1 − e^{-1} ≈ 0.63  (mostly fresh)
-          deep    (tau_l≈tau_max): alpha ≈ 1 − e^{-64}  ≈ 1.0  (mostly carried)
-          Covers full [0,1] range unlike v1's [0.875, 0.998].
+        B3 (agent D): v2 saturated to EXACTLY 1.0 from layer ~15 on
+        (1−e^−64 → fp32 = 1.0), which silently killed the three mirror meta
+        channels that multiply (1−α) (top 40% of the ladder never learned
+        them). v3 = classic EMA horizon 1−1/τ: monotone in τ, never saturates
+        (1−α = 1/τ ≥ 1/512 > 0), and it is the same formula the intent bus
+        carry already uses — one authority for one quantity.
         """
-        return 1.0 - torch.exp(-tau_l / self.tau_min)
+        return 1.0 - 1.0 / tau_l.clamp(min=2.0)
 
     def _compute_lr_mult(self, tau_l: torch.Tensor) -> torch.Tensor:
         """Per-layer LR multiplier (LLRD).

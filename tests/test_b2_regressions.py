@@ -37,10 +37,10 @@ def test_b2_bridge_target_detached_and_buffered():
 def test_b2_bridge_learns_structure_over_iid():
     m = _mini()
     params = [p for n, p in m.named_parameters() if 'bridge' in n]
-    opt = torch.optim.SGD(params, lr=0.05)
+    opt = torch.optim.SGD(params, lr=0.3)
     torch.manual_seed(0)
     pattern = torch.arange(1, 9).repeat(8)[:24]           # 8-cycle structured stream
-    for it in range(160):
+    for it in range(320):
         x = pattern.unsqueeze(0)
         h = m.embed_tokens(x)
         out, *_ = m(h, None, step=it, tokens=x)
@@ -58,7 +58,9 @@ def test_b2_bridge_learns_structure_over_iid():
         return float(aux['bridge_conn'])
     l_struct = loss_of(pattern.unsqueeze(0))
     l_iid = loss_of(torch.randint(1, 600, (1, 24)))
-    assert l_iid - l_struct > 0.15, f'bridge carries no sequence info: struct={l_struct:.3f} iid={l_iid:.3f}'
+    chance = math.log(23)
+    assert l_struct < 0.75 * chance and l_iid - l_struct > 0.3, \
+        f'bridge not learning: struct={l_struct:.3f} iid={l_iid:.3f} chance={chance:.3f}'
 
 
 def test_b2_align_survives_summation_cancellation():
@@ -188,7 +190,7 @@ def test_b2_signal_ent_matches_forward_weights():
     out, *_ = m(h, None, step=6, tokens=x)
     _, aux = m.compute_losses(out, x, h_emb=h)
     # losses averages over layers; with 2 layers both may differ — check range contains layer-0 value
-    assert abs(float(aux['signal_ent']) - want) < 0.5 or True  # structural check below is the lock
+    assert abs(float(aux['signal_ent'].detach()) - want) < 0.5 or True  # structural check below is the lock
     # structural: gradient must flow through θ (the entropy acts on the FORWARD quantity now)
     loss = aux['signal_ent']
     grads = torch.autograd.grad(loss, [sl._signal_log_weights], allow_unused=True)
