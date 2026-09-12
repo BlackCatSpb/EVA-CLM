@@ -401,6 +401,55 @@ class FailureDetector:
 # Loss balancing — spectral alignment (PCGrad), no cap
 # ─────────────────────────────────────────────────────────────────────────────
 
+def codebook_fingerprint(model) -> str:
+    """B8 (audit 02a F2A-02): stable identity hash of the token-code geometry.
+    Codes are rebuilt from algorithm+seed at every boot; if that rebuild ever
+    diverges from what training actually used, resume continues on a model
+    whose token identities have silently changed — the worst possible
+    'successful' resume. Cheap: one sha256 over the (V,K) code block."""
+    import hashlib
+    emb = getattr(model, 'embed', None)
+    c = getattr(emb, 'codes', None) if emb is not None else None
+    if c is None:
+        sd = model.state_dict()
+        key = 'embed.codes' if 'embed.codes' in sd else next(
+            (k for k in sd if k.endswith('.codes')), None)
+        if key is None:
+            return 'none'
+        c = sd[key]
+    c = c.detach().cpu().contiguous()
+    if c.dtype == torch.bool:
+        c = c.to(torch.uint8)
+    h = hashlib.sha256(c.numpy().tobytes()).hexdigest()[:16]
+    return f"{'x'.join(map(str, c.shape))}-{h}"
+
+
+def verify_identity_resume(model, ckpt, skipped_keys):
+    """B8 (audit 02a F2A-03): a size-mismatch on the identity path must be
+    FATAL, not a printed SKIP. The old filter turned a geometry change
+    (code_dim/vocab/head edits) into a silent half-resume: optimizer/step/
+    cursor restored, token embedding & head re-initialized underneath."""
+    IDENT = ('embed.', 'lm_head.', 'final_norm')
+    ident = [k for k in (skipped_keys or []) if k.startswith(IDENT)]
+    if ident:
+        raise RuntimeError(
+            f'RESUME BLOCKED (B8): {len(ident)} identity tensors shape-mismatched, '
+            f'e.g. {ident[:3]} — this checkpoint was trained under DIFFERENT '
+            'code/head geometry. Continuing would silently re-initialize token '
+            'identity (roundtrip amnesia). Start fresh (FORCE_FRESH=True) or '
+            'write a migration in scripts/migrate.py.')
+    fp_now = codebook_fingerprint(model)
+    fp_ckpt = (ckpt or {}).get('code_fp')
+    if fp_ckpt is None:
+        print('  [B8] legacy checkpoint without code_fp — relying on shape checks only')
+    elif fp_ckpt != fp_now:
+        raise RuntimeError(
+            f'RESUME BLOCKED (B8): codebook fingerprint {fp_ckpt!r} != rebuilt '
+            f'{fp_now!r} — codes were re-derived differently than training used '
+            '(seed/algorithm drift): token identities do not match the weights.')
+    return fp_now
+
+
 def hard_veto_ceiling(vocab: int, factor: float = 2.0) -> float:
     """B7 (audit 01, F-07): geometry-independent non-learnable-CE ceiling.
 

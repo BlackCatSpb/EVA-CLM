@@ -12,7 +12,8 @@ import numpy as np
 from torch.serialization import add_safe_globals
 
 from core import EVAConfig, EVAStack, MirrorLRScheduler
-from core.training_control import hard_veto_ceiling
+from core.training_control import (hard_veto_ceiling, codebook_fingerprint,
+                                verify_identity_resume)
 
 
 def _save_checkpoint_safely(state, path):
@@ -271,13 +272,16 @@ def train(cfg=None, resume_path=None):
             print(f'  MIGRATED {n_migrated} keys (W_out +K, bind_coh_gate=0, freq_scale=1.0) — старое поведение сохранено')
         # Filter size-mismatched keys (e.g. L2 slots changed 16->32)
         _model_sd = model.state_dict()
+        _skipped = []  # B8: identity drift is fatal, collect names
         _filtered = {}
         for k, v in sd.items():
             if k in _model_sd and _model_sd[k].shape != v.shape:
                 print(f'  SKIP size-mismatch: {k} ckpt={list(v.shape)} model={list(_model_sd[k].shape)}')
+                _skipped.append(k)
             else:
                 _filtered[k] = v
         missing, unexpected = model.load_state_dict(_filtered, strict=False)
+        missing, unexpected = verify_identity_resume(model, ckpt, _skipped)  # B8 (02a F2A-03)
         if getattr(cfg, 'reset_skip_alpha', False):
             nzero = 0
             for layer in model.layers:
@@ -676,7 +680,7 @@ def train(cfg=None, resume_path=None):
                     save_path = os.path.join(cfg.save_dir, f'best.pt')
                     _save_checkpoint_safely({
                         'step': step,
-                        'model': model.state_dict(),
+                        'model': model.state_dict(), 'code_fp': codebook_fingerprint(model),
                         'optimizer': optimizer.state_dict() if not args.no_save_optimizer else None,
                         'param_names': _opt_param_names(model, optimizer) if not args.no_save_optimizer else None,
                         'scheduler': scheduler.state_dict(),

@@ -325,8 +325,9 @@ class LogitAttention(nn.Module):
                     return h, None
                 return h
             M = cached.shape[1]
-            # logits: tanh normalization
-            cached = torch.tanh(cached / 10.0)
+            # B8 (audit 02a F2A-08): bit_profile applies its own bounded
+            # tanh(z/10); the outer tanh here DOUBLE-squashed the profile
+            # (effective slope ~1/100, measured floor/signal 42:1).
             # logits mode: summarize into the code space, project K → D
             prof = self.bit_profile(cached)
             K = self.k_norm(self.k_proj_l(prof))

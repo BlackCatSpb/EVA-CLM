@@ -392,6 +392,14 @@ class WideBindConfig:
     log_dir: str = 'logs'
 
     def __post_init__(self):
+
+        # B8 (audit 02a F2A-04): nested-rope readout inverse was never
+        # implemented — enabling embed_rope silently drops code roundtrip
+        # to 0.20 (measured). Flag retired loudly rather than left as a trap.
+        if getattr(self, 'embed_rope', False):
+            raise NotImplementedError(
+                'embed_rope=True retired (audit 02a F2A-04): readout rotation '
+                'inverse is dead code; roundtrip collapses to 0.20.')
         if self.lambda_d_enabled:
             self._apply_lambda_d()
 
