@@ -92,10 +92,26 @@ def migrate_state_dict(
     # (65536×D); the code-space replacements are K×D with different shapes —
     # old weights cannot migrate (different semantics), drop them so the
     # cache re-inits (zero gate ⇒ identity ⇒ safe).
+    # B17 (audit 05 F5 MEDIUM): name-only matching was WRONG — the current
+    # code-space projections REUSE these names with small input dims (K_bits).
+    # Drop only the LEGACY V-scale tensors (input dim > 4096); live weights
+    # of the same name must survive resume.
+    _tgt = dict(model.named_parameters())
+    def _legacy_vdim(key):
+        # Legacy iff the CHECKPOINT tensor disagrees with the live model's
+        # input dimension (old k_proj_l: (D, V); new: (D, K_bits)). No magic
+        # threshold — shape identity IS the discriminator.
+        w = sd.get(key)
+        base = key.rsplit(chr(46), 1)[0]
+        p = _tgt.get(base + '.weight') if torch.is_tensor(w) else None
+        if p is None or w.dim() != 2 or p.dim() != 2:
+            return False
+        return w.shape[-1] != p.shape[-1]
     for k in [key for key in list(sd)
-              if key.startswith('logit_cache.attention.k_proj_l.')
-              or key.startswith('logit_cache.attention.v_proj_l.')
-              or key.startswith('logit_cache.logit_to_hidden.')]:
+              if (key.startswith('logit_cache.attention.k_proj_l.')
+                  or key.startswith('logit_cache.attention.v_proj_l.')
+                  or key.startswith('logit_cache.logit_to_hidden.'))
+              and _legacy_vdim(key)]:
         del sd[k]
         changed += 1
 
