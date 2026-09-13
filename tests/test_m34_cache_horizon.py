@@ -64,3 +64,24 @@ def test_stack_wires_auto_horizon_and_runs():
     span = sum(cache._h_lens)
     assert span <= int(cfg.tau_max) + max(cache._h_lens), f'horizon exceeded: {span}'
     assert len(cache._h_cache) == len(cache._h_lens) == len(cache._h_scores)
+
+
+def test_m35_oom_ladder_retries_on_device_and_probes_back():
+    # The 2026-09-13 live crash: the OOM retry re-read the batch and never
+    # moved it to CUDA -> device mismatch in the head gather. The ladder must
+    # re-read WITH device placement, be graded (recompute -> batch -> seq),
+    # carry the probe-back clock, and keep the floor dump reachable.
+    import json as _j
+    nb = _j.load(open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'notebooks', 'eva_colab.ipynb'), encoding='utf-8'))
+    s = ''.join(''.join(c.get('source', [])) for c in nb['cells']
+                if 'TRAINING LOOP' in ''.join(c.get('source', [])))
+    i = s.find('[OOM] retry')
+    assert i > 0
+    seg = s[max(0, i - 1500):i]
+    assert 'x.to(device)' in seg and 'y.to(device)' in seg, 'retry must place the batch on device'
+    assert '_laddered' in s and 'halving batch' in s
+    assert '_oom_ckpt_step' in s and '[ckpt-probe]' in s
+    assert 'halving window' in s
+    j = s.find('top CUDA tensor holders')
+    assert j > 0 and 'raise' in s[j:j + 400]
