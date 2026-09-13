@@ -202,6 +202,8 @@ class EVAStack(nn.Module):
             codes=getattr(self.lm_head, 'codes', None),
             mode=getattr(cfg, 'logit_cache_mode', 'topk'),
                 sparsity=float(getattr(cfg, 'code_sparsity', 4)),
+            horizon_tokens=(int(getattr(cfg, 'cache_horizon_tokens', 0))
+                            or int(cfg.tau_max)),   # M34: auto = top VSA scale
         ) if getattr(cfg, 'logit_cache_enabled', True) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,
@@ -726,7 +728,14 @@ class EVAStack(nn.Module):
         # Runs in TRAIN and INFERENCE alike; zero-init cache_gate ⇒ h passes
         # through unchanged until CE learns to consult the cache.
         if self.logit_cache is not None:
-            h = self.logit_cache.augment(h)
+            # M34: the window's mean surprisal IS its novelty — the cache ring
+            # keeps what the mirrors found least predictable, exactly the
+            # content the VSA ladder cannot represent (it smooths predictable
+            # spans away). pred_errs is empty only before any mirror ran.
+            _nov = None
+            if pred_errs:
+                _nov = float(torch.stack(pred_errs).mean())
+            h = self.logit_cache.augment(h, novelty=_nov)
 
         return h, new_state, global_state, (reasoning_buffer, reasoning_count)
 

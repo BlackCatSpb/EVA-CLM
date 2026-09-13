@@ -318,6 +318,12 @@ class WideBindConfig:
     logit_cache_n_heads: int = 8         # attention heads for logit cache
     logit_cache_scheduled_sampling: float = 0.05  # R1: probability of inference-mode during training (0.05 = 5%)
     logit_cache_reset_on_resume: bool = True  # R6: clear cache on resume/LR-reset
+    cache_horizon_tokens: int = 0     # M34: 0 = AUTO = cfg.tau_max (the cache
+                                      # spans exactly the slowest VSA scale);
+                                      # negative = legacy blind FIFO; >0 = fixed
+                                      # token horizon. Entries beyond it are
+                                      # released by retention score
+                                      # novelty x exp(-age/tau), not FIFO.
 
     # ─── Режим Б (открытое сознание): отказ от softmax-свёртки ───
     # Все точки комбинации смыслов используют нормированное сигмоид-среднее

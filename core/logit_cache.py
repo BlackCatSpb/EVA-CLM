@@ -26,6 +26,15 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+
+
+def noveltysafe(v) -> float:
+    """M34: a store-time novelty that survives NaN/None (neutral 1.0)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 1.0
+    return f if (f == f and f > 0.0) else 1.0
 import torch.nn.functional as F
 
 from .tau_compression import (
@@ -45,7 +54,8 @@ class LogitCache(nn.Module):
     """
 
     def __init__(self, V: int, D: int, max_entries: int = 64,
-                 n_scales: int = 4, device: torch.device = torch.device('cpu')):
+                 n_scales: int = 4, device: torch.device = torch.device('cpu'),
+                 horizon_tokens: int = 0):
         super().__init__()
         self.V = V
         self.D = D
@@ -57,6 +67,17 @@ class LogitCache(nn.Module):
         self.max_entries = max_entries
         self.n_scales = n_scales
         self.device = device
+        # M34: horizon in TOKENS for the smart ring (0 = legacy blind FIFO).
+        # The stack defaults it to cfg.tau_max — the SAME top VSA scale the
+        # multi-scale memory integrates over, so the exact-content window and
+        # the lossy ladder finally span one dynamic range. Entries older than
+        # the horizon are released by RETENTION SCORE (novelty x exp(-age/tau))
+        # instead of "first in, first out".
+        self.horizon_tokens = int(horizon_tokens or 0)
+        self._h_scores: List[float] = []   # per-entry novelty (train h ring)
+        self._h_lens: List[int] = []
+        self._l_scores: List[float] = []   # per-entry novelty (inference ring)
+        self._l_lens: List[int] = []
 
         # VSA scale parameters (learned)
         # sigmoid(vsa_scale) ∈ [0, 1] → k = base_k * sigmoid(vsa_scale)
@@ -94,29 +115,72 @@ class LogitCache(nn.Module):
         entries = self._p_cache[-n:] if n else list(self._p_cache)
         return torch.cat(entries, dim=1)
 
-    def store(self, h_or_logits: torch.Tensor, training: bool = True) -> None:
+    def store(self, h_or_logits: torch.Tensor, training: bool = True,
+              novelty: Optional[float] = None) -> None:
         """Store data in cache.
 
         Args:
-            h_or_logits: (B, L, D) hidden states (training) or (B, L, V) logits (inference)
-            training: if True, store h (gradient flows); if False, store compressed logits
+            h_or_logits: (B, L, D) hidden states (training) or (B, L, V) logits
+            training: if True, store h; if False, store compressed logits
+            novelty: M34 importance of THIS window (mean surprisal). None ->
+                1.0 (neutral). Only meaningful with horizon_tokens > 0: the
+                ring then holds ~horizon tokens of the MOST RETAINED windows,
+                not simply the last N.
         """
         if training:
             # Detached at store: the same-step gradient runs through the live
             # q/k/v path, not through retained graphs of past steps (#3).
             self._h_cache.append(h_or_logits.detach())
-            if len(self._h_cache) > self.max_entries:
-                self._h_cache.pop(0)
-                if len(self._kv_h) > len(self._h_cache):
-                    self._kv_h.pop(0)
+            self._h_lens.append(int(h_or_logits.shape[1]))
+            self._h_scores.append(float(noveltysafe(novelty)))
+            self._evict(self._h_cache, self._h_lens, self._h_scores,
+                        kv=self._kv_h)
         else:
             # Store compressed logits (no gradient)
             compressed = self._compress(h_or_logits)
             self._logit_cache.append(compressed)
-            if len(self._logit_cache) > self.max_entries:
-                self._logit_cache.pop(0)
+            self._l_lens.append(int(compressed['shape'][1]))
+            self._l_scores.append(float(noveltysafe(novelty)))
+            self._evict(self._logit_cache, self._l_lens, self._l_scores)
 
         self._position += 1
+
+    def _evict(self, cache: list, lens: list, scores: list,
+               kv: Optional[list] = None) -> None:
+        """M34 ring policy. Hard cap first (max_entries, oldest — legacy
+        semantics preserved as a ceiling), then the τ-horizon: while the span
+        exceeds horizon_tokens, drop the LOWEST-retention entry
+        (novelty * exp(-age_tokens/tau), tau = horizon/2 — the same order as
+        the VSA slow scale). The newest entry is never dropped (it carries the
+        same-step gradient and the freshest context)."""
+        while len(cache) > self.max_entries:
+            cache.pop(0)
+            if lens:
+                lens.pop(0)
+            if scores:
+                scores.pop(0)
+            if kv is not None and len(kv) > len(cache):
+                kv.pop(0)
+        if self.horizon_tokens <= 0 or len(cache) <= 1:
+            return
+        tau = max(self.horizon_tokens / 2.0, 1.0)
+        while sum(lens) > self.horizon_tokens and len(cache) > 1:
+            ages, acc = [], 0
+            for ln in reversed(lens):
+                ages.append(acc)
+                acc += ln
+            ages.reverse()
+            j = min(range(len(scores)),
+                    key=lambda i: scores[i] * math.exp(-ages[i] / tau))
+            if j == len(cache) - 1:
+                break                      # cannot evict the newest entry
+            del cache[j]
+            del lens[j]
+            del scores[j]
+            if kv is not None and j < len(kv):
+                del kv[j]
+            while kv is not None and len(kv) > len(cache):
+                kv.pop(0)
 
     def retrieve(self, n: int = None, training: bool = True) -> Optional[torch.Tensor]:
         """Retrieve data from cache.
@@ -192,6 +256,10 @@ class LogitCache(nn.Module):
         self._logit_cache.clear()
         self._p_cache.clear()
         self._kv_h.clear()
+        self._h_scores.clear()          # M34
+        self._h_lens.clear()
+        self._l_scores.clear()
+        self._l_lens.clear()
         self._position = 0
 
     def size_mb(self, training: bool = True) -> float:
@@ -404,9 +472,10 @@ class LogitCacheAttention(nn.Module):
                  max_entries: int = 64, n_heads: int = 8,
                  scheduled_sampling_ratio: float = 0.05,
                  codes: torch.Tensor | None = None, sparsity: float = 1.0,
-                 mode: str = 'topk'):
+                 mode: str = 'topk', horizon_tokens: int = 0):
         super().__init__()
-        self.cache = LogitCache(V, D, max_entries, n_scales=4)
+        self.cache = LogitCache(V, D, max_entries, n_scales=4,
+                                horizon_tokens=horizon_tokens)
         self.attention = LogitAttention(D, V, n_heads, codes=codes, sparsity=sparsity)
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
         self.mode = str(mode)
@@ -421,7 +490,8 @@ class LogitCacheAttention(nn.Module):
 
     def forward(self, h: torch.Tensor, logits: torch.Tensor,
                 training: bool = True,
-                use_cache: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+                use_cache: bool = True,
+                novelty: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Process through cache and augment hidden state.
 
         Args:
@@ -448,13 +518,13 @@ class LogitCacheAttention(nn.Module):
         # Store in cache
         if training and not use_inference_mode:
             # Normal training: store h (gradient flows)
-            self.cache.store(h, training=True)
+            self.cache.store(h, training=True, novelty=novelty)
         else:
             # Inference mode or scheduled sampling
             if self.mode == 'profile' and logits is not None and self.attention.codes_t is not None:
                 self.cache.store_profile(self.attention.bit_profile(logits))   # M18
             else:
-                self.cache.store(logits, training=False)
+                self.cache.store(logits, training=False, novelty=novelty)
 
         # Attend to cache
         # During scheduled sampling, attend to compressed logits (inference mode)
@@ -479,7 +549,7 @@ class LogitCacheAttention(nn.Module):
 
         return h_augmented, logits
 
-    def augment(self, h: torch.Tensor) -> torch.Tensor:
+    def augment(self, h: torch.Tensor, novelty: Optional[float] = None) -> torch.Tensor:
         """Training/inference-loop integration (decision #3).
 
         Stores the current hidden state (the live newest entry keeps a
@@ -488,5 +558,6 @@ class LogitCacheAttention(nn.Module):
         learns to consult the cache — identity at init, checkpoint/rollback
         safe.
         """
-        out = self.forward(h, logits=None, training=True, use_cache=True)[0]
+        out = self.forward(h, logits=None, training=True, use_cache=True,
+                           novelty=novelty)[0]
         return out if torch.isfinite(out).all() else h
