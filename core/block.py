@@ -71,6 +71,49 @@ def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None,
     final = intra[:, -1:]
     return intra, final, cum_decay.to(b_chunk.dtype)
 
+def _scan_chunks(b_in: torch.Tensor, d_in: torch.Tensor, floor_log=None,
+                 chunk: int = 32):
+    """M37: VECTORIZED chunked scan — mathematically identical to calling
+    _scan_chunk per chunk in a python loop, but one batched graph instead of
+    ~768 python iterations per step (16 chunks x 2 scans x 24 layers). That
+    loop was the A100 launch-bound ceiling (121 tok/s at B=2) AND inflated
+    the backward memory (every chunk kept its own intermediates; the vector
+    keeps one (B,L,S,D) set — peak 35.3GB gets real again).
+
+    Returns (intra (B,L,S,D), final (B,n_chunks,S,D), cum_decay (B,L,S,D)).
+    Tail-pads with b=0 / decay=1 — neither moves the real positions' prefix
+    sums, and the padded chunk's anchor equals its real tail exactly.
+    floor_log=None falls back to the python loop (the M3 fp64 exactness path
+    is rarely used — production always floors — and its oracle stays tested).
+    """
+    if floor_log is None:
+        B, L = b_in.shape[0], b_in.shape[1]
+        outs = [_scan_chunk(b_in[:, s:min(s + chunk, L)],
+                            d_in[:, s:min(s + chunk, L)])
+                for s in range(0, L, chunk)]
+        intra = torch.cat([o[0] for o in outs], dim=1)
+        final = torch.cat([o[1] for o in outs], dim=1)      # (B,nc,S,D)
+        cumd = torch.cat([o[2] for o in outs], dim=1)
+        return intra, final, cumd
+    B, L, S, D = b_in.shape
+    nc = (L + chunk - 1) // chunk
+    pad = nc * chunk - L
+    b = b_in.reshape(B, nc, chunk, S, D) if pad == 0 else None
+    if b is None:
+        b = F.pad(b_in, (0, 0, 0, 0, 0, pad)).reshape(B, nc, chunk, S, D)
+        d = F.pad(d_in, (0, 0, 0, 0, 0, pad), value=1.0).reshape(B, nc, chunk, S, D)
+    else:
+        d = d_in.reshape(B, nc, chunk, S, D)
+    log_a = torch.log(d.clamp(min=_EPS_SCAN)).clamp_min(floor_log.to(d.dtype))
+    log_cum = torch.cumsum(log_a, dim=2)                     # within-chunk
+    anchor = log_cum[:, :, -1:]                              # (B,nc,1,S,D)
+    u = b * torch.exp(anchor - log_cum)                      # |u| <= |b|
+    intra = torch.exp(log_cum - anchor) * torch.cumsum(u, dim=2)
+    cum_decay = torch.exp(log_cum)
+    flat = lambda t: t.reshape(B, nc * chunk, S, D)[:, :L]
+    return flat(intra).to(b_in.dtype), intra[:, :, -1], flat(cum_decay).to(b_in.dtype)
+
+
 def _combine_chunks(chunk_data: list, initial_state: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """2nd-level: cross-chunk prefix scan over K chunk states.
     Returns combined (B, L, S*D), final_state (B, S*D), leaf (B, L, S*D).
@@ -538,13 +581,14 @@ class EVABlock(nn.Module):
         # floor); floor-off stays the legacy fp64 exactness path. No per-layer
         # precision decision, no GPU sync, no fp64 graph.
 
-        chunks = []
-        for start in range(0, L, CHUNK):
-            end = min(start + CHUNK, L)
-            intra, final, cum_decay = _scan_chunk(
-                input_vec_f32[:, start:end], decay_f32[:, start:end],
-                floor_log=_fl18)
-            chunks.append((intra, final, cum_decay))
+        # M37: one vectorized call replaces the 16-iteration python loop; the
+        # per-chunk list _combine_chunks consumes is now cheap VIEWS of one
+        # batched graph (was 16 separate subgraphs retained for backward).
+        _iv, _fv, _cv = _scan_chunks(input_vec_f32, decay_f32,
+                                     floor_log=_fl18, chunk=CHUNK)
+        chunks = [(_iv[:, s:min(s + CHUNK, L)], _fv[:, k:k + 1],
+                   _cv[:, s:min(s + CHUNK, L)])
+                  for k, s in enumerate(range(0, L, CHUNK))]
         
         mem_all_vec, mem_state_out_vec, mem_leaf_vec = _combine_chunks(chunks, mem_state_f32)
         # Keep VSA in fp32 — prefix scan accumulators underflow/overflow in fp16
@@ -567,13 +611,11 @@ class EVABlock(nn.Module):
             mu_state = mu_state.reshape(B, S, D)
         mu_input_vec = (mem_input * self.w_k_mu).unsqueeze(2).expand(-1, -1, S, -1)
         mu_input_f32 = mu_input_vec.float() if mu_input_vec.dtype != torch.float32 else mu_input_vec
-        mu_chunks = []
-        for start in range(0, L, CHUNK):
-            end = min(start + CHUNK, L)
-            intra, final, cum_decay = _scan_chunk(
-                mu_input_f32[:, start:end], decay_f32[:, start:end],
-                floor_log=_fl18)
-            mu_chunks.append((intra, final, cum_decay))
+        _mv, _mfv, _mcv = _scan_chunks(mu_input_f32, decay_f32,
+                                        floor_log=_fl18, chunk=CHUNK)
+        mu_chunks = [(_mv[:, s:min(s + CHUNK, L)], _mfv[:, k:k + 1],
+                      _mcv[:, s:min(s + CHUNK, L)])
+                     for k, s in enumerate(range(0, L, CHUNK))]
         mu_all_vec, mu_state_out_vec, _ = _combine_chunks(mu_chunks, mu_state)
         mu_all = (mu_all_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)
         mu_read = mu_all * self.w_q_mu

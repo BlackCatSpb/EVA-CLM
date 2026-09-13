@@ -263,6 +263,11 @@ class EVAStack(nn.Module):
         self.tau_config.update(mat_gate_for_tau)
         # Per-layer tau from tau_config (for maturation, intent, LLRD, diagnostics)
         tau_l = self.tau_config.tau_l  # (n_layers,) — per-layer temporal scale
+        # M37b: one tolist() replaces ~2-4 GPU->CPU syncs PER LAYER per step
+        # (tau_l[i].item(), mat_gate[i].item() …) — each .item() stalls the
+        # launch pipeline; on 24 layers that was tens of ms of pure latency.
+        _tl_l = tau_l.detach().cpu().tolist()
+        _mg_l = None
         tau_min = tau_l[0]
         tau_max = tau_l[-1]
         tau_mid = (tau_min * tau_max).sqrt()
@@ -295,7 +300,7 @@ class EVAStack(nn.Module):
                 for i, layer in enumerate(self.layers):
                     l_expl, l_diff = _layer_stats_cache[i]
                     lf = i / max(len(self.layers) - 1, 1)
-                    tau_l_val = self.tau_config.tau_l[i].item()
+                    tau_l_val = _tl_l[i]
                     b_i_val = AdaptiveController.layer_b_i(layer, expl=l_expl, tau_l=tau_l_val)
                     b_d_max = getattr(self.cfg, 'vsa_b_d_max', 12.0)
                     b_d_val = AdaptiveController.layer_b_d(layer, expl=l_expl,
@@ -536,9 +541,11 @@ class EVAStack(nn.Module):
 
             # ─── Streaming Memory Bank: per-layer read/write ───
             # Skip when maturation too low — pure waste of compute
+            if _mg_l is None and mat_gate is not None:
+                _mg_l = mat_gate.detach().cpu().tolist()   # M37b (see above)
             if (self.memory_bank is not None and tokens is not None
-                    and (mat_gate is None or mat_gate[i].item() >= self.memory_bank._min_write_maturation)):
-                _mb_mat_i = mat_gate[i].item() if mat_gate is not None else 1.0
+                    and (_mg_l is None or _mg_l[i] >= self.memory_bank._min_write_maturation)):
+                _mb_mat_i = _mg_l[i] if _mg_l is not None else 1.0
                 h = self.memory_bank(h, tokens, step=step, mat_gate=_mb_mat_i)
 
             if self.cfg.gradient_checkpointing and self.training:
