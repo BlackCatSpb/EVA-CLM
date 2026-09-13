@@ -46,11 +46,14 @@ def test_floored_scan_matches_fp64_reference():
     assert rel < 1e-4, f'tail-referenced fp32 diverges from fp64 ref: {rel:.2e}'
 
 
-def test_agc_does_not_turn_inf_gradient_into_nan():
+def test_agc_drops_nonfinite_gradients():
+    # M28: the loops no longer gate updates; AGC (core.adaptation) is the one
+    # place a non-finite gradient may be acted on — it is DROPPED so Adam
+    # moments and weights can never be poisoned.
     model = nn.Linear(4, 1)
+    good = model.bias.detach().clone()
     model.weight.grad = torch.full_like(model.weight, float('inf'))
-    assert nonfinite_gradient_names(model) == ['weight']
 
     GradientClipper(c=0.1).clip(model.parameters())
-    assert torch.isinf(model.weight.grad).all()
-    assert not torch.isnan(model.weight.grad).any()
+    assert model.weight.grad is None
+    assert nonfinite_gradient_names(model) == []

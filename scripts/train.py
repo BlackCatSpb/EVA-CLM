@@ -476,82 +476,11 @@ def train(cfg=None, resume_path=None):
             model.observe_output(model.lm_head(out))  # salience of THIS step -> next step's intent
             ce_loss, aux_dict = model.compute_losses(out, y, h_emb=h)
 
-            ce_val = ce_loss.item()
-            # M23: non-finite CE -> document-restart semantics (reset streaming
-            # state, skip grad, advance cursor); never feed poisoned state back
-            # into the alarm. Stage probes come from block-level _chk markers.
-            # M26: reset_cache() also scrubs poisoned runtime buffers — one bad
-            # backward must not become a permanent forward-NaN cascade.
-            if not math.isfinite(ce_val):
-                _probes = [getattr(_l, '_nan_at', None) for _l in model.layers]
-                _probes = [p for p in _probes if p][:3]
-                print(f'  [nan-guard] step {step}: non-finite CE — state reset; stages={_probes or "none"}')
-                h = out = ce_loss = aux_dict = None
-                state = None
-                gs = None
-                intent_state = None
-                optimizer.zero_grad(set_to_none=True)
-                model.reset_cache()
-                continue
-            # M14 non-learnable-batch veto (mirror of the notebook): CE above
-            # the coded head's uniform-bit NLL = data garbage, not model
-            # divergence — skip the gradient, advance the cursor.
-            _ce_uni = hard_veto_ceiling(cfg.vocab)
-            if ce_val > _ce_uni:
-                print(f'  [veto] step {step}: ce={ce_val:.2f} > {_ce_uni:.1f} uniform-bit NLL — gradient skipped')
-                h = out = ce_loss = aux_dict = None
-                optimizer.zero_grad(set_to_none=True)
-                continue
-            # Progressive unfreeze (validation-plateau driven)
             depth.update(step)
             # Statistical watchdog: CE explosion -> rollback + fresh Adam + LR rewind.
             # Audit M8: train.py never passed the protective metrics and never
             # armed CE (watchdog.ce_armed stays False) — the Colab loop has both;
             # here the watchdog was decoration. Metrics mirror the notebook.
-            _mets = {}
-            try:
-                _dv = aux_dict.get('diversity')
-                if _dv is not None and isinstance(_dv, torch.Tensor):
-                    _mets['diversity'] = float(_dv.abs().item())
-                _gl = aux_dict.get('gate_l1')
-                if _gl is not None and isinstance(_gl, torch.Tensor):
-                    _mets['gate_l1'] = float(_gl.item())
-                with torch.no_grad():
-                    _rr = [getattr(l, '_mlp_ratio', None) for l in model.layers]
-                    if _rr and all(v is not None for v in _rr):
-                        _mets['mlp_ratio'] = float(max(_rr))
-                    _ige = [getattr(l.mirror, '_cached_ig_eff', None) for l in model.layers]
-                    if _ige and all(v is not None for v in _ige):
-                        _mets['ig_eff'] = float(sum(_ige) / len(_ige))
-            except Exception:
-                pass
-            # B14 (audit 04 F4-05): warmup-freeze keys off the LR clock
-            # (scheduler._step), not the loop step — veto storms advance
-            # the loop while LR freezes, releasing the B5 freeze into
-            # legitimate mid-warmup drift.
-            _rb = watchdog.check(ce_val, int(getattr(scheduler, '_step', step)), _mets)
-            # M14b soft veto (mirror of notebook): >4 rel-margins over the
-            # fast-EMA CE level = escalation fuel, skip the gradient.
-            if not _rb:
-                _fc = watchdog._stats.get('ce')
-                if _fc:
-                    _soft_thr = _fc[0] * (1.0 + 4.0 * watchdog.rel_margin)
-                    if ce_val > _soft_thr:
-                        print(f'  [veto:soft] step {step}: ce={ce_val:.2f} > {_soft_thr:.2f} — skipped')
-                        h = out = ce_loss = aux_dict = None
-                        optimizer.zero_grad(set_to_none=True)
-                        continue
-            if _rb:
-                # D6+ LOG-ONLY (operator policy): sensor reports, never stops.
-                # Vetoes (M14), best.pt discipline (B3) and the nan-guard (M23)
-                # remain fully active; the operator watches the log.
-                alarm_strikes += 1
-                if torch.cuda.is_available():
-                    print(f'  [alarm] cuda mem: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB '
-                          f'reserved={torch.cuda.memory_reserved()/1e9:.2f}GB')
-                print(f'  [ALARM:LOG] strike {alarm_strikes}: training CONTINUES (log-only policy).',
-                      flush=True)
-
             # ── Gradient-reactive governance loss ─────────────────────────
             # Moved into core.losses.compute_losses (audit M5): the target
             # ‖∂CE/∂mlp_out‖ per expert is captured by a backward HOOK in the
@@ -560,9 +489,6 @@ def train(cfg=None, resume_path=None):
             # cfg.gradalign_weight and BYPASSES spectral alignment via
             # LossBalancer.BYPASS_AUX. aux_dict['gradalign'] is already set.
 
-            # NaN guard
-            if torch.isnan(ce_loss) or torch.isinf(ce_loss):
-                raise RuntimeError(f'NaN/Inf CE loss at step {step}')
 
             state = _detach_state(state)
             if gs is not None:
@@ -573,15 +499,6 @@ def train(cfg=None, resume_path=None):
             # no per-loss magic constants, and the aux gradient is bounded by
             # ||g_CE|| so it can never hijack the update. Under AMP the losses are
             # scaled so the grads survive GradScaler.unscale_/step.
-            # P1 FIX: Anneal noisy auxiliary losses over training (τ-gated timescale)
-            # branch, diversity add noise early → mask real signal.
-            # Warm-restart: linearly ramp from 0→1 over τ_anneal steps (default 5000).
-            if step > 0:
-                _anneal_tau = getattr(cfg, 'aux_anneal_tau', 5000)
-                _anneal = min(1.0, step / _anneal_tau)
-                for _k in ('branch', 'diversity'):
-                    if _k in aux_dict and isinstance(aux_dict[_k], torch.Tensor):
-                        aux_dict[_k] = aux_dict[_k] * _anneal
             gscale = scaler.get_scale() if use_amp else 1.0
             ce_s = ce_loss * gscale
             aux_s = {k: (v * gscale if isinstance(v, torch.Tensor) else v)
@@ -620,31 +537,6 @@ def train(cfg=None, resume_path=None):
                 continue
 
             
-            # Adaptive phase scaling: EMA-based mirror/base gradient balance
-            phase_scales = []
-            for i, layer in enumerate(model.layers):
-                mirror_norm = 0.0
-                base_norm = 0.0
-                for p in layer.mirror_parameters:
-                    if p.grad is not None:
-                        mirror_norm += p.grad.norm().item() ** 2
-                for p in layer.base_parameters:
-                    if p.grad is not None:
-                        base_norm += p.grad.norm().item() ** 2
-                mirror_norm = mirror_norm ** 0.5
-                base_norm = base_norm ** 0.5
-                ratio = mirror_norm / (base_norm + 1e-8)
-                ema = model._phase_ratio_ema[i]
-                std = model._phase_ratio_std[i]
-                model._phase_ratio_ema[i] = 0.99 * ema + 0.01 * ratio
-                model._phase_ratio_std[i] = 0.99 * std + 0.01 * abs(ratio - ema)
-                mir_s = max(0.2, min(2.0, 1.0 / (1.0 + math.exp(-(ratio - ema) / (std + 1e-8)))))
-                phase_scales.append((mir_s, ratio))
-                for p in layer.mirror_parameters:
-                    if p.grad is not None:
-                        p.grad *= mir_s
-            mean_mirror_scale = sum(s[0] for s in phase_scales) / len(phase_scales)
-            mean_ratio = sum(s[1] for s in phase_scales) / len(phase_scales)
 
             # Per-layer LS-based LR modulation (cfg.per_layer_ls_lr)
             ls_mults = getattr(scheduler, '_ls_mult', None)
@@ -655,12 +547,6 @@ def train(cfg=None, resume_path=None):
                     for p in layer.base_parameters:
                         if p.grad is not None:
                             p.grad.mul_(ls_m)
-                    if ls_m != 1.0:
-                        mir_s = phase_scales[i][0]
-                        total = max(0.2, min(mirror_hi, mir_s * ls_m))
-                        for p in layer.mirror_parameters:
-                            if p.grad is not None:
-                                p.grad.mul_(total / mir_s)
             tokens_seen += cfg.batch_size * seq_len
             
             # Clip gradients (AGC — scale-free ratio, replaces magic grad_clip)
@@ -673,22 +559,6 @@ def train(cfg=None, resume_path=None):
             # train.py never applied it. Same law, same order: BEFORE the clip.
             ls_mults = getattr(scheduler, '_ls_mult', None)
             apply_tau_lr(model, getattr(model, 'tau_config', None), ls_mults)
-            _bad_grads = nonfinite_gradient_names(model)
-            if _bad_grads:
-                # M25: do not let a non-finite scan/aux gradient reach AGC or
-                # optimizer.step(). AGC's Inf*0 path would manufacture NaNs;
-                # discard this update and restart the carried document instead.
-                print(f'  [update-skip] non-finite gradients before AGC: '
-                      f'{_bad_grads[:8]} (count={len(_bad_grads)}); '
-                      'state reset, training continues')
-                h = out = ce_loss = aux_dict = None
-                state = None
-                gs = None
-                intent_state = None
-                optimizer.zero_grad(set_to_none=True)
-                model.release_step_graph()
-                model.reset_cache()   # M26: scrub poisoned buffers/caches too
-                continue
             clipper.clip(model.parameters())
 
             if use_amp:
@@ -712,14 +582,6 @@ def train(cfg=None, resume_path=None):
                 reasoning_enabled_step += 1
             
             current_lr = scheduler.get_last_lr()[0]
-            
-            # в”Ђв”Ђв”Ђ Soft EOS-aware state reset: Р·Р°С‚СѓС…Р°РЅРёРµ РІРјРµСЃС‚Рѕ РѕР±РЅСѓР»РµРЅРёСЏ в”Ђв”Ђв”Ђ
-            if (y[:, -1] == 2).any():
-                if state is not None:
-                    state = tuple(s * 0.1 for s in state)
-                if gs is not None:
-                    gs = gs * 0.1
-            
             # Log
             if step % cfg.log_interval == 0:
                 dt = time.time() - t0
@@ -754,7 +616,7 @@ def train(cfg=None, resume_path=None):
                     print(f'  [memgov] VRAM {_v16:.0%} -> checkpointing OFF')
                 print(f'  step={step:>6} loss={ce_loss.item():.4f} mod_mlp={mod_scl:.3f} lr={current_lr:.2e} '
                       f'tok/s={tok_s:.0f} stream={stream_idx} '
-                      f'ms={mean_mirror_scale:.3f} mr={mean_ratio:.4f} | {aux_str}{gate_str}')
+                      f'{aux_str}{gate_str}')
             
             # Eval
             if step > 0 and step % cfg.eval_interval == 0:
@@ -767,7 +629,6 @@ def train(cfg=None, resume_path=None):
                         torch.cuda.empty_cache()
                     scheduler.report_val_loss(val_loss)
                     depth.update(step, val_loss)
-                    watchdog.arm_ce()  # CE joins the watch once val is trusted (M8; re-bootstrap in arm_ce)
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss

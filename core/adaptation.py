@@ -457,10 +457,11 @@ class GradientClipper:
         for p in parameters:
             if p.grad is None:
                 continue
-            # Never turn an existing Inf gradient into NaN via Inf*0 below.
-            # The training loops reject the whole update before reaching this
-            # point; this local guard keeps AGC safe for standalone callers too.
+            # M28 (operator: stabilization lives ONLY in core.adaptation):
+            # a non-finite gradient is DROPPED for this parameter — it can
+            # never reach Adam moments or weights.
             if not torch.isfinite(p.grad).all():
+                p.grad = None
                 continue
             # τ-aware effective clip ratio (docstring==код): c·(τ_ref/τ_l)^γ
             c_eff = self.c * self._p_scale.get(id(p), 1.0)
