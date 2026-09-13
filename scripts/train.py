@@ -476,6 +476,19 @@ def train(cfg=None, resume_path=None):
             ce_loss, aux_dict = model.compute_losses(out, y, h_emb=h)
 
             ce_val = ce_loss.item()
+            # M23: non-finite CE -> document-restart semantics (reset streaming
+            # state, skip grad, advance cursor); never feed poisoned state back
+            # into the alarm. Stage probes come from block-level _chk markers.
+            if not math.isfinite(ce_val):
+                _probes = [getattr(_l, '_nan_at', None) for _l in model.layers]
+                _probes = [p for p in _probes if p][:3]
+                print(f'  [nan-guard] step {step}: non-finite CE — state reset; stages={_probes or "none"}')
+                h = out = ce_loss = aux_dict = None
+                state = None
+                gs = None
+                intent_state = None
+                optimizer.zero_grad(set_to_none=True)
+                continue
             # M14 non-learnable-batch veto (mirror of the notebook): CE above
             # the coded head's uniform-bit NLL = data garbage, not model
             # divergence — skip the gradient, advance the cursor.
@@ -525,24 +538,15 @@ def train(cfg=None, resume_path=None):
                         optimizer.zero_grad(set_to_none=True)
                         continue
             if _rb:
-                # D6+ TWO-STRIKE: first confirmed signal WARNS and keeps
-                # training; a second after the full cooldown (divergence STILL
-                # growing) stops. Bounded exposure: M14 vetoes keep exploding
-                # batches out of the weights, best.pt only advances on an
-                # improving isolated eval (B3). In Colab the session is the
-                # scarce resource: a false STOP costs hours, the confirmation
-                # window costs ~cooldown steps.
+                # D6+ LOG-ONLY (operator policy): sensor reports, never stops.
+                # Vetoes (M14), best.pt discipline (B3) and the nan-guard (M23)
+                # remain fully active; the operator watches the log.
                 alarm_strikes += 1
                 if torch.cuda.is_available():
                     print(f'  [alarm] cuda mem: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB '
                           f'reserved={torch.cuda.memory_reserved()/1e9:.2f}GB')
-                if alarm_strikes < 2:
-                    print(f'  [ALARM:WARN] first signal ({alarm_strikes}/2): continuing; '
-                          'a second confirmed signal will stop the run.', flush=True)
-                else:
-                    print('[EVA] STOPPED ON ALARM (D6+, confirmed twice): resume from '
-                          'best.pt (last clean val-save). No auto-rollback by design.')
-                    sys.exit(2)
+                print(f'  [ALARM:LOG] strike {alarm_strikes}: training CONTINUES (log-only policy).',
+                      flush=True)
 
             # ── Gradient-reactive governance loss ─────────────────────────
             # Moved into core.losses.compute_losses (audit M5): the target

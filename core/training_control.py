@@ -408,7 +408,7 @@ class FailureDetector:
               f'{" ".join(f"{k}={v:.2g}" for k, v in signals.items())} — sustained '
               f'relative divergence (sensor: {self._last_viol_name or "?"}). '
               f'D6+: sensor signal (no auto-rollback, no auto-stop) — '
-              f'caller policy decides (loop: warn once, stop on confirmed second).')
+              f'caller policy decides (loop policy: log-only, operator supervises).')
         return True
 
 
