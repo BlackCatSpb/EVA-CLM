@@ -43,6 +43,22 @@ class SmartController:
         self.decisions = []
         # --- tau-зависимости: темпоральная «личность» модели ---
         self._compute_tau(model)
+        # M40 (architecture-fit): normalization of generation temperature
+        # against the head's LEARNED log_temp — without it, base_temp means
+        # different things at different training stages (the coded head sums
+        # K=64 bit-log-odds, its raw scale drifts as the ladder and log_temp
+        # train). Mirrors generate.py AdaptiveSampler.norm_log_temp.
+        _lt = getattr(getattr(model, 'lm_head', None), 'log_temp', None)
+        self._temp_norm = _lt is not None
+        self._temp_ref = float(_lt.detach().mean().item()) if self._temp_norm else 0.0
+        # M40: RELATIVE entropy — the absolute Hn=H/ln(V) thresholds were
+        # calibrated for a softmax head. Under SigmoidCodedHead the coded
+        # logits are sums of Bernoulli log-odds: H sits at ~1-4 nats ALWAYS
+        # (Hn<0.4), so mode/top_k/temp were frozen in 'exploit' and top-k
+        # never actually adapted — the reported «top-k не отсекается». Now
+        # H is judged against its own EMA, exactly as this module's docstring
+        # always promised.
+        self._H_ema = None
         # настраиваемые пороги (модулируются tau)
         self.temp_lo, self.temp_hi = 0.45, 1.35
         self.p_lo, self.p_hi = 0.82, 0.96
@@ -61,20 +77,24 @@ class SmartController:
         self.alarm_window_base = self.alarm_window
 
     def _compute_tau(self, model):
-        """Per-layer VSA long-timescale tau_l (stack.py:219) -> темпоральный профиль.
-        Длинная tau_l = устойчивая долгопамять слоя; короткая = быстрая динамика."""
-        vsa = torch.exp(torch.cumsum(F.softplus(model._vsa_log_param), 0)) + 1.0
-        tmin, tmax = vsa[0].item(), vsa[-1].item()
+        """M40: the per-layer profile comes from the UNIFIED tau field
+        (tau_config.tau_l) — single source, like everything else. The old
+        local re-implementation duplicated a retired ladder formula
+        (tmin*(tmax/tmin)^(lf*(1+0.1*tanh(dev)))) — a parallel τ-subsystem
+        of its own (math-audit E4 territory)."""
+        tc = getattr(model, 'tau_config', None)
         n = len(model.layers)
-        vec = []
-        for i in range(n):
-            lf = i / max(n - 1, 1)
-            dev = math.tanh(model._tau_l_dev[i].item())
-            vec.append(tmin * (tmax / tmin) ** (lf * (1.0 + 0.1 * dev)))
-        self.tau_l_vec = vec
-        self.tau_personality = sum(vec) / n
-        tn = (math.log(self.tau_personality) - math.log(tmin)) / (math.log(tmax) - math.log(tmin) + 1e-8)
-        self.tau_norm = min(max(tn, 0.0), 1.0)
+        if tc is not None and getattr(tc, 'tau_l', None) is not None:
+            self.tau_l_vec = [float(x) for x in tc.tau_l.detach().cpu()]
+            tau_n = float(tc.tau_norm.detach().mean())
+        else:  # mock/fallback: geometric ladder over the VSA base
+            vsa = torch.exp(torch.cumsum(F.softplus(model._vsa_log_param), 0)) + 1.0
+            tmin, tmax = vsa[0].item(), vsa[-1].item()
+            self.tau_l_vec = [tmin * (tmax / tmin) ** (i / max(n - 1, 1))
+                             for i in range(n)]
+            tau_n = 0.5
+        self.tau_personality = sum(self.tau_l_vec) / max(len(self.tau_l_vec), 1)
+        self.tau_norm = min(max(tau_n, 0.0), 1.0)
 
     def _entropy(self, logits):
         p = torch.softmax(logits.float(), -1)
@@ -104,12 +124,21 @@ class SmartController:
 
     def decide(self, logits, mind, step):
         H = self._entropy(logits)
-        Hn = min(H / math.log(self.vocab), 1.0)
+        # M40: Hn is the entropy RELATIVE to its own running EMA (see init).
+        # r=2 -> Hn~0.73 (explore); r=0.5 -> Hn~0.2 (exploit); r=1 -> ~0.52.
+        if self._H_ema is None:
+            self._H_ema = max(H, 1e-3)
+        _r = H / self._H_ema
+        Hn = 1.0 / (1.0 + math.exp(-3.0 * (math.log(max(_r, 1e-6)) - 0.15)))
+        self._H_ema = 0.92 * self._H_ema + 0.08 * max(H, 1e-3)
         trust = mind.get('trust_max', 0.5)
         self.hist.append(H)
         if len(self.hist) > 64:
             self.hist = self.hist[-32:]
-        collapse = len(self.hist) >= 4 and max(self.hist[-4:]) < self.collapse_H
+        # collapse = sustained DEEP drop below the model's own baseline, not a
+        # WideBind-era absolute constant (collapse_H kept as a fallback floor):
+        collapse = len(self.hist) >= 4 and (
+            max(self.hist[-4:]) < min(self.collapse_H, 0.45 * self._H_ema))
         rep = self._repetition()
 
         h = smooth(Hn)
@@ -178,6 +207,11 @@ class SmartController:
 
     def sample(self, logits, temp, top_p, top_k, rep_pen):
         logits = logits.clone()
+        # M40: base_temp means the SAME thing at any training stage once the
+        # head's learned bit-temperature scale divides it out (AdaptiveSampler
+        # parity); exp(clamp) guards degenerate log_temp.
+        if self._temp_norm:
+            temp = max(temp, 1e-3) / max(math.exp(min(self._temp_ref, 10.0)), 1e-3)
         # order-preserving window (audit M10): set() iterated in arbitrary
         # order — the penalty hit random tokens instead of the recent ones
         for rid in self.recent[-self.rep_window:]:
