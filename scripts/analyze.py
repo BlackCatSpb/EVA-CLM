@@ -117,7 +117,8 @@ def run_envelope(ckpt):
         return {'seed': True}
     need = ['step', 'model', 'optimizer', 'param_names', 'scheduler', 'best_val_loss',
             'cfg', 'reasoning_enabled_step', 'recover_count', 'active_depth',
-            'detector', 'balancer', 'stream_idx', 'offset', 'rng', 'data_rng']
+            'detector', 'balancer', 'stream_idx', 'offset', 'rng', 'data_rng',
+            'code_fp', 'depth_state', 'stream_state', 'stream_gs', 'cuda_rng']
     # load_ckpt streaming-pop выбрасывает тяжёлые части; восстанавливаем факт их
     # наличия из метаданных, иначе они вечно ложно падают как MISSING.
     present = {k for k in ckpt if not k.startswith('_')}
@@ -149,8 +150,36 @@ def run_envelope(ckpt):
               '(страж пере-бустрапится, курсор данных/val-эпоха начнутся заново)')
     if extra:
         print('  extra keys (ok): ' + ', '.join(map(str, extra)))
+    # M30: decode the carried document — this is the proof that resume continues
+    # a document instead of cold-starting it (B15 F5-07) AND a free readout of
+    # how deep the streaming memory actually reaches (state norms per layer).
+    stream = {}
+    ss = ckpt.get('stream_state')
+    if isinstance(ss, (list, tuple)) and len(ss):
+        import torch as _T
+        rows = []
+        for li, st in enumerate(ss):
+            if not isinstance(st, (list, tuple)):
+                continue
+            nm = []
+            for part in st[:3]:
+                nm.append('%.3g' % float(_T.as_tensor(part).float().norm())
+                          if _T.is_tensor(part) or part is not None else '-')
+            tr = st[3] if len(st) > 3 else None
+            pe = st[4] if len(st) > 4 else None
+            rows.append((li, nm,
+                         float(_T.as_tensor(tr).float().norm()) if tr is not None else None,
+                         float(_T.as_tensor(pe).float().mean()) if pe is not None else None))
+        for li, nm, tn, pm in rows:
+            print(f'    L{li:<2} mem={nm[0]} mu={nm[1]} conv={nm[2]} '
+                  f'traj={tn if tn is None else round(tn, 3)} pen={pm if pm is None else round(pm, 4)}')
+        stream = {'layers': len(rows), 'pen_mean': [r[3] for r in rows if r[3] is not None]}
+        gs = ckpt.get('stream_gs')
+        if gs is not None:
+            print('    global_state norm: %.3f' % float(_T.as_tensor(gs).float().norm()))
+    print('  code_fp: ' + str(ckpt.get('code_fp')))
     print('  VERDICT: ' + ('полный побитовый resume возможен' if not miss else 'частичный resume'))
-    return {'seed': False, 'missing': miss}
+    return {'seed': False, 'missing': miss, 'stream': stream}
 
 
 # ───────────────────────── MECHANISMS (post-M1..M13) ─────────────────────────
@@ -274,6 +303,94 @@ def run_health(data):
 
 
 # ─────────────────────────── STATIC ───────────────────────────
+
+
+# ─────────────────────────── M30: MOVES & CARRY ──────────────────────────────
+
+def run_moves(path):
+    """Who actually learns: reconstruct every parameter's Adam update size from
+    the checkpoint's optimizer state (|m̂/(√v̂+ε)|) — WITHOUT touching the
+    training loop. Stalled groups (update≈0) and NaN moments are the two silent
+    killers this module exists to catch (audit-B era: dead decorations)."""
+    import torch as _T
+    sec('MOVES (Adam update census from optimizer state)')
+    try:
+        ck = _T.load(path, map_location='cpu', weights_only=False)
+    except TypeError:
+        ck = _T.load(path, map_location='cpu')
+    opt = ck.get('optimizer') or {}
+    names = ck.get('param_names') or []
+    stat = opt.get('state') or {}
+    if not stat:
+        print('  [skip] optimizer state absent — движения не восстановить')
+        return None
+    gnames = {}
+    for i, g in enumerate(opt.get('param_groups', [])):
+        for p in g.get('params', []):
+            gnames[p] = i
+    rows, nan_total = [], 0
+    for idx, slot in sorted(stat.items()):
+        nm = names[idx] if idx < len(names) else f'#{idx}'
+        m, v = slot.get('exp_avg'), slot.get('exp_avg_sq')
+        if m is None or v is None:
+            continue
+        eps = 1e-8
+        step_sz = (m / (v.sqrt() + eps)).abs().mean().item()
+        nn = int(_T.isnan(m).sum() + _T.isnan(v).sum())
+        nan_total += nn
+        grp = ('layers.' + nm.split('.')[1]) if nm.startswith('layers.') else nm.split('.')[0]
+        rows.append((nm, grp, step_sz, float(m.norm()), float(v.norm()), nn))
+    rows.sort(key=lambda r: -r[2])
+    print(f'  params with state: {len(rows)}   NaN moments: {nan_total}'
+          + ('   <<< ИСТОЧНИК ЯДА' if nan_total else ''))
+    print('  top movers:')
+    for nm, grp, sz, mn, vn, nn in rows[:12]:
+        print(f'    {sz:.3e}  {nm}  (|m|={mn:.3g} |v|={vn:.3g}' + (f' NaN={nn})' if nn else ')'))
+    grp_max = {}
+    for nm, grp, sz, *_ in rows:
+        grp_max[grp] = max(grp_max.get(grp, 0.0), sz)
+    stalled = sorted([(g, m) for g, m in grp_max.items() if m < 1e-9])
+    print('  stalled groups (max update < 1e-9): ' + (', '.join(f'{g}={m:.1e}' for g, m in stalled) if stalled else 'нет'))
+    return {'rows': rows, 'nan': nan_total, 'stalled': stalled}
+
+
+def run_carry(model, cfg, seq=None):
+    """The B18 claim measured live: does the τ-ladder actually carry a document
+    across the training window? Forward 64 tokens, then a 512-long unrelated
+    continuation; compare the tail activation carried vs fresh. <0.05 = ladder
+    is fiction again (rest-attenuation regression); >0.08 = memory reaches."""
+    import torch as _T
+    sec('CARRY (window-state influence at the tail, B18 metric)')
+    dev = 'cuda' if _T.cuda.is_available() else 'cpu'
+    was_training = model.training
+    model.eval()
+    try:
+        model.to(dev)
+        seq = int(seq or min(getattr(cfg, 'seq_len', 256), 512))
+        x1 = _T.full((1, 64), 5, dtype=_T.long, device=dev)
+        x2 = _T.full((1, seq), 9, dtype=_T.long, device=dev)
+        with _T.no_grad():
+            emb = model.embed_tokens if hasattr(model, 'embed_tokens') else model.embed
+            e1, e2 = emb(x1), emb(x2)
+            _, s1, gs1, _ = model(e1.clone(), None, step=None, tokens=x1)
+            oa, _, _, _ = model(e2.clone(), s1, global_state=gs1, step=None, tokens=x2)
+            ob, _, _, _ = model(e2.clone(), None, step=None, tokens=x2)
+        rel = []
+        n = len(oa[0]) - 1
+        for li in (0, n // 2, n):
+            a, b = oa[0, -1, li] if oa.dim() > 3 else oa[0, -1], ob[0, -1]
+            num = float((a - b).norm()); den = max(float(b.norm()), 1e-9)
+            rel.append(max(min(num / den, 1.0), 0.0) if _T.is_tensor(a) and a.dim() >= 1 else float('nan'))
+        # output-level (pre-head h at the final position) is the honest one:
+        d = float((oa[:, -1] - ob[:, -1]).norm()) / max(float(ob[:, -1].norm()), 1e-9)
+        verdict = 'OK (лестница живая)' if d > 0.08 else ('СЛАБО' if d > 0.03 else 'МЁРТВАЯ — регресс B18!')
+        print(f'  carried-vs-fresh tail displacement: {d:.4f}  ({verdict})')
+        return {'carry': d}
+    finally:
+        model.to('cpu')
+        if was_training:
+            model.train()
+
 
 def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
     st = {'config': [], 'param_groups': [], 'per_layer': [], 'vsatau': {},
@@ -1519,9 +1636,26 @@ def _hue(v, vmin, vmax):
     return 120 * (1.0 - t)
 
 
-def save_html_report(ckpt, cfg, model, wake, live, head, anomaly=None, bridge=None, metacog=None,
-                     static=None):
+def save_html_report(ckpt, cfg=None, model=None, wake=None, live=None, head=None,
+                     anomaly=None, bridge=None, metacog=None, static=None):
     import html as H
+    if isinstance(ckpt, (str, os.PathLike)):
+        # M30: train.py calls generate_report(path) right after every save.
+        # Cheap path-mode: envelope+static+wake (no live forwards on the save
+        # hot path). Failures must stay loud-but-harmless (caller wraps us).
+        path0 = str(ckpt)
+        ckpt, cfg, model, _miss, _unexp = load_ckpt(path0)
+        ckpt['_path'] = path0
+        try:
+            wake = run_wake(model, ckpt)
+        except Exception:
+            wake = None
+        try:
+            static = run_static(ckpt, cfg, model, _miss, _unexp, None)
+        except Exception:
+            static = None
+    if wake is None:
+        print('[report] no wake section — report needs at least the wake verdict')
     path = ckpt.get('_path', '?')
     step = ckpt.get('step', '?')
     stem = os.path.splitext(path)[0]
@@ -1948,6 +2082,8 @@ def main():
     ap.add_argument('--temp', type=float, default=0.8)
     ap.add_argument('--seq', type=int, default=128, help='live forward seq_len')
     ap.add_argument('--no-html', action='store_true', help='skip HTML report generation')
+    ap.add_argument('--moves', action='store_true', help='Adam update census from optimizer state (who learns / who stalled)')
+    ap.add_argument('--carry', action='store_true', help='B18 window-carry probe (two forwards, ladder reality check)')
     ap.add_argument('--log', type=str, default='',
                     help='path to Colab training log (.txt) -> полный HTML-дашборд ВСЕХ метрик')
     args = ap.parse_args()
@@ -2012,6 +2148,16 @@ def main():
                     head_data = run_head(model, ckpt, args, tok)
                 except Exception as e:
                     print(f'[error] head: {e}')
+        if args.moves:
+            try:
+                run_moves(path)
+            except Exception as e:
+                print(f'[error] moves: {e}')
+        if args.carry:
+            try:
+                run_carry(model, cfg, seq=args.seq)
+            except Exception as e:
+                print(f'[error] carry: {e}')
         bridge_data = None
         if not args.quick and getattr(model, 'intent_bridge', False):
             try:
