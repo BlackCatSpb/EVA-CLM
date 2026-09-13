@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 import torch
 from torch.amp import autocast, GradScaler
+from torch.utils.checkpoint import CheckpointError as _CEr  # M22
 import torch.nn.functional as F
 import numpy as np
 from torch.serialization import add_safe_globals
@@ -597,18 +598,18 @@ def train(cfg=None, resume_path=None):
                             f'{k}:{r:.2f}/{c:+.2f}' for k, (r, c) in _gg.items()), flush=True)
                 except Exception as _ge:
                     print(f'  [ggeo] unavailable: {_ge}', flush=True)
-            # B13 (F4-01): checkpointing RE-RUNS forward inside
-            # backward — freeze recompute-sensitive side effects
-            # (control-law writes, step counters) for the pass.
-            for _m in model.modules():
-                if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
-                    _m._ggeo_freeze = True
+            # M22: backward freeze-wrap removed (recompute must replay the
+            # forward path-identically); CheckpointError self-heals.
             try:
                 balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model)
-            finally:
-                for _m in model.modules():
-                    if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
-                        _m._ggeo_freeze = False
+            except _CEr as _ce15:
+                print('  [ckpt-fallback]', str(_ce15)[:120], '- checkpointing OFF for the run')
+                cfg.gradient_checkpointing = False
+                ce_s = aux_s = ce_loss = aux_dict = None
+                optimizer.zero_grad(set_to_none=True)
+                if device == 'cuda':
+                    torch.cuda.empty_cache()
+                continue
 
             
             # Adaptive phase scaling: EMA-based mirror/base gradient balance
