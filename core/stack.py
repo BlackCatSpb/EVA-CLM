@@ -297,7 +297,12 @@ class EVAStack(nn.Module):
                     b_d_val = AdaptiveController.layer_b_d(layer, expl=l_expl,
                         b_d_max=b_d_max)
                     smooth = getattr(self.cfg, 'vsa_b_d_smooth', 0.999)
-                    if smooth >= 1.0:
+                    # M26 anti-cascade: a poisoned (NaN) stat from a bad
+                    # backward would otherwise be written into the b_i/b_d
+                    # PARAMS via .fill_/lerp and survive every state reset.
+                    if not (math.isfinite(b_i_val) and math.isfinite(b_d_val)):
+                        pass  # keep last good control values
+                    elif smooth >= 1.0:
                         layer.b_i.fill_(b_i_val)
                         layer.b_d.fill_(b_d_val)
                     else:

@@ -981,8 +981,11 @@ class GroupedCognitiveMirror(nn.Module):
         if grad_h is not None:
             with torch.no_grad():
                 g_norms = grad_h.reshape(-1, self.G, self.d).norm(dim=-1).mean(dim=0)
-                self._prev_grad_norm.copy_(g_norms)
-        else:
+                # M26 anti-cascade: never copy a NaN gradient summary into the
+                # persistent buffer — it would poison every later forward.
+                if torch.isfinite(g_norms).all():
+                    self._prev_grad_norm.copy_(g_norms)
+        elif getattr(self, '_hp_grad', None) is not None and torch.isfinite(self._hp_grad).all():
             self._prev_grad_norm.copy_(self._hp_grad)
 
     @torch.no_grad()

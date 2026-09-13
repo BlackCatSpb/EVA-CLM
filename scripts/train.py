@@ -480,6 +480,8 @@ def train(cfg=None, resume_path=None):
             # M23: non-finite CE -> document-restart semantics (reset streaming
             # state, skip grad, advance cursor); never feed poisoned state back
             # into the alarm. Stage probes come from block-level _chk markers.
+            # M26: reset_cache() also scrubs poisoned runtime buffers — one bad
+            # backward must not become a permanent forward-NaN cascade.
             if not math.isfinite(ce_val):
                 _probes = [getattr(_l, '_nan_at', None) for _l in model.layers]
                 _probes = [p for p in _probes if p][:3]
@@ -489,6 +491,7 @@ def train(cfg=None, resume_path=None):
                 gs = None
                 intent_state = None
                 optimizer.zero_grad(set_to_none=True)
+                model.reset_cache()
                 continue
             # M14 non-learnable-batch veto (mirror of the notebook): CE above
             # the coded head's uniform-bit NLL = data garbage, not model
@@ -684,6 +687,7 @@ def train(cfg=None, resume_path=None):
                 intent_state = None
                 optimizer.zero_grad(set_to_none=True)
                 model.release_step_graph()
+                model.reset_cache()   # M26: scrub poisoned buffers/caches too
                 continue
             clipper.clip(model.parameters())
 
