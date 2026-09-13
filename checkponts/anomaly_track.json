@@ -228,5 +228,15 @@
   "gate_min": 0.3356480002403259,
   "gate_min_layer": 7,
   "births": []
+ },
+ {
+  "step": 1045,
+  "hp_max": 5.994163513183594,
+  "hp_layer": 23,
+  "predmse_max": 5.204113006591797,
+  "predmse_layer": 20,
+  "gate_min": 0.4419126808643341,
+  "gate_min_layer": 14,
+  "births": []
  }
 ]

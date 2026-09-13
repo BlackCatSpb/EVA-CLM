@@ -358,6 +358,9 @@ class EVABlock(nn.Module):
                 return True
             return False
 
+        def _ln(x):
+            return self.pre_ln_w * x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-7)
+
         device = h.device
         K = self.K
         S = self._n_scales
@@ -372,13 +375,27 @@ class EVABlock(nn.Module):
         if pen is not None and (pen.shape[-1] != L or pen.shape[0] != B):
             pen = None
         
-        # ─── Pre-LN ───
-        h = self.pre_ln_w * h * torch.rsqrt(h.pow(2).mean(dim=-1, keepdim=True) + 1e-7)
+        # ─── Pre-LN (M31: per-branch renormalized residual cascade) ───
+        # The 1045-step depth audit measured the old shape — ONE LN at the block
+        # input, branches accumulating onto the normalized copy, output
+        # LN(h)+Σ(branches) — as a 2.3x/layer backward decay (CE-grad L0 3.2e-8
+        # vs L23 2.6; the shallow half frozen: Adam SNR ~1e-10). Two partial
+        # fixes failed on the real checkpoint: end-compensation (±h_n cancel
+        # zeroed the direct conv path) and straight-through LN (restores the
+        # identity but exposes the raw cascade gain ~50x/sublayer -> inf).
+        # Correct shape (classic pre-LN, adapted to this intra-block cascade):
+        # the stream h is the TRUE residual accumulator; every branch reads
+        # LN(current stream) via _ln(). Backward: h_out = h_in + Σ f_s(LN(·)) with
+        # identity coefficient 1 per sub-layer; each branch is separately fed a
+        # unit-scale input, so no cascade can explode and no chain can decay to
+        # zero. Forward VALUES differ from the old block (per-branch re-norm) —
+        # fresh run required; the norm is scale-invariant so branch DIRECTION
+        # semantics are preserved.
         
         # ─── Conv ───
         if conv_state is None:
             conv_state = torch.zeros(B, D, self._conv_pad, device=device, dtype=h.dtype)
-        h_perm = h.transpose(1, 2)
+        h_perm = _ln(h).transpose(1, 2)
         _full = torch.cat([conv_state, h_perm], dim=-1)
         if _full.shape[-1] < self._conv_pad + L:      # B1: defensive left-pad
             _full = F.pad(_full, (self._conv_pad + L - _full.shape[-1], 0))
@@ -405,7 +422,7 @@ class EVABlock(nn.Module):
             if traj_state is not None and (traj_state.shape[2] != L
                                            or traj_state.shape[0] != B):
                 traj_state = None
-            bind_out, new_traj, coherence = self.bind(h, traj_state)
+            bind_out, new_traj, coherence = self.bind(_ln(h), traj_state)
             if traj_state is None:
                 if self.training or getattr(self, '_stream_mode', False):
                     self._traj_state = new_traj.detach()
@@ -415,7 +432,7 @@ class EVABlock(nn.Module):
                 if getattr(self, '_stream_mode', False):
                     self._traj_state = traj_state_out
         else:
-            bind_out = self.bind(h)
+            bind_out = self.bind(_ln(h))
             coherence = torch.zeros(B, L, K, device=device, dtype=h.dtype)
             new_traj = None
             traj_state_out = None
@@ -426,7 +443,8 @@ class EVABlock(nn.Module):
         tau_s = torch.exp(self._vsa_tau_log) if tau_s is None else tau_s
         d_s = torch.exp(-1.0 / tau_s.to(device))  # (S,) — τ-scales from learnable param
         # Surprisal-gated write: i_gate = softplus(linear + γ·||ê||₂)
-        igate_logit = h * self.w_i + self.b_i
+        h_v = _ln(h)
+        igate_logit = h_v * self.w_i + self.b_i
         if pen is not None:
             igate_logit = igate_logit + self.gamma_surprisal * pen.unsqueeze(-1)
         i_gate = F.softplus(igate_logit)                    # (B, L, D)
@@ -448,7 +466,7 @@ class EVABlock(nn.Module):
         # can only SHORTEN memory (clamp<=1); the outer floor d_s^k (below)
         # guards the extreme end, never the rest regime. Consequence: the
         # AdaptiveController's b_d->8 lerp becomes benign (modulation -> 1.0).
-        d_mod = (torch.sigmoid(h * self.w_d + self.b_d)
+        d_mod = (torch.sigmoid(h_v * self.w_d + self.b_d)
                  / torch.sigmoid(self.b_d).clamp(min=1e-3)).clamp(max=1.0)  # (B, L, D)
         if noise_scale > 0 and self.training:
             noise = 1.0 + noise_scale * torch.randn_like(i_gate)
@@ -494,9 +512,9 @@ class EVABlock(nn.Module):
             hp_g = hp_cached.permute(2, 0, 1, 3).reshape(g, BL, k)  # batched matmul (stable under AMP)
             wm = torch.matmul(hp_g, self.w_i_dyn)  # (g, BL, d)
             write_mod = torch.sigmoid(wm.permute(1, 0, 2).view(B, L, g, d) / math.sqrt(k))
-            mem_input = (h.reshape(B, L, g, d) * write_mod).reshape(B, L, D) * i_gate
+            mem_input = (h_v.reshape(B, L, g, d) * write_mod).reshape(B, L, D) * i_gate
         else:
-            mem_input = h * i_gate  # (B, L, D)
+            mem_input = h_v * i_gate  # (B, L, D)
 
         input_vec = mem_input.unsqueeze(2).expand(-1, -1, S, -1)  # (B, L, S, D) expand-view
         
@@ -569,7 +587,7 @@ class EVABlock(nn.Module):
             _gs = global_state.float() if isinstance(global_state, torch.Tensor) else global_state
             _ctx = context_mem.float() if isinstance(context_mem, torch.Tensor) else context_mem
             mirror, mlp_mod, mem_mod, hp, pred_error_norm = self.mirror(
-                h.float(), mem_all.float(), global_state=_gs, diff=diff,
+                _ln(h).float(), mem_all.float(), global_state=_gs, diff=diff,
                 tanh_bias_mod=tanh_bias_mod, pred_scale_mod=pred_scale_mod,
                 context_mem=_ctx, allow_write=allow_write, step=step, intent=intent,
                 salience=salience, maturity=maturity)
@@ -616,7 +634,7 @@ class EVABlock(nn.Module):
             # fp32-якорь: softmax в exact_memory переполняется в fp16 под AMP.
             # Гейт встроен тензорной маской (не python-if): статический граф.
             with torch.autocast(device_type=h.device.type, enabled=False):
-                precision = self.precision_gate(h.float())
+                precision = self.precision_gate(_ln(h).float())
                 hard = (precision.mean() > self.precision_threshold).to(h.dtype)
                 # Audit M11: a purely boolean gate DEADLOCKS — the moment the
                 # mean drops below the threshold, gradients die for the gate
@@ -626,7 +644,7 @@ class EVABlock(nn.Module):
                 # the opener can always learn to re-engage exact memory.
                 # value: hard; grad w.r.t. precision.mean(): 1 (even while 0)
                 soft_gate = hard + (precision.mean() - precision.mean().detach())
-                exact = self.exact_memory(h.float())
+                exact = self.exact_memory(_ln(h).float())
                 h = h + (precision * exact * soft_gate).to(h.dtype)
             if self.training:
                 self._precision_mean = precision.mean()
@@ -637,7 +655,7 @@ class EVABlock(nn.Module):
         # fp32-якорь: DCT-базис даёт -inf в fp16 под AMP
         # U3: τ-spectral Chebyshev damping: damp = cos(π·τ_norm/2)
         with torch.autocast(device_type=h.device.type, enabled=False):
-            h_dct = h.float() @ self.V_dct.T
+            h_dct = _ln(h).float() @ self.V_dct.T
             if self._tau_norm is not None:
                 _cheb_damp = math.cos(math.pi * self._tau_norm / 2.0)
             else:
@@ -649,7 +667,7 @@ class EVABlock(nn.Module):
         # ─── MLP (mirror-conditioned SwiGLU, variant A) ───
         # mirror_gate = mlp_mod (из зеркала) управляет воротами SwiGLU.
         # Старый пост-множитель h_mlp *= mlp_mod убран (двойное гейтирование).
-        h_mlp = self.mlp(h, mirror_gate=mlp_mod)
+        h_mlp = self.mlp(_ln(h), mirror_gate=mlp_mod)
         self._cache_mlp_out = h_mlp  # raw MLP output (gradalign target source)
         if self.training and h_mlp.requires_grad:
             # gradalign target = ‖∂CE/∂mlp_out‖ per expert, captured by a
@@ -680,7 +698,7 @@ class EVABlock(nn.Module):
             self._mlp_ratio = float((self._mlp_now_ema / (self._mlp_base_ema + 1e-12)).item())
         h = h + h_mlp
         if _chk(h, 'post_mlp'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
-        
+
         return h, (mem_state_out, mu_state_out, conv_state_out, traj_state_out, pen)
     
     @property

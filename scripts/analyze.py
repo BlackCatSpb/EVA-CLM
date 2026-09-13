@@ -354,6 +354,56 @@ def run_moves(path):
     return {'rows': rows, 'nan': nan_total, 'stalled': stalled}
 
 
+
+def run_depthgrad(model, cfg, seq=None):
+    """M31: per-layer CE-gradient census — the attenuation profile in one table.
+    A healthy pre-LN residual net shows ~flat or shallow-first norms; a ×N/layer
+    geometric decay toward the input (the 1045-audit: 2.3x/layer, 8 orders over
+    24 layers) means the shallow half is decorative."""
+    import torch as _T
+    sec('DEPTHGRAD (per-layer CE-grad norms, M31 highway audit)')
+    dev = 'cuda' if _T.cuda.is_available() else 'cpu'
+    was = model.training
+    model.train()
+    try:
+        model.to(dev)
+        seq = int(seq or min(getattr(cfg, 'seq_len', 256), 256))
+        _T.manual_seed(7)
+        x = _T.randint(1, cfg.vocab, (1, seq), device=dev)
+        y = _T.randint(1, cfg.vocab, (1, seq), device=dev)
+        h = model.embed_tokens(x)
+        out, st, gs, _ = model(h, None, step=1045, tokens=x)
+        ce, aux = model.compute_losses(out, y, h_emb=h)
+        model.zero_grad(set_to_none=True)
+        ce.backward()
+        rows = []
+        n = len(model.layers)
+        for li in range(n):
+            gs_ = [p.grad for nm, p in model.named_parameters()
+                   if nm.startswith(f'layers.{li}.') and p.grad is not None]
+            tot = float(sum((g.float().norm() ** 2 for g in gs_), 0.0) ** 0.5)
+            rows.append((li, tot))
+        for li, tot in rows:
+            if li in (0, 1, 2, 3, 5, 7, 11, 15, 19, 23) or li == n - 1 or li < 4:
+                print(f'    L{li:<2} {tot:.3e}')
+        m0 = rows[0][1] or 1e-30
+        ml = rows[-1][1] or 1e-30
+        ratio = m0 / ml
+        per_layer = ratio ** (1.0 / max(n - 1, 1))
+        verdict = ('ЗДОРОВО (хайвей M31)' if per_layer > 0.2 else
+                   'ЗАТУХАЮЩИЙ ПРОФИЛЬ — проверь pre-LN (M31)')
+        print(f'  L0/Llast ratio={ratio:.2e}   per-layer slope={per_layer:.2f}'
+              f'   (0.2-5 = норма; <0.01 = затухание)   {verdict}')
+        return {'rows': rows, 'ratio': ratio, 'slope': per_layer}
+    finally:
+        model.zero_grad(set_to_none=True)
+        model.to('cpu')
+        if was:
+            model.train()
+        else:
+            model.eval()
+
+
 def run_carry(model, cfg, seq=None):
     """The B18 claim measured live: does the τ-ladder actually carry a document
     across the training window? Forward 64 tokens, then a 512-long unrelated
@@ -2084,6 +2134,7 @@ def main():
     ap.add_argument('--no-html', action='store_true', help='skip HTML report generation')
     ap.add_argument('--moves', action='store_true', help='Adam update census from optimizer state (who learns / who stalled)')
     ap.add_argument('--carry', action='store_true', help='B18 window-carry probe (two forwards, ladder reality check)')
+    ap.add_argument('--depthgrad', action='store_true', help='per-layer CE-grad attenuation census (M31)')
     ap.add_argument('--log', type=str, default='',
                     help='path to Colab training log (.txt) -> полный HTML-дашборд ВСЕХ метрик')
     args = ap.parse_args()
@@ -2158,6 +2209,11 @@ def main():
                 run_carry(model, cfg, seq=args.seq)
             except Exception as e:
                 print(f'[error] carry: {e}')
+        if args.depthgrad:
+            try:
+                run_depthgrad(model, cfg, seq=args.seq)
+            except Exception as e:
+                print(f'[error] depthgrad: {e}')
         bridge_data = None
         if not args.quick and getattr(model, 'intent_bridge', False):
             try:
