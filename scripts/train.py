@@ -600,20 +600,7 @@ def train(cfg=None, resume_path=None):
                                            for l in model.layers]).mean().item()
                 except Exception:
                     pass
-            # M16 memory governor (mirror of the notebook): VRAM pulse ->
-            # reversible gradient checkpointing, hysteresis 0.85/0.70.
-            if device == 'cuda' and step % max(cfg.log_interval, 1) == 0:
-                _cap16 = torch.cuda.get_device_properties(0).total_memory
-                _v16 = torch.cuda.memory_reserved() / _cap16
-                # B19: no decision before the first real backward peaks
-                if step < 60:
-                    pass
-                elif _v16 > 0.85 and not cfg.gradient_checkpointing:
-                    cfg.gradient_checkpointing = True
-                    print(f'  [memgov] VRAM {_v16:.0%} -> checkpointing ON')
-                elif _v16 < 0.70 and cfg.gradient_checkpointing:
-                    cfg.gradient_checkpointing = False
-                    print(f'  [memgov] VRAM {_v16:.0%} -> checkpointing OFF')
+            if step % max(cfg.log_interval, 1) == 0:
                 print(f'  step={step:>6} loss={ce_loss.item():.4f} mod_mlp={mod_scl:.3f} lr={current_lr:.2e} '
                       f'tok/s={tok_s:.0f} stream={stream_idx} '
                       f'{aux_str}{gate_str}')

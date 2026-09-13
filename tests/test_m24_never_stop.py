@@ -26,6 +26,7 @@ class TestLoopIsPure:
     FORBIDDEN = ('[veto', 'veto:soft', 'nan-guard', '[update-skip]',
                  'watchdog.check', 'phase_scales', '_anneal', '_ce_uni',
                  'arm_ce', 'mean_mirror_scale', 'Soft EOS-aware',
+                 'memgov', '_v16',
                  'if math.isfinite(disp_loss)', 'STOPPED ON ALARM',
                  'ALARM:LOG', '[ALARM:WARN]')
 
