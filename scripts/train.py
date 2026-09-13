@@ -924,4 +924,10 @@ if __name__ == '__main__':
     cfg.log_interval = args.log_interval
     cfg.eval_interval = args.eval_interval
 
-    train(cfg, resume_path=args.resume)
+    # B19: first OOM reaction = recompute (3x activations),
+    # window halving only as the second resort.
+    if not getattr(cfg, 'gradient_checkpointing', False):
+        cfg.gradient_checkpointing = True
+        print('  [OOM] gradient_checkpointing ON (recompute)', flush=True)
+    else:
+        cfg.seq_len //= 2
