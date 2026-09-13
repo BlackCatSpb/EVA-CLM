@@ -717,7 +717,10 @@ def train(cfg=None, resume_path=None):
             if device == 'cuda' and step % max(cfg.log_interval, 1) == 0:
                 _cap16 = torch.cuda.get_device_properties(0).total_memory
                 _v16 = torch.cuda.memory_reserved() / _cap16
-                if _v16 > 0.85 and not cfg.gradient_checkpointing:
+                # B19: no decision before the first real backward peaks
+                if step < 60:
+                    pass
+                elif _v16 > 0.85 and not cfg.gradient_checkpointing:
                     cfg.gradient_checkpointing = True
                     print(f'  [memgov] VRAM {_v16:.0%} -> checkpointing ON')
                 elif _v16 < 0.70 and cfg.gradient_checkpointing:

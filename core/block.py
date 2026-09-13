@@ -28,7 +28,7 @@ def pen_decay_factor(pen: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     return 1.0 - (torch.sigmoid(pen + w) - torch.sigmoid(w))
 
 
-def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Parallel chunk scan from zero state.
     Returns intra-chunk VSA (B, chunk_len, S*D), final state (B, 1, S*D),
     cumulative decay (B, chunk_len, S*D).
@@ -39,6 +39,12 @@ def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor) -> Tuple[torch.Ten
     contribution in the back half of every chunk for fast scales. Matches
     vsa_utils.vsa_prefix_scan numerics (locked by test_scan_exactness)."""
     log_a = torch.log(d_chunk.double().clamp(min=_EPS_SCAN))
+    if floor_log is not None:
+        # B19: the B18 ladder floor in LOG space — clamp_min on the tiny
+        # per-scale bound costs no (B,L,S,D) tensors, while the external
+        # maximum(decay, d_s.pow(k)) retained per-layer fp32/fp64 operands
+        # that OOMed a 40GB card at L=512 (live incident 2026-09-13).
+        log_a = log_a.clamp_min(floor_log)
     log_cum = torch.cumsum(log_a, dim=1)
     cum_decay = torch.exp(log_cum)
     weighted = b_chunk.double() / cum_decay
@@ -451,11 +457,9 @@ class EVABlock(nn.Module):
         d_s_vec = d_s.view(1, 1, S, 1).expand(B, L, S, D)
         d_mod_vec = d_mod.unsqueeze(2).expand(-1, -1, S, -1)
         decay = (d_s_vec * d_mod_vec).clamp(min=0.01, max=1.0)  # per-scale per-channel
-        # B18: outer floor d_s^k — content can shorten a scale toward tau_s/k
-        # but never veto the ladder shape (k=2 default, 0 disables).
-        _k18 = self._vsa_floor_k
-        if _k18 > 0:
-            decay = torch.maximum(decay, d_s_vec.pow(_k18))
+        # B18/B19: the ladder floor (content may shorten a scale toward
+        # tau_s/k, k=2 default, 0 disables) is enforced inside _scan_chunk
+        # in log space — zero extra graph memory.
 
 
         # Dynamic write modulation (per-expert K-space conditioning)
@@ -492,10 +496,14 @@ class EVABlock(nn.Module):
             mem_state_f32 = None
         
         # Level 1: parallel chunk scans from zero (module-level _scan_chunk)
+        _fl18 = None
+        if self._vsa_floor_k > 0:
+            _fl18 = (self._vsa_floor_k * torch.log(d_s.clamp(min=_EPS_SCAN).double())).view(1, 1, S, 1)
+
         chunks = []
         for start in range(0, L, CHUNK):
             end = min(start + CHUNK, L)
-            intra, final, cum_decay = _scan_chunk(input_vec_f32[:, start:end], decay_f32[:, start:end])
+            intra, final, cum_decay = _scan_chunk(input_vec_f32[:, start:end], decay_f32[:, start:end], floor_log=_fl18)
             chunks.append((intra, final, cum_decay))
         
         mem_all_vec, mem_state_out_vec, mem_leaf_vec = _combine_chunks(chunks, mem_state_f32)
@@ -522,7 +530,7 @@ class EVABlock(nn.Module):
         mu_chunks = []
         for start in range(0, L, CHUNK):
             end = min(start + CHUNK, L)
-            intra, final, cum_decay = _scan_chunk(mu_input_f32[:, start:end], decay_f32[:, start:end])
+            intra, final, cum_decay = _scan_chunk(mu_input_f32[:, start:end], decay_f32[:, start:end], floor_log=_fl18)
             mu_chunks.append((intra, final, cum_decay))
         mu_all_vec, mu_state_out_vec, _ = _combine_chunks(mu_chunks, mu_state)
         mu_all = (mu_all_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)
