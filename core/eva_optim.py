@@ -115,23 +115,6 @@ def _adamp_project(u: torch.Tensor, w: torch.Tensor,
     out = torch.where(sel, E, U).reshape_as(u)
     u.copy_(out)
     return u
-    uf = u.reshape(-1)
-    wf = w.reshape(-1)
-    wn = float(wf.norm())
-    un = float(uf.norm())
-    if wn <= 0.0 or un <= 0.0:
-        return u
-    ow = float(torch.dot(uf, wf))
-    if abs(ow) >= delta * un * wn:          # |cos| >= delta — значимый радиальный
-        return u                            # сигнал: не трогаем направление
-    coef = ow / (wn * wn + eps)
-    uf.add_(wf, alpha=-coef)                # Gram-Schmidt in-place (view u)
-    pn = float(uf.norm())
-    if pn > eps:
-        uf.mul_(un / pn)                    # нормосохранение (in-place)
-    else:
-        uf.zero_()
-    return u
 
 
 def _resolve_role(name: str, dim: int) -> dict:

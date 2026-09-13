@@ -123,16 +123,16 @@ class WideBindConfig:
     matur_warm: int = 300           # warm steps: capture random-regime pred_err_init
     # matur_warmup_steps: REMOVED — no warmup, clean start from checkpoint
     matur_write_thr: float = 0.3    # maturity needed before private-memory writes
-    # ─── Maturity готовность по компетентности bridge (вместо слепой time-рампы) ───
-    # effective maturity = max(time_ramp, bridge_readiness). Ветви (bridge-инъекция,
-    # live-модуляция, private-memory write, intent-шина) открываются, как только
-    # in-core SemanticBridge научился предсказывать next-token embedding (его
-    # косинус-лосс упал), а не по фиксированным часам T0. Bridge учится
-    # независимо от LM-лосса ствола => готовность НЕ зацикливается (в отличие от
-    # pred_err зеркала). У init bridge случаен => readiness=0 => ствол не
-    # возмущается => стабильность обучения сохранена.
-    # T0/T_delay снижены (8000/8000) для ускорения открытия рампа после прорыва;
-    # r0/rs снижены (0.3/0.2) для поднятия потолка readiness с ~0.76 до ~0.97.
+    # ─── Maturity: компетентностная добавка к time-рампе (E3-уточнение) ───
+    # effective maturity = max(time_ramp, readiness_l), где readiness_l
+    # считается в maturation.py из НАСЫЩЕНИЯ ЗАМЕРА pred-ошибки зеркала
+    # (sat = 1 - EMA[pen]/pen_init -> сигмоида), а НЕ из bridge: код —
+    # stack.py torch.maximum(mat_gate, maturation.readiness). bridge.readiness()
+    # живёт отдельно и является optimizer-TRUST для группы bridge_glu (eva_optim).
+    # Исторический комментарий здесь обещал «bridge_readiness» — документация
+    # отставала от кода; исправлено 2026-09-13 по MATHEMATICAL_ANALYSIS E3.
+    # T0 — запасной time-floor, не блок: компетентный слой открывается раньше.
+    # r0/rs (0.3/0.2) поднимают потолок readiness до ~0.97.
     matur_bridge_readiness: bool = True
     matur_bridge_r0: float = 0.3    # центр сигмоиды готовности (доля падения лосса)
     matur_bridge_rs: float = 0.2    # наклон сигмоиды готовности
@@ -410,6 +410,13 @@ class WideBindConfig:
             raise NotImplementedError(
                 'embed_rope=True retired (audit 02a F2A-04): readout rotation '
                 'inverse is dead code; roundtrip collapses to 0.20.')
+        # E10 (math-analysis audit): twin_free packing needs K=64 for the
+        # full 65536-vocab with overlap <= S-2 (C(32,6) pools twin at that
+        # size); failing late in codebook generation is cryptic.
+        if getattr(self, 'codebook', 'legacy') == 'twin_free' and int(self.code_dim) < 64:
+            raise ValueError(
+                f"codebook='twin_free' requires code_dim >= 64 (got {self.code_dim}); "
+                "use codebook='legacy' for smaller K.")
         if self.lambda_d_enabled:
             self._apply_lambda_d()
 

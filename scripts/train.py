@@ -267,8 +267,11 @@ def train(cfg=None, resume_path=None):
     if use_amp:
         print('  AMP: ON (mixed precision)')
 
-    print(f'Adaptation: LLRD(={cfg.llrd}) + mirror-adaptive LR + plateau depth '
-          f'(init={cfg.init_active_layers}) + 3-sigma watchdog + AGC + spectral aux')
+    _llrd_note = ('' if abs(float(cfg.llrd) - 1.0) < 1e-9
+                  else ' ACTIVE — double-LLRD, legacy!')
+    print(f'Adaptation: tau-LLRD (single source; index llrd={cfg.llrd}{_llrd_note}) '
+          f'+ mirror-adaptive LR + plateau depth (init={cfg.init_active_layers}) '
+          f'+ AGC + spectral aux')
     
     # Resume
     start_step = 0
@@ -730,7 +733,7 @@ if __name__ == '__main__':
     parser.add_argument('--D', type=int, default=4096, help='model width')
     parser.add_argument('--vocab', type=int, default=65536)
     parser.add_argument('--mirror-k', type=int, default=32)
-    parser.add_argument('--llrd', type=float, default=0.9, help='layer-wise LR decay per depth (deeper=smaller LR)')
+    parser.add_argument('--llrd', type=float, default=1.0, help='RETIRED index-based per-depth LR decay — tau-LLRD (apply_tau_lr) is the single source (MATHEMATICAL_ANALYSIS R5); set !=1.0 only to reproduce legacy arms')
     parser.add_argument('--init-active-layers', type=int, default=8, help='blocks trained from step 0 (rest frozen)')
     parser.add_argument('--stage-steps', type=int, default=15000, help='unlock next block every N steps (backstop)')
     parser.add_argument('--readiness-full', type=float, default=0.6, help='meta-maturity (differentiation) to unlock deepest block')
