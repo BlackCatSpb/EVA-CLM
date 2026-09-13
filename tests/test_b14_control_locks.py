@@ -19,7 +19,12 @@ def _mini():
     return EVAStack(cfg).train(), cfg
 
 
-def test_f411_eval_does_not_write_streaming_control_caches():
+def test_f411_m33_eval_writes_caches_snapshot_isolates():
+    # M33 SUPERSEDES the F4-11 mode gate: streaming caches (hp/pen/pred_k) are
+    # FORWARD INPUTS — erasing them on eval made validation a different model
+    # (+~12 nats measured on step-1045 best.pt). Parity now: eval writes.
+    # Isolation moved to where it belongs: the runtime snapshot covers the
+    # caches and the evaluator restores them byte-exact after the val pass.
     m, cfg = _mini()
     x = torch.randint(3, cfg.vocab, (1, 32))
     m.train()
@@ -27,12 +32,16 @@ def test_f411_eval_does_not_write_streaming_control_caches():
     mir = m.layers[0].mirror
     sentinel = torch.full_like(mir._cached_pred_error_norm, 7.77)
     mir._cached_pred_error_norm = sentinel
+    snap = m.snapshot_runtime_buffers()
     m.eval()
     with torch.no_grad():
         inp = m.embed_tokens(x) if hasattr(m, 'embed_tokens') else m.embed(x)
         m(inp, None, adaptive=False, tokens=x)
+    assert not torch.equal(mir._cached_pred_error_norm, sentinel), \
+        'M33 parity broken: eval no longer updates streaming caches'
+    m.restore_runtime_buffers(snap)
     assert torch.equal(mir._cached_pred_error_norm, sentinel), \
-        'eval rewrote the control cache (F4-11 leak is back)'
+        'M33: snapshot/restore must bring the train-document cache back byte-exact'
 
 
 def test_f410_bypass_only_path_is_bounded():

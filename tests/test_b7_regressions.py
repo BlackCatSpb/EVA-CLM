@@ -61,10 +61,16 @@ def test_f02_f03_l2_bank_content_is_state_and_eval_is_read_only():
     h = m.embed_tokens(tokens)
 
     m.eval()
+    snap = m.snapshot_runtime_buffers()
     k0 = l2.keys.clone(); w0 = int(l2._write_idx.item())
     with torch.no_grad():
         m(h, None, step=None, adaptive=False, tokens=tokens)
-    assert torch.equal(l2.keys, k0)                      # F-03: eval wrote nothing
+    # M33 (inference=learning §1.4): eval WRITES the bank (mode-gated writes made
+    # val a different model); the isolation contract is the snapshot/restore pair
+    # every evaluate() runs around the val pass — content must be byte-identical
+    # after restore.
+    m.restore_runtime_buffers(snap)
+    assert torch.equal(l2.keys, k0)
     assert int(l2._write_idx.item()) == w0
 
     m.train()

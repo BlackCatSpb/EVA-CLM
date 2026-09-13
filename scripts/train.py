@@ -671,8 +671,8 @@ def evaluate(model, streams, cfg, device, hold_n=None):
     _lc = getattr(model, 'logit_cache', None)
     if _lc is not None:
         _lc.cache.clear()  # val windows must not enter the train cache (decision #3)
-    if getattr(model, 'explicit_reasoning', False):
-        model.reset_reasoning()
+    # M32: the chain is reset PER HOLD-OUT DOCUMENT below (a global reset
+    # would let hold-out file 1's deliberation leak into file 2's).
     total_loss = 0.0
     total_steps = 0
     
@@ -688,6 +688,14 @@ def evaluate(model, streams, cfg, device, hold_n=None):
     for stream in eval_pool:
         if stream.len < cfg.batch_size * cfg.seq_len + 1:
             continue
+        # M32: each hold-out file is its own document — fresh deliberation
+        # chain and fresh streaming state at its boundary, then windows CARRY
+        # it, exactly mirroring the training sampler's document semantics.
+        if getattr(model, 'explicit_reasoning', False):
+            model.reset_reasoning()
+        if getattr(model, 'memory_bank', None) is not None:   # M33: fresh bank per doc
+            model.memory_bank.reset()
+        est = ogs = None
         offset = max(stream.len // 2, cfg.batch_size * cfg.seq_len + 1)
         for _ in range(max(min(100 // max(hold_n, 1),
                                stream.len // (cfg.batch_size * cfg.seq_len)), 1)):
@@ -696,7 +704,7 @@ def evaluate(model, streams, cfg, device, hold_n=None):
                 break  # end of the hold-out document region — no wrapped re-read
             x, y = x.to(device), y.to(device)
             h = model.embed_tokens(x)
-            out, _, _, _ = model(h, None, adaptive=False, tokens=x)
+            out, est, ogs, _ = model(h, est, global_state=ogs, adaptive=False, tokens=x)
             loss = model.compute_loss(out, y, h_emb=h)
             total_loss += loss.item()
             total_steps += 1

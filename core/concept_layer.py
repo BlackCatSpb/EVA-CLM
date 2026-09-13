@@ -311,8 +311,10 @@ class UnifiedConceptLayer(nn.Module):
             self._tau_norm = tau_norm
 
         # Update maturity (continuous, τ-driven)
-        if self.training:
-            self._update_maturity(resvar)
+        # M33: computed in BOTH regimes — it feeds the read gate, and a model
+        # whose inference differs by mode is a different model. Eval contamination
+        # is contained by the runtime snapshot (buffers) + document resets.
+        self._update_maturity(resvar)
 
         # Write concepts (τ-gated) — FUNCTIONAL: returns the effective store
         # for the read below so the write path keeps its gradients (M6).

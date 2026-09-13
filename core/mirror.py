@@ -455,7 +455,11 @@ class GroupedCognitiveMirror(nn.Module):
         # Alpha override smoothly interpolates: override=1 → identity (α=1),
         # override=0 → learned alpha_diag. Provides smooth warmup transition.
         alpha_eff = self.alpha_diag
-        override = self._alpha_override.item() if self.training else 0.0
+        # M33: read the override in BOTH regimes — it is persistent controller
+        # state; the old mode branch made eval run a different alpha schedule
+        # than train (part of the residual regime-split after the cache fix).
+        # The pending-write FLUSH (F4-01) remains a training-only act.
+        override = self._alpha_override.item()
         if override > 0:
             alpha_eff = (1 - override) * alpha_eff + override * 1.0
         pred_k = hp_prev * alpha_eff.view(1, 1, G, k)  # (B, L, G, k)
@@ -538,33 +542,34 @@ class GroupedCognitiveMirror(nn.Module):
             # target (hp.detach() stays — the target must not chase itself).
             self._pred_loss_term = (
                 F.mse_loss(_pred_k_aux, hp.detach()) if _pred_k_aux is not None else None)
-            self._cached_pred_k = _pred_k_aux.detach() if _pred_k_aux is not None else None
-            self._cached_hp = hp.detach()
-            self._cached_pred_error_norm = pred_error_norm.detach()
         else:
             self._pred_loss_term = None   # eval: never hold a training graph
-            # B14 (audits 02b F2B-03 + 04 F4-11): eval NO LONGER writes
-            # _cached_pred_error_norm/_cached_hp. The block reads them as
-            # forward inputs (write gate, decay penalty, per-expert write
-            # modulation), so hold-out data was measurably steering the next
-            # training window (rel 0.39 cold / ~0.8% steady) THROUGH the
-            # snapshot-restore contract. Eval now reads the train-carried
-            # caches — the streaming-correct definition of eval, zero leak.
-        if self.training:
-            _bh = self._cached_hp_buf.shape[0]
-            _bs = self._cached_hp_buf.shape[1]
-            if _bh != B or L > _bs:          # B1: grow on batch AND on longer seq
-                _seq_max = max(_bs, L)
-                self._cached_hp_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
-                self._cached_pred_k_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
-                self._cached_pred_error_norm_buf = torch.zeros(B, _seq_max, device=hp.device)
-            self._cached_hp_buf[:, :L].copy_(hp.detach())
-            if _pred_k_aux is not None:
-                self._cached_pred_k_buf[:, :L].copy_(_pred_k_aux.detach())
-            else:
-                self._cached_pred_k_buf[:, :L].zero_()
-            self._cached_pred_error_norm_buf[:, :L].copy_(pred_error_norm.detach())
-            self._cached_pred_error_norm = pred_error_norm.detach()
+        # M33 (1045 audit): these STREAM caches are FORWARD INPUTS — block
+        # write gate, decay penalty, per-expert write/read modulation and the
+        # UCL hp feed all consume them. The old eval erasure (B7 F-03/F4-11
+        # doctrine) silently switched those paths OFF during validation: val CE
+        # was inflated by ~12 nats — it measured the regime, not the model.
+        # Streaming correctness (README §1.4, inference=learning) writes them
+        # in BOTH regimes; the hold-out leak the erasure guarded is contained
+        # by the right mechanism now: snapshot_runtime_buffers COVERS these
+        # caches (restored byte-exact after eval) and evaluators reset the
+        # document-scoped stores per hold-out file.
+        self._cached_pred_k = _pred_k_aux.detach() if _pred_k_aux is not None else None
+        self._cached_hp = hp.detach()
+        self._cached_pred_error_norm = pred_error_norm.detach()
+        _bh = self._cached_hp_buf.shape[0]
+        _bs = self._cached_hp_buf.shape[1]
+        if _bh != B or L > _bs:              # B1: grow on batch AND on longer seq
+            _seq_max = max(_bs, L)
+            self._cached_hp_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
+            self._cached_pred_k_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
+            self._cached_pred_error_norm_buf = torch.zeros(B, _seq_max, device=hp.device)
+        self._cached_hp_buf[:, :L].copy_(hp.detach())
+        if _pred_k_aux is not None:
+            self._cached_pred_k_buf[:, :L].copy_(_pred_k_aux.detach())
+        else:
+            self._cached_pred_k_buf[:, :L].zero_()
+        self._cached_pred_error_norm_buf[:, :L].copy_(pred_error_norm.detach())
         
         # ─── Private Memory: read via cross-expert attention (when uncertain) ───
         if self._has_private_mem:

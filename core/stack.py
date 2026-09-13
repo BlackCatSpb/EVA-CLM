@@ -232,18 +232,20 @@ class EVAStack(nn.Module):
             if sB != B:
                 state = [None] * len(self.layers)
         if reasoning_buffer is None:
-            if self.training:
-                # В обучении допускаем перенос deliberation-состояния между шагами
-                # (состояние цепочки мысли). При eval — СБРОС: иначе буфер от
-                # последнего шага обучения протаскивается в валидацию/генерацию
-                # и даёт ложную расходимость (ppl -> 1e6).
-                reasoning_buffer = getattr(self, '_reasoning_buffer', None)
-                reasoning_count = getattr(self, '_reasoning_count', None)
-                _reasoning_attr = True
-            else:
-                reasoning_buffer = None
-                reasoning_count = None
-                _reasoning_attr = False
+            # M32: the deliberation chain is DOCUMENT state, not a mode flag.
+            # The 1045-step audit measured eval/train CE 17.4 vs 5.6 on the
+            # SAME weights and data: the trunk learned with a live chain, and
+            # the old mode-based erasure (M8 doctrine) stripped it from every
+            # val/generation pass — val was measuring the regime, not the
+            # model. The leakage M8 actually saw (train buffer bleeding into
+            # val, ppl 1e6) is prevented where it belongs: at DOCUMENT
+            # boundaries. evaluate() resets the chain per hold-out file and
+            # the runtime-buffer snapshot now COVERS the chain attributes, so
+            # the training document's deliberation survives eval byte-exact
+            # and generation must start its own chain explicitly.
+            reasoning_buffer = getattr(self, '_reasoning_buffer', None)
+            reasoning_count = getattr(self, '_reasoning_count', None)
+            _reasoning_attr = True
         else:
             _reasoning_attr = False
         if self.explicit_reasoning and reasoning_buffer is not None:
@@ -1079,12 +1081,31 @@ class EVAStack(nn.Module):
         """
         snap = {k: v.detach().clone() for k, v in self.named_buffers()}
         _ex = {}
-        for _an in ('_last_bus', '_intent_stream'):        # B1: non-buffer streaming state
+        for _an in ('_last_bus', '_intent_stream',            # B1: non-buffer streaming state
+                    '_reasoning_buffer', '_reasoning_count'):  # M32: chain is snapshot-covered
             _a = getattr(self, _an, None)
             if isinstance(_a, torch.Tensor):
                 _ex[_an] = _a.detach().clone()
             elif isinstance(_a, (list, tuple)):
                 _ex[_an] = [t.detach().clone() if isinstance(t, torch.Tensor) else t for t in _a]
+            else:
+                _ex[_an] = _a          # None/scalar must restore too (a document
+                                       # boundary reset is state, not absence)
+        # M33: per-layer streaming caches ARE forward inputs (see mirror M33) —
+        # they must round-trip through the eval isolation contract as well.
+        for _i, _l in enumerate(self.layers):
+            _mir = getattr(_l, 'mirror', None)
+            if _mir is not None:
+                for _an in ('_cached_hp', '_cached_pred_k', '_cached_pred_error_norm',
+                            '_cached_gate', '_cached_usefulness'):
+                    _a = getattr(_mir, _an, None)
+                    if isinstance(_a, torch.Tensor):
+                        _ex[f'mir.{_i}.{_an}'] = _a.detach().clone()
+                    elif _a is not None:
+                        _ex[f'mir.{_i}.{_an}'] = _a
+            _tr = getattr(_l, '_traj_state', None)
+            if isinstance(_tr, torch.Tensor):
+                _ex[f'blk.{_i}._traj_state'] = _tr.detach().clone()
         snap['__attrs__'] = _ex
         return snap
 
@@ -1098,6 +1119,14 @@ class EVAStack(nn.Module):
                 if buf is not None and buf.shape == v.shape:
                     buf.copy_(v)
             for _an, _v in (snap.get('__attrs__') or {}).items():   # B1 restore path
+                if _an.startswith(('mir.', 'blk.')):                 # M33 per-layer route
+                    _pfx, _i, _attr = _an.split('.', 2)
+                    _tgt = self.layers[int(_i)]
+                    if _pfx == 'mir':
+                        _tgt = _tgt.mirror
+                    setattr(_tgt, _attr,
+                            _v.clone() if isinstance(_v, torch.Tensor) else _v)
+                    continue
                 _cur = getattr(self, _an, None)
                 if isinstance(_v, list) and isinstance(_cur, list):
                     for _i2, _t in enumerate(_v):

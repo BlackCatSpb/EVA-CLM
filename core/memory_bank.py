@@ -408,10 +408,12 @@ class StreamingMemoryBank(nn.Module):
         is_sep = (tokens == 2)  # SEP token = sentence boundary
 
         # Determine if writes are allowed
-        # B7 (F-03): eval forwards must not consolidate hold-out content
-        # into the bank — writes are training-mode only (reads unaffected).
-        _can_write = self.training and ((mat_gate is None) or
-                                (mat_gate >= self._min_write_maturation))
+        # M33 (supersedes B7 F-03 mode gate): writes happen in BOTH regimes —
+        # 'инференс = обучение' (README §1.4). Hold-out content can no longer
+        # leak into the training bank: evaluate() snapshots/restores the bank
+        # buffers and resets them per hold-out document (boundary semantics).
+        _can_write = ((mat_gate is None) or
+                      (mat_gate >= self._min_write_maturation))
 
         # Detect boundaries and write to all levels
         with torch.no_grad():
