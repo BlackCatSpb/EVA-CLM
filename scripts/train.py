@@ -680,6 +680,7 @@ def train(cfg=None, resume_path=None):
                         _t["mem"] = _rm
                     optimizer.set_trust(_t)
                 optimizer.step()
+                model.release_step_graph()   # M21 (probe-proven): _cache_*/_cached_* attrs pin the whole step graph between steps
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
             if model.explicit_reasoning:

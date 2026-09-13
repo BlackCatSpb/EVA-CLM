@@ -982,6 +982,38 @@ class EVAStack(nn.Module):
 
         return h_augmented, logits_out
 
+    _GRAPH_ATTRS_BLOCK = ('_cache_conv_out', '_cache_mlp_out', '_cache_mlp_mod',
+                          '_cache_bind_out', '_cache_mirror_out', '_precision_mean',
+                          '_gradalign_tgt')
+    _GRAPH_ATTRS_MIRROR = ('_pred_loss_term', '_cached_decorr', '_cached_gate_l1',
+                           '_cached_gate_usage', '_cached_usefulness')
+
+    def release_step_graph(self) -> int:
+        """M21 (live A100 leak, seq=512): these attrs are documented as
+        'overwritten next forward' but between steps they pin their WHOLE
+        autograd subgraph — at production size that is the entire step graph:
+        (512,1,65536) logits, (1,8,512,6144) cache-attention softmaxes, ~all
+        of VRAM (gc-proven 27GB 'post-GC'). Rebind to .detach() keeps the
+        numeric values (next step legitimately reads last step's caches) and
+        drops ONLY the graph edges. setattr (not detach_()): some caches are
+        views (slices/means) which cannot detach in place. Call after
+        optimizer.step(). Returns count of released tensors."""
+        n = 0
+        for l in self.layers:
+            for an in self._GRAPH_ATTRS_BLOCK:
+                v = getattr(l, an, None)
+                if isinstance(v, torch.Tensor) and v.grad_fn is not None:
+                    setattr(l, an, v.detach())
+                    n += 1
+            mir = getattr(l, 'mirror', None)
+            if mir is not None:
+                for an in self._GRAPH_ATTRS_MIRROR:
+                    v = getattr(mir, an, None)
+                    if isinstance(v, torch.Tensor) and v.grad_fn is not None:
+                        setattr(mir, an, v.detach())
+                        n += 1
+        return n
+
     def flush_control_pending(self) -> None:
         """B16: make every deferred control write durable before a save."""
         for _l in self.layers:
