@@ -17,6 +17,18 @@ from .vsa_utils import dct_basis, fib_sigmoid_init
 # ─── Module-level prefix scan (hoisted from EVABlock.forward) ───
 
 _EPS_SCAN = 1e-6
+# M25: fp32 forward is safe under the ladder floor, but its backward through
+# b / cum_decay becomes ill-conditioned when the cumulative floor of one
+# chunk drops below this scale. Keep fp32 for the normal/deep layers and use
+# fp64 only for the small fast-layer subset that needs a stable derivative.
+_SCAN_FP32_GRAD_FLOOR = 1e-20
+
+
+def _scan_floor_needs_fp64(floor_log: Optional[torch.Tensor], chunk_len: int) -> bool:
+    if floor_log is None:
+        return True
+    floor_decay = torch.exp(floor_log.detach().amin())
+    return float(floor_decay.pow(int(chunk_len))) < _SCAN_FP32_GRAD_FLOOR
 
 def pen_decay_factor(pen: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """Prediction-error modulation of the decay gate, CENTERED at 1.0 (audit
@@ -28,7 +40,8 @@ def pen_decay_factor(pen: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     return 1.0 - (torch.sigmoid(pen + w) - torch.sigmoid(w))
 
 
-def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None,
+                use_fp64: Optional[bool] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Parallel chunk scan from zero state.
     Returns intra-chunk VSA (B, chunk_len, S*D), final state (B, 1, S*D),
     cumulative decay (B, chunk_len, S*D).
@@ -38,12 +51,13 @@ def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None) ->
     clamp them at 1e6, which silently zeroed even the CURRENT token's own
     contribution in the back half of every chunk for fast scales. Matches
     vsa_utils.vsa_prefix_scan numerics (locked by test_scan_exactness)."""
-    # M20: the fp64 requirement was the UNFLOORED path (cum_decay can reach
-    # 0.01^32 = 1e-64 — M3). With the B18/B19 ladder floor active, per-token
-    # decay >= d_s^k, so over a 32-chunk cum_decay >= (0.49^2)^32 ~ 1e-10 at
-    # the fastest production scale — fp32 reciprocals are safe there, and the
-    # scan stops pinning ~17GB of fp64 intermediates to the backward graph.
-    _dt = torch.float64 if floor_log is None else torch.float32
+    # M20: most floored layers stay on the fp32 path. M25 corrects the overly
+    # broad forward-only safety argument: the fast L0 floor is finite in the
+    # forward but its fp32 reciprocal scan can produce NaN/Inf derivatives.
+    # Reuse fp64 only when the chunk floor is actually ill-conditioned.
+    if use_fp64 is None:
+        use_fp64 = _scan_floor_needs_fp64(floor_log, b_chunk.shape[1])
+    _dt = torch.float64 if use_fp64 else torch.float32
     log_a = torch.log(d_chunk.to(_dt).clamp(min=_EPS_SCAN))
     if floor_log is not None:
         # B19: the B18 ladder floor in LOG space — clamp_min on the tiny
@@ -206,6 +220,7 @@ class EVABlock(nn.Module):
         # ─── VSA Memory (multi-scale VSA: S=4 фиксированных τ) ───
         self._n_scales = 4
         self._vsa_floor_k = float(getattr(cfg, 'vsa_decay_floor_k', 2.0))  # B18
+        self._scan_fp64: Optional[bool] = None  # M25: refreshed infrequently; no per-layer sync
         self.register_buffer('_pen_ema', torch.zeros(()), persistent=True)  # B18b
         # U1: τ-consistent VSA scales. This copy is the TRAINABLE ladder for
         # standalone blocks (tau_s=None); inside EVAStack the live source is
@@ -503,13 +518,24 @@ class EVABlock(nn.Module):
         
         # Level 1: parallel chunk scans from zero (module-level _scan_chunk)
         _fl18 = None
+        # Legacy floor_log=None remains the exact fp64 path (M3 contract).
+        _scan_fp64 = True
         if self._vsa_floor_k > 0:
             _fl18 = (self._vsa_floor_k * torch.log(d_s.clamp(min=_EPS_SCAN).double())).view(1, 1, S, 1)
+            # Refresh at step 0 and only every 128 steps: querying the floor
+            # is a scalar GPU sync, while the τ ladder moves slowly. The cached
+            # decision is replayed identically by checkpoint recomputation.
+            if (self._scan_fp64 is None or step is None
+                    or (step is not None and int(step) % 128 == 0)):
+                self._scan_fp64 = _scan_floor_needs_fp64(_fl18, CHUNK)
+            _scan_fp64 = bool(self._scan_fp64)
 
         chunks = []
         for start in range(0, L, CHUNK):
             end = min(start + CHUNK, L)
-            intra, final, cum_decay = _scan_chunk(input_vec_f32[:, start:end], decay_f32[:, start:end], floor_log=_fl18)
+            intra, final, cum_decay = _scan_chunk(
+                input_vec_f32[:, start:end], decay_f32[:, start:end],
+                floor_log=_fl18, use_fp64=_scan_fp64)
             chunks.append((intra, final, cum_decay))
         
         mem_all_vec, mem_state_out_vec, mem_leaf_vec = _combine_chunks(chunks, mem_state_f32)
@@ -536,7 +562,9 @@ class EVABlock(nn.Module):
         mu_chunks = []
         for start in range(0, L, CHUNK):
             end = min(start + CHUNK, L)
-            intra, final, cum_decay = _scan_chunk(mu_input_f32[:, start:end], decay_f32[:, start:end], floor_log=_fl18)
+            intra, final, cum_decay = _scan_chunk(
+                mu_input_f32[:, start:end], decay_f32[:, start:end],
+                floor_log=_fl18, use_fp64=_scan_fp64)
             mu_chunks.append((intra, final, cum_decay))
         mu_all_vec, mu_state_out_vec, _ = _combine_chunks(mu_chunks, mu_state)
         mu_all = (mu_all_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)

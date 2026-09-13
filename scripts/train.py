@@ -234,6 +234,7 @@ def train(cfg=None, resume_path=None):
     # fixed schedule, Watchdog ce>15, and the inline bypass/aligned aux weighting.
     from core.adaptation import (LossBalancer, DepthController, LRController,
                                  FailureDetector, GradientClipper,
+                                 nonfinite_gradient_names,
                                  set_active_depth, build_optimizer)
 
     def _make_opt(lr):
@@ -669,6 +670,21 @@ def train(cfg=None, resume_path=None):
             # train.py never applied it. Same law, same order: BEFORE the clip.
             ls_mults = getattr(scheduler, '_ls_mult', None)
             apply_tau_lr(model, getattr(model, 'tau_config', None), ls_mults)
+            _bad_grads = nonfinite_gradient_names(model)
+            if _bad_grads:
+                # M25: do not let a non-finite scan/aux gradient reach AGC or
+                # optimizer.step(). AGC's Inf*0 path would manufacture NaNs;
+                # discard this update and restart the carried document instead.
+                print(f'  [update-skip] non-finite gradients before AGC: '
+                      f'{_bad_grads[:8]} (count={len(_bad_grads)}); '
+                      'state reset, training continues')
+                h = out = ce_loss = aux_dict = None
+                state = None
+                gs = None
+                intent_state = None
+                optimizer.zero_grad(set_to_none=True)
+                model.release_step_graph()
+                continue
             clipper.clip(model.parameters())
 
             if use_amp:

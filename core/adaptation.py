@@ -457,6 +457,11 @@ class GradientClipper:
         for p in parameters:
             if p.grad is None:
                 continue
+            # Never turn an existing Inf gradient into NaN via Inf*0 below.
+            # The training loops reject the whole update before reaching this
+            # point; this local guard keeps AGC safe for standalone callers too.
+            if not torch.isfinite(p.grad).all():
+                continue
             # τ-aware effective clip ratio (docstring==код): c·(τ_ref/τ_l)^γ
             c_eff = self.c * self._p_scale.get(id(p), 1.0)
             g_norm = p.grad.norm()
@@ -474,6 +479,18 @@ class GradientClipper:
                 continue
             if g_norm > c_eff * p_norm:
                 p.grad.mul_(c_eff * p_norm / (g_norm + self.eps))
+
+
+def nonfinite_gradient_names(model: torch.nn.Module) -> list[str]:
+    """Return parameter names whose current gradients are not finite.
+
+    This is an update gate, not a failure policy: callers log the names,
+    discard the update, reset carried document state, and continue training.
+    Checking before AGC is essential because AGC's ``Inf * 0`` would otherwise
+    manufacture NaNs and let ``optimizer.step()`` poison the weights.
+    """
+    return [name for name, p in model.named_parameters()
+            if p.grad is not None and not torch.isfinite(p.grad).all()]
 
 
 
