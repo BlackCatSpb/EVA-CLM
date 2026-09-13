@@ -45,4 +45,4 @@ def test_readme_corrected_markers():
     # the truth markers
     assert 'cumsum(Δ₀·softplus(dev_eff))' in src
     assert 'τ₀ ≈ 9.5' in src and 'e^{−k/τ_s}' in src
-    assert 'Полный bind' in src and 'изометрична именно поворотная' in src
+    assert 'Полный bind' in src and 'зометрична именно поворотная' in src
