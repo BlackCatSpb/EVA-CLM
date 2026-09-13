@@ -98,20 +98,27 @@ def _scan_chunks(b_in: torch.Tensor, d_in: torch.Tensor, floor_log=None,
     B, L, S, D = b_in.shape
     nc = (L + chunk - 1) // chunk
     pad = nc * chunk - L
-    b = b_in.reshape(B, nc, chunk, S, D) if pad == 0 else None
-    if b is None:
-        b = F.pad(b_in, (0, 0, 0, 0, 0, pad)).reshape(B, nc, chunk, S, D)
-        d = F.pad(d_in, (0, 0, 0, 0, 0, pad), value=1.0).reshape(B, nc, chunk, S, D)
+    # M38: fold the chunk axis INTO the batch axis and run the cumsum along
+    # dim=1 — the exact contiguous layout the single-chunk kernel was tuned
+    # for. (M37 kept (B,nc,32,S,D) and cumsummed along dim=2: a strided axis,
+    # measured SLOWER than the loop it replaced — 66 tok/s vs 106 on the A100.
+    # Vectorization is only a win when the memory layout matches the kernel.)
+    if pad:
+        b4 = F.pad(b_in, (0, 0, 0, 0, 0, pad)).reshape(B * nc, chunk, S, D)
+        d4 = F.pad(d_in, (0, 0, 0, 0, 0, pad), value=1.0).reshape(B * nc, chunk, S, D)
     else:
-        d = d_in.reshape(B, nc, chunk, S, D)
-    log_a = torch.log(d.clamp(min=_EPS_SCAN)).clamp_min(floor_log.to(d.dtype))
-    log_cum = torch.cumsum(log_a, dim=2)                     # within-chunk
-    anchor = log_cum[:, :, -1:]                              # (B,nc,1,S,D)
-    u = b * torch.exp(anchor - log_cum)                      # |u| <= |b|
-    intra = torch.exp(log_cum - anchor) * torch.cumsum(u, dim=2)
+        b4 = b_in.reshape(B * nc, chunk, S, D)
+        d4 = d_in.reshape(B * nc, chunk, S, D)
+    log_a = torch.log(d4.clamp(min=_EPS_SCAN)).clamp_min(floor_log.to(d4.dtype))
+    log_cum = torch.cumsum(log_a, dim=1)                      # within-chunk
+    anchor = log_cum[:, -1:]                                  # (B*nc,1,S,D)
+    u = b4 * torch.exp(anchor - log_cum)                      # |u| <= |b|
+    intra = torch.exp(log_cum - anchor) * torch.cumsum(u, dim=1)
     cum_decay = torch.exp(log_cum)
     flat = lambda t: t.reshape(B, nc * chunk, S, D)[:, :L]
-    return flat(intra).to(b_in.dtype), intra[:, :, -1], flat(cum_decay).to(b_in.dtype)
+    return (flat(intra).to(b_in.dtype),
+            intra[:, -1].reshape(B, nc, S, D),
+            flat(cum_decay).to(b_in.dtype))
 
 
 def _combine_chunks(chunk_data: list, initial_state: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
