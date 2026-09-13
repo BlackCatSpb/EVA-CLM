@@ -264,6 +264,32 @@ def train(cfg=None, resume_path=None):
     # AMP (Automatic Mixed Precision)
     use_amp = getattr(cfg, 'use_amp', False) and device == 'cuda'
     scaler = GradScaler(enabled=use_amp)
+
+    # M42 (mirror of the notebook): one envelope builder + rolling latest.pt
+    def _full_env(_step):
+        model.flush_control_pending()
+        return {
+            'step': int(_step), 'model': model.state_dict(),
+            'code_fp': codebook_fingerprint(model),
+            'optimizer': optimizer.state_dict(),
+            'param_names': _opt_param_names(model, optimizer),
+            'scheduler': scheduler.state_dict(),
+            'best_val_loss': float(best_val_loss), 'cfg': cfg,
+            'reasoning_enabled_step': reasoning_enabled_step,
+            'recover_count': watchdog.recover_count, 'active_depth': depth.active,
+            'detector': watchdog.state_dict(), 'depth_state': depth.get_state(),
+            'balancer': balancer.state_dict(),
+            'stream_idx': int(stream_idx), 'offset': int(offset),
+            'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
+            'stream_state': _dstate(state), 'stream_gs': _dstate(gs if gs is not None else None),
+            'cuda_rng': torch.cuda.get_rng_state() if device == 'cuda' else None,
+        }
+
+    def _atomic42(env, name):
+        p = os.path.join(cfg.save_dir, name); q = p + '.tmp'
+        _save_checkpoint_safely(env, q)
+        os.replace(q, p)
+        return p
     if use_amp:
         print('  AMP: ON (mixed precision)')
 
@@ -283,6 +309,8 @@ def train(cfg=None, resume_path=None):
     if resume_path == 'auto':
         # Find latest checkpoint: interrupt > step_* > best
         ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'interrupt_step_*.pt')))
+        if not ckpts:
+            ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'latest.pt')))   # M42 rolling
         if not ckpts:
             ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'step_*.pt')))
         if not ckpts:
@@ -650,7 +678,15 @@ def train(cfg=None, resume_path=None):
                         print(f'  [report] skipped: {_re}')   # diagnostics, not training.
 
             
-            # Periodic step_*.pt checkpoints DISABLED: only best.pt is written (saves space).
+            # M42: rolling latest.pt every 495 steps + flush of non-continuity
+            # caches (logit cache, mirror stream caches, allocator) — bounds
+            # the ggeo-spike fragmentation creep seen on the A100 cycle.
+            if step > 0 and step % 495 == 0:
+                _p42t = _atomic42(_full_env(step), 'latest.pt')
+                model.reset_cache()
+                if device == 'cuda':
+                    torch.cuda.empty_cache()
+                print(f'  [save-latest] step={step} -> {_p42t}; caches flushed')
     except KeyboardInterrupt:
         print('\n[EVA] Ctrl+C detected - keeping last best.pt (no separate checkpoint written)')
         print('[EVA] Exiting gracefully.')
