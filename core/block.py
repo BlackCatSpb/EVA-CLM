@@ -38,16 +38,22 @@ def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None) ->
     clamp them at 1e6, which silently zeroed even the CURRENT token's own
     contribution in the back half of every chunk for fast scales. Matches
     vsa_utils.vsa_prefix_scan numerics (locked by test_scan_exactness)."""
-    log_a = torch.log(d_chunk.double().clamp(min=_EPS_SCAN))
+    # M20: the fp64 requirement was the UNFLOORED path (cum_decay can reach
+    # 0.01^32 = 1e-64 — M3). With the B18/B19 ladder floor active, per-token
+    # decay >= d_s^k, so over a 32-chunk cum_decay >= (0.49^2)^32 ~ 1e-10 at
+    # the fastest production scale — fp32 reciprocals are safe there, and the
+    # scan stops pinning ~17GB of fp64 intermediates to the backward graph.
+    _dt = torch.float64 if floor_log is None else torch.float32
+    log_a = torch.log(d_chunk.to(_dt).clamp(min=_EPS_SCAN))
     if floor_log is not None:
         # B19: the B18 ladder floor in LOG space — clamp_min on the tiny
         # per-scale bound costs no (B,L,S,D) tensors, while the external
         # maximum(decay, d_s.pow(k)) retained per-layer fp32/fp64 operands
         # that OOMed a 40GB card at L=512 (live incident 2026-09-13).
-        log_a = log_a.clamp_min(floor_log)
+        log_a = log_a.clamp_min(floor_log.to(_dt))
     log_cum = torch.cumsum(log_a, dim=1)
     cum_decay = torch.exp(log_cum)
-    weighted = b_chunk.double() / cum_decay
+    weighted = b_chunk.to(_dt) / cum_decay
     cum_w = torch.cumsum(weighted, dim=1)
     intra_d = cum_decay * cum_w
     intra = intra_d.to(b_chunk.dtype)
