@@ -275,6 +275,7 @@ class GroupedCognitiveMirror(nn.Module):
         # Eval-only pred caches (fixed shapes; dynamic B/L written via slices).
         # Training keeps None-able plain attributes (see forward).
         seq_max: int = self.seq_len
+        self._buf_init_L: int = seq_max      # M41: reset baseline for the bufs
         self.register_buffer('_cached_hp_buf', torch.zeros(1, seq_max, G, self.k), persistent=False)
         self.register_buffer('_cached_pred_k_buf', torch.zeros(1, seq_max, G, self.k), persistent=False)
         self.register_buffer('_cached_pred_error_norm_buf', torch.zeros(1, seq_max), persistent=False)
@@ -559,11 +560,19 @@ class GroupedCognitiveMirror(nn.Module):
         self._cached_pred_error_norm = pred_error_norm.detach()
         _bh = self._cached_hp_buf.shape[0]
         _bs = self._cached_hp_buf.shape[1]
-        if _bh != B or L > _bs:              # B1: grow on batch AND on longer seq
-            _seq_max = max(_bs, L)
-            self._cached_hp_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
-            self._cached_pred_k_buf = torch.zeros(B, _seq_max, G, self.k, device=hp.device)
-            self._cached_pred_error_norm_buf = torch.zeros(B, _seq_max, device=hp.device)
+        if _bh != B or L > _bs:
+            # M41 (external-audit follow-up): the reported buffer LEAK does not
+            # exist — _cached_hp et al. are fresh detached tensors, nothing
+            # holds a view into these bufs, so the replaced buffer dies by
+            # refcount (weakref-verified in tests). The real defect the audit
+            # stumbled on was the GROW-ONLY policy: max(_bs, L) kept stale
+            # length across a batch change forever. Now a batch change
+            # resizes EXACTLY (B, L) (history is shape-locked and unread —
+            # consumers use the plain attrs; only proj_read introspects these),
+            # growth resizes to L.
+            self._cached_hp_buf = torch.zeros(B, L, G, self.k, device=hp.device)
+            self._cached_pred_k_buf = torch.zeros(B, L, G, self.k, device=hp.device)
+            self._cached_pred_error_norm_buf = torch.zeros(B, L, device=hp.device)
         self._cached_hp_buf[:, :L].copy_(hp.detach())
         if _pred_k_aux is not None:
             self._cached_pred_k_buf[:, :L].copy_(_pred_k_aux.detach())
@@ -980,6 +989,18 @@ class GroupedCognitiveMirror(nn.Module):
         
         return mirror, mlp_mod, mem_mod, hp, pred_error_norm
     
+    def reset_stream_bufs(self) -> None:
+        """M41: shrink the write-side stream buffers to the init baseline.
+        Called from EVAStack.reset_cache() (document/rollback boundary) so
+        diagnostic buffers cannot hold a grown footprint across regimes."""
+        buf = self._cached_hp_buf
+        L0 = int(getattr(self, '_buf_init_L', buf.shape[1]))
+        if buf.shape[0] != 1 or buf.shape[1] != L0:
+            G, k, dev = buf.shape[2], buf.shape[3], buf.device
+            self._cached_hp_buf = torch.zeros(1, L0, G, k, device=dev)
+            self._cached_pred_k_buf = torch.zeros(1, L0, G, k, device=dev)
+            self._cached_pred_error_norm_buf = torch.zeros(1, L0, device=dev)
+
     def cache_grad_norms(self, grad_h: Optional[torch.Tensor] = None) -> None:
         """Call after backward: store per-subspace gradient norm.
         Uses hp hook by default; falls back to explicit grad_h if provided."""

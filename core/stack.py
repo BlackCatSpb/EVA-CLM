@@ -1084,6 +1084,8 @@ class EVAStack(nn.Module):
                                 '_pred_loss_term', '_cached_gate', '_traj_state'):
                         if hasattr(mir, _an):
                             setattr(mir, _an, None)
+                    if hasattr(mir, 'reset_stream_bufs'):
+                        mir.reset_stream_bufs()   # M41: bound diag buffers too
 
     def snapshot_runtime_buffers(self) -> dict:
         """Detached copies of EVERY buffer (incl. persistent=False).
