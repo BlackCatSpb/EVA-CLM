@@ -622,7 +622,12 @@ def train(cfg=None, resume_path=None):
                       f'{aux_str}{gate_str}')
             
             # Eval
-            if step > 0 and step % cfg.eval_interval == 0:
+            # M49: early measurement evals (see the notebook twin)
+            _canonical_eval = (step > 0 and step % cfg.eval_interval == 0)
+            _early_eval = (step > 0 and not _canonical_eval
+                           and step < getattr(cfg, 'eval_early_until', 3000)
+                           and step % getattr(cfg, 'eval_early_every', 250) == 0)
+            if _canonical_eval or _early_eval:
                 val_loss = evaluate(model, streams, cfg, device)
                 if not math.isfinite(val_loss):   # B12 (F3-01): empty pool — skip controllers
                     print('  EVAL skipped: empty validation pool (NaN) — no reporting', flush=True)
@@ -630,9 +635,10 @@ def train(cfg=None, resume_path=None):
                     print(f'  EVAL step={step}: val_loss={val_loss:.4f} val_ppl={math.exp(val_loss):.2e}')
                     if device == 'cuda':
                         torch.cuda.empty_cache()
-                    scheduler.report_val_loss(val_loss)
-                    depth.update(step, val_loss)
 
+                if _canonical_eval:
+                    depth.update(step, val_loss)
+                    scheduler.report_val_loss(val_loss)
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     model.flush_control_pending()   # B16 (audit 05)

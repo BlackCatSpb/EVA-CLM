@@ -392,6 +392,9 @@ class WideBindConfig:
     max_steps: int = 500000
     log_interval: int = 100
     eval_interval: int = 1000
+    eval_early_until: int = 3000   # M49: early measurement evals (no control
+                                   # updates) until this step; 0 disables
+    eval_early_every: int = 250    # M49: their cadence
     save_interval: int = 5000
     patience: int = 999999
     resume: str = ''
