@@ -538,7 +538,7 @@ def train(cfg=None, resume_path=None):
             # who fights it, who heats air (printed as name:ratio/cos where ratio
             # = ||g_aux||/||g_CE||). Costs a full backward pass per term, so it
             # runs only at log frequency and never touches .grad or the graph.
-            if step and step % cfg.log_interval == 0:
+            if step and step % cfg.log_interval == 0 and not getattr(cfg, 'gradient_checkpointing', False):
                 try:
                     for _m in model.modules():
                         if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
@@ -563,6 +563,7 @@ def train(cfg=None, resume_path=None):
                 cfg.gradient_checkpointing = False
                 ce_s = aux_s = ce_loss = aux_dict = None
                 optimizer.zero_grad(set_to_none=True)
+                model.release_step_graph()   # M47: drop stale graph-pinned attrs
                 if device == 'cuda':
                     torch.cuda.empty_cache()
                 continue
