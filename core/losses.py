@@ -16,6 +16,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         ce_loss: scalar, cross-entropy loss
         aux_dict: dict of named auxiliary losses (raw, unweighted).
     """
+    ce_raw = None   # M46: set on the coded path; legacy falls back to ce_loss
     if hasattr(stack.lm_head, 'log_probs_for_target'):
         B, L, D = h.shape
         bus_bias = None
@@ -38,13 +39,20 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             mask = mask & (flat_t != 2)
         mask_f = mask.to(ce.dtype)
         sw = getattr(stack.cfg, 'surprisal_weight', 0.0)
+        # M46: the UNWEIGHTED per-token CE — the honest comparable metric.
+        # The training objective below is surprisal-WEIGHTED (w = sigmoid(...)
+        # <= 1), so the logged train CE is systematically BELOW the eval CE by
+        # ~1/mean(w) (measured x2.0-2.3 at sw=0.3). Comparing the weighted
+        # train number against the unweighted val number manufactured an
+        # 8-nat phantom gap; both are logged now (ce_raw rides _cached_losses).
+        ce_raw = (ce * mask_f).sum() / mask_f.sum().clamp(min=1)
         if stack.training and sw > 0:
             with torch.no_grad():
                 ce_ratio = ce / (ce.sum() / mask_f.sum().clamp(min=1) + 1e-8)
                 w = torch.sigmoid(sw * 2.0 * (ce_ratio - 1.0))
             ce_loss = (ce * w * mask_f).sum() / mask_f.sum().clamp(min=1)
         else:
-            ce_loss = (ce * mask_f).sum() / mask_f.sum().clamp(min=1)
+            ce_loss = ce_raw
     else:
         logits = stack.lm_head(h)
         ce = F.cross_entropy(logits.reshape(-1, stack.cfg.vocab),
@@ -342,6 +350,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     
     stack._cached_losses = {
         'ce': ce_loss.item(),
+        'ce_raw': float(ce_raw.detach()) if ce_raw is not None else ce_loss.item(),  # M46
         'pred': pred_loss.item() if isinstance(pred_loss, torch.Tensor) else pred_loss,
         'gate_l1': gate_l1.item() if isinstance(gate_l1, torch.Tensor) else gate_l1,
         'reinforce': reinforce_loss.item() if isinstance(reinforce_loss, torch.Tensor) else reinforce_loss,
@@ -453,8 +462,8 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     if diversity_loss != 0:
         aux_dict['diversity'] = diversity_loss
     if n_nuc > 0:
-        aux_dict['nuc'] = nuc_loss * getattr(stack.cfg, 'nuclear_weight', 1e-5)
-    # (B2: always emit when computed — a first-call penalty of exactly 0
+        aux_dict['nuc'] = nuc_loss * getattr(stack.cfg, 'nuclear_weight', 1e-5)
+    # (B2: always emit when computed — a first-call penalty of exactly 0
     #  from the raw power-iteration estimate silently removed the key.)
     if orth_loss != 0:
         aux_dict['orth'] = orth_loss

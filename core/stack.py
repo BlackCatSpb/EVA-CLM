@@ -1120,7 +1120,11 @@ class EVAStack(nn.Module):
                     _a = getattr(_mir, _an, None)
                     if isinstance(_a, torch.Tensor):
                         _ex[f'mir.{_i}.{_an}'] = _a.detach().clone()
-                    elif _a is not None:
+                    else:
+                        # M45: None is STATE (document boundary reset) — a
+                        # snapshot that silently drops it cannot restore it,
+                        # and the next run inherits the previous run's cache
+                        # (probe-measured: write_mod activated on stale hp).
                         _ex[f'mir.{_i}.{_an}'] = _a
             _tr = getattr(_l, '_traj_state', None)
             if isinstance(_tr, torch.Tensor):
