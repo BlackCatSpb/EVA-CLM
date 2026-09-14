@@ -534,26 +534,10 @@ def train(cfg=None, resume_path=None):
             ce_s = ce_loss * gscale
             aux_s = {k: (v * gscale if isinstance(v, torch.Tensor) else v)
                      for k, v in aux_dict.items()}
-            # B6 (GPT-#34): per-aux gradient geometry vs CE — who drives the model,
-            # who fights it, who heats air (printed as name:ratio/cos where ratio
-            # = ||g_aux||/||g_CE||). Costs a full backward pass per term, so it
-            # runs only at log frequency and never touches .grad or the graph.
-            if step and step % cfg.log_interval == 0 and not getattr(cfg, 'gradient_checkpointing', False):
-                try:
-                    for _m in model.modules():
-                        if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
-                            _m._ggeo_freeze = True
-                    try:
-                        _gg = balancer.grad_geometry(ce_s, aux_s, model.parameters())
-                    finally:
-                        for _m in model.modules():
-                            if hasattr(_m, '_step_count') or hasattr(_m, '_alpha_pending'):
-                                _m._ggeo_freeze = False
-                    if _gg:
-                        print('  [ggeo] ' + '  '.join(
-                            f'{k}:{r:.2f}/{c:+.2f}' for k, (r, c) in _gg.items()), flush=True)
-                except Exception as _ge:
-                    print(f'  [ggeo] unavailable: {_ge}', flush=True)
+            # M48: ggeo removed from the loop (operator directive) — pure
+            # telemetry, 8 retained backward passes, M47 incident trigger.
+            # The capability stays in core.adaptation (LossBalancer.
+            # grad_geometry) for offline diagnostics.
             # M22: backward freeze-wrap removed (recompute must replay the
             # forward path-identically); CheckpointError self-heals.
             try:
