@@ -277,21 +277,27 @@ class EVAStack(nn.Module):
         c_ema = (1.0 / math.sqrt(self.cfg.D)) * tau_mid
         n_layers = len(self.layers)
         
-        # ─── Adaptive gate biases from mirror stats (per-layer) ───
+        # ─── Per-layer mirror stats: READ-ONLY, computed in BOTH regimes ───
+        # M44 (val autopsy: eval CE 13.4 vs train 5.4): these stats feed the
+        # per-layer branch modulators below. Computing them only under
+        # `adaptive` pinned every modulator to a constant on eval — the same
+        # class of regime-split M33 removed from the caches (validation saw a
+        # different model). The mirrors' buffers carry the training values, so
+        # reading them at eval IS the streaming-correct parity; only the
+        # CONTROL WRITES (expl EMA, b_i/b_d lerp) stay training-only.
+        with torch.no_grad():
+            _layer_stats_cache = {}
+            for i, layer in enumerate(self.layers):
+                _layer_stats_cache[i] = AdaptiveController.layer_stats(layer,
+                    expl_thresh=self.cfg.exploration_threshold,
+                    diff_thresh=self.cfg.differentiation_threshold)
+            _expl_raw = sum(e for e, _ in _layer_stats_cache.values()) / n_layers
+            diff = sum(d for _, d in _layer_stats_cache.values()) / n_layers
         if adaptive:
             with torch.no_grad():
-                # Cache per-layer stats to avoid double computation
-                _layer_stats_cache = {}
-                for i, layer in enumerate(self.layers):
-                    _layer_stats_cache[i] = AdaptiveController.layer_stats(layer,
-                        expl_thresh=self.cfg.exploration_threshold,
-                        diff_thresh=self.cfg.differentiation_threshold)
-
-                expl_raw = sum(e for e, _ in _layer_stats_cache.values()) / n_layers
-                diff = sum(d for _, d in _layer_stats_cache.values()) / n_layers
-                self._expl_ema.mul_(0.998).add_(expl_raw * (1.0 - 0.998))
+                self._expl_ema.mul_(0.998).add_(_expl_raw * (1.0 - 0.998))
                 global_expl = self._expl_ema.clamp(0.0, 1.0).item()
-                
+
                 self._pred_weight = (pred_weight if pred_weight is not None
                     else AdaptiveController.pred_weight(self.layers))
                     # λ-tied defaults (λ⁻⁶..λ⁻²) — audit M7: a local 0.05/0.3
@@ -417,24 +423,19 @@ class EVAStack(nn.Module):
         if self.bridge is not None:
             self.bridge.start_forward()
         for i, (layer, s) in enumerate(zip(self.layers, state)):
-            if adaptive:
-                l_expl, l_diff = _layer_stats_cache[i]
-                mem2v_scale = AdaptiveController.layer_w_mem2v_scale(layer,
-                    min_val=self.cfg.w_mem2v_scale_min, max_val=self.cfg.w_mem2v_scale_max,
-                    diff=l_diff)
-                nscale = AdaptiveController.layer_noise_scale(layer,
-                    min_val=self.cfg.noise_scale_min, max_val=self.cfg.noise_scale_max,
-                    diff=l_diff)
-                tanh_bias_mod = AdaptiveController.tanh_bias_modulation(layer, expl=l_expl)
-                spectral_mod = AdaptiveController.spectral_modulation(layer, diff=l_diff)
-                pred_scale_mod = AdaptiveController.pred_scale_mod(layer)
-            else:
-                l_expl = l_diff = 0.5
-                mem2v_scale = 1.0
-                nscale = 0.0
-                tanh_bias_mod = 1.0
-                spectral_mod = 1.0
-                pred_scale_mod = None
+            # M44: same modulator source in BOTH regimes (see the stats note
+            # above). The noise term is applied by the block only in training,
+            # so evaluating nscale at eval is inert — value parity preserved.
+            l_expl, l_diff = _layer_stats_cache[i]
+            mem2v_scale = AdaptiveController.layer_w_mem2v_scale(layer,
+                min_val=self.cfg.w_mem2v_scale_min, max_val=self.cfg.w_mem2v_scale_max,
+                diff=l_diff)
+            nscale = AdaptiveController.layer_noise_scale(layer,
+                min_val=self.cfg.noise_scale_min, max_val=self.cfg.noise_scale_max,
+                diff=l_diff)
+            tanh_bias_mod = AdaptiveController.tanh_bias_modulation(layer, expl=l_expl)
+            spectral_mod = AdaptiveController.spectral_modulation(layer, diff=l_diff)
+            pred_scale_mod = AdaptiveController.pred_scale_mod(layer)
             
             gs_i = global_state[i:i+1].detach().clone()  # (1, 1, D), no grad through global_state (EMA-only)
             # Intent Bridge: derive this layer's intent from its INPUT hidden state
