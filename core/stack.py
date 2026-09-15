@@ -1054,6 +1054,12 @@ class EVAStack(nn.Module):
                     if isinstance(v, torch.Tensor) and v.grad_fn is not None:
                         setattr(mir, an, v.detach())
                         n += 1
+        _head = getattr(self, 'lm_head', None)
+        if _head is not None:
+            v = getattr(_head, '_last_u', None)
+            if isinstance(v, torch.Tensor) and v.grad_fn is not None:
+                _head._last_u = v.detach()      # M52a: the wall's input pin
+                n += 1
         return n
 
     def flush_control_pending(self) -> None:

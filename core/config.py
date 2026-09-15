@@ -59,6 +59,10 @@ class WideBindConfig:
 
     head_mode: str = "sigmoid_coded"
     head_normalize: bool = True
+    head_u_wall: float = 1e-3     # M52a: soft wall on the head's bit log-odds
+                                  # (keeps the CE gradient alive at |u|>u0);
+                                  # 0 disables
+    head_u_wall_u0: float = 6.0   # M52a: the wall's threshold
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)

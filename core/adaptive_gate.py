@@ -31,6 +31,8 @@ def hybrid_gate(
     log: bool = False,
     normalize: bool = False,
     eps: float = 1e-7,
+    emph_logits: torch.Tensor | None = None,
+    gain: torch.Tensor | float = 1.0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Unified sigmoid-softmax hybrid gate.
 
@@ -41,19 +43,27 @@ def hybrid_gate(
         log: if True, return (log_odds, log_base) instead of gate
         normalize: if True, normalize gate to sum to 1 (for attention)
         eps: clamp min/max for log space
+        emph_logits: M52a — logits for the softmax emphasis when it must differ
+            from the sigmoid's input (the head feeds the prior-free z/T here, so
+            bit_bias cannot reinforce itself through the emphasis).
+        gain: M52a — learnable multiplier on the centred emphasis (init 1 =
+            the old behavior exactly).
 
     Returns:
         gate: (*, n_features) — combined gate values (if log=False)
         or (u, base) — log-odds and log-base (if log=True)
     """
     tau_t = torch.as_tensor(tau, device=logits.device, dtype=logits.dtype)
-    tau_t = tau_t.clamp(min=0.1, max=10.0)
+    # M52a: straight-through clamp — forward identical, backward identity, so a
+    # tau pinned at a rail keeps a nonzero gradient (the plain clamp froze
+    # log_tau: d tau/d log_tau = 0 outside [0.1, 10]).
+    tau_t = tau_t + (tau_t.clamp(min=0.1, max=10.0) - tau_t).detach()
 
     # 1. Independent activation (sigmoid)
     independent = torch.sigmoid(logits)
 
     # 2. Relative emphasis (softmax with temperature)
-    relative = F.softmax(logits / tau_t, dim=dim)
+    relative = F.softmax((logits if emph_logits is None else emph_logits) / tau_t, dim=dim)
 
     # 3. Combined: sigmoid gates participation, softmax adds relative boost
     gate = independent * (1.0 + relative)
@@ -74,7 +84,7 @@ def hybrid_gate(
         # (+9.1%) and breaking the factorized branch's prior fixed point
         # (grad→bit_bias = −8.4 per 512 tokens). Subtract the known constant —
         # the competitive term is preserved exactly, the bias is not.
-        u = logits + torch.log1p(relative) - math.log1p(1.0 / logits.shape[-1])
+        u = logits + gain * (torch.log1p(relative) - math.log1p(1.0 / logits.shape[-1]))
         base = F.logsigmoid(-u).sum(dim=dim)
         return u, base
 
@@ -112,10 +122,13 @@ class AdaptiveGate(nn.Module):
     def forward(self, logits: torch.Tensor, tau_prior: torch.Tensor | None = None) -> torch.Tensor:
         _DEV_CLAMP = DEV_CLAMP  # unified deviation multiplier clamp (0.5..2.0)
         if tau_prior is not None:
-            tau = tau_prior.clamp(min=0.1, max=10.0) * torch.exp(self.log_tau).clamp(min=1.0/_DEV_CLAMP, max=_DEV_CLAMP)
-            tau = tau.clamp(min=0.1, max=10.0)
+            _lt = torch.exp(self.log_tau)
+            _lt = _lt + (_lt.clamp(min=1.0/_DEV_CLAMP, max=_DEV_CLAMP) - _lt).detach()
+            tau = tau_prior.clamp(min=0.1, max=10.0) * _lt
+            tau = tau + (tau.clamp(min=0.1, max=10.0) - tau).detach()
         else:
-            tau = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
+            tau = torch.exp(self.log_tau)
+            tau = tau + (tau.clamp(min=0.1, max=10.0) - tau).detach()
         gate = hybrid_gate(logits, tau)
 
         # Update diagnostics

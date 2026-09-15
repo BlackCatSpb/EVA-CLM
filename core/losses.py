@@ -492,6 +492,18 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         aux_dict['w_m2v'] = w_m2v_loss
     if intent_tau_loss != 0:
         aux_dict['intent_tau'] = intent_tau_loss
+    # M52a (P1): soft wall on the head's bit log-odds (the 2970 post-mortem:
+    # the sigma CE-gradient is ~1e-13 at |u|>17). The wall's gradient is LINEAR
+    # in the excess (2w(|u|-u0)) and stays alive at any u — the only fast escape
+    # (ST clamps rescue at 1e-7..1e-4/step, i.e. ~1e6-1e11 steps).
+    _hw = float(getattr(stack.cfg, 'head_u_wall', 0.0))
+    if _hw > 0.0:
+        _u_last = getattr(stack.lm_head, '_last_u', None)
+        if _u_last is not None:
+            _u0 = float(getattr(stack.cfg, 'head_u_wall_u0', 6.0))
+            _wall = _hw * F.relu(_u_last.abs() - _u0).pow(2).mean()
+            if float(_wall.detach()) != 0.0:
+                aux_dict['head_wall'] = _wall
     if branch_loss != 0:
         aux_dict['branch'] = branch_loss
     if div_loss_raw != 0:

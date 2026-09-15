@@ -281,10 +281,14 @@ class SigmoidCodedHead(nn.Module):
         _p = prop.clamp(1e-7, 1 - 1e-7)
         self.bit_bias: nn.Parameter = nn.Parameter(torch.log(_p / (1 - _p)))
         self.log_temp: nn.Parameter = nn.Parameter(torch.zeros(self.K))
+        # M52a: learnable gain on the softmax emphasis (init 1 = the old
+        # behavior bit-for-bit; the model sizes the competition itself).
+        self.emphasis_gain: nn.Parameter = nn.Parameter(torch.ones(1))
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
 
-    def _gates(self, h: torch.Tensor, temp_factor: Optional[torch.Tensor] = None, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _gates(self, h: torch.Tensor, temp_factor: Optional[torch.Tensor] = None,
+               bus_bias: Optional[torch.Tensor] = None, return_data: bool = False):
         if h.dim() == 2:
             h = h.unsqueeze(1)
             squeeze: bool = True
@@ -293,23 +297,38 @@ class SigmoidCodedHead(nn.Module):
         B, L, D = h.shape
         h_g: torch.Tensor = h.reshape(B, L, self.K, -1)
         z: torch.Tensor = (h_g * self.readout.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
-        T: torch.Tensor = torch.exp(self.log_temp).clamp(0.1, 10.0)
+        # M52a: ST clamp — forward identical, backward identity (a tau at a
+        # rail keeps a nonzero gradient; the old clamp froze log_temp).
+        T: torch.Tensor = torch.exp(self.log_temp)
+        T = T + (T.clamp(0.1, 10.0) - T).detach()
         if temp_factor is not None:
             T = T * temp_factor
-        zt: torch.Tensor = z / T + self.bit_bias
+        z_data: torch.Tensor = z / T          # M52a: the emphasis source
+        zt: torch.Tensor = z_data + self.bit_bias
         if bus_bias is not None:
             # Phase-2 stencil: cross-layer gist biases the projector readout.
             # bus_bias shape matches zt's (B,L,K) or (N,1,K) -> broadcasts cleanly.
             zt = zt + bus_bias
         if squeeze:
             zt = zt.squeeze(1)
+            z_data = z_data.squeeze(1)
+        if return_data:
+            return zt, z_data
         return zt
 
-    def _su(self, zt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _su(self, zt: torch.Tensor, z_data: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
         # Single per-bit temperature: T already scaled z in _gates, so the
         # emphasis softmax reads the SAME logits (passing tau=exp(log_temp)
         # here again divided twice: z/T/tau = z/T^2 — audit M1).
-        return hybrid_gate(zt, 1.0, log=True)
+        # M52a (P3): the emphasis reads the DATA part (z/T) only — the old form
+        # used zt, so the static prior reinforced itself through the softmax
+        # (measured corr(bit_bias, emphasis bonus) = +0.90).
+        # M52a (P2): the gain (init 1) lets the model size the competition.
+        u, base = hybrid_gate(zt, 1.0, log=True, emph_logits=z_data,
+                              gain=self.emphasis_gain)
+        if self.training:
+            self._last_u = u        # M52a (P1): the saturation wall reads this
+        return u, base
 
     def forward(self, h: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if h.dim() == 2:
@@ -317,7 +336,8 @@ class SigmoidCodedHead(nn.Module):
             squeeze: bool = True
         else:
             squeeze = False
-        u, base = self._su(self._gates(h, bus_bias=bus_bias))
+        zt, z_data = self._gates(h, bus_bias=bus_bias, return_data=True)
+        u, base = self._su(zt, z_data)
         logits: torch.Tensor = u @ self.codes.T + base[..., None] + self.token_bias
         if self.normalize:
             logits = logits - logits.logsumexp(dim=-1, keepdim=True)
@@ -339,8 +359,8 @@ class SigmoidCodedHead(nn.Module):
         if self.normalize:
             logits: torch.Tensor = self.forward(h2, bus_bias=bus_bias)   # (N,V), 2D-in -> 2D-out
             return torch.gather(logits, 1, t[:, None]).squeeze(1)
-        zt: torch.Tensor = self._gates(h2, bus_bias=bus_bias)             # (N,K)
-        u, _base = self._su(zt)                                           # (N,K) log-odds
+        zt, z_data = self._gates(h2, bus_bias=bus_bias, return_data=True)  # (N,K)
+        u, _base = self._su(zt, z_data)                                    # (N,K) log-odds
         c: torch.Tensor = self.codes[t].to(u.dtype)
         lp: torch.Tensor = (c * F.logsigmoid(u) + (1 - c) * F.logsigmoid(-u)).sum(-1)
         return lp + self.token_bias[t]
