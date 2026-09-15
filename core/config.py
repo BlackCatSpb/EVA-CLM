@@ -392,6 +392,8 @@ class WideBindConfig:
     max_steps: int = 500000
     log_interval: int = 100
     eval_interval: int = 1000
+    stream_cap: float = 1e3        # M50: per-layer residual-stream magnitude
+                                   # cap (scale-invariant fuse); 0 disables
     eval_early_until: int = 3000   # M49: early measurement evals (no control
                                    # updates) until this step; 0 disables
     eval_early_every: int = 250    # M49: their cadence

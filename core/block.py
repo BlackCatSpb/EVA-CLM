@@ -409,7 +409,10 @@ class EVABlock(nn.Module):
             return False
 
         def _ln(x):
-            return self.pre_ln_w * x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-7)
+            # M50: overflow-safe (amax-rescale) — x^2 overflows fp32 at 1e19
+            _m = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6)
+            _x = x / _m
+            return self.pre_ln_w * _x * torch.rsqrt(_x.pow(2).mean(dim=-1, keepdim=True) + 1e-7)
 
         device = h.device
         K = self.K

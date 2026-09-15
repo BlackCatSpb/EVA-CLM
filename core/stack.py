@@ -21,6 +21,17 @@ from .lr_scheduler import MirrorLRScheduler
 from .losses import compute_losses as _compute_losses_fn
 from .logit_cache import LogitCacheAttention
 
+def _stream_cap(x, cap):
+    """M50: scale-invariant residual-stream magnitude cap (the 2970 explosion
+    fuse). Values above `cap` are rescaled to it with the direction preserved;
+    at the cap the Jacobian is O(1) — unlike the 1/|h| vanishing that made a
+    1e16 stream unrecoverable. cap <= 0 disables."""
+    if cap <= 0.0:
+        return x
+    m = x.abs().amax(dim=-1, keepdim=True)
+    return x * (cap / m.clamp_min(cap))
+
+
 class EVAStack(nn.Module):
     """Stack of EVABlock layers with embedding and lm_head."""
     
@@ -373,6 +384,18 @@ class EVAStack(nn.Module):
                 self._gs_velocity = torch.zeros_like(global_state)
             else:
                 self._gs_velocity = self._gs_velocity.to(global_state.device)
+        # M50 (the 2970 explosion post-mortem): the residual stream can
+        # diverge (measured: h~1e20 at the layer outputs, final_norm's
+        # mean(h^2) overflows to inf -> rsqrt(inf)=0 -> model output EXACTLY
+        # zero -> the head sees nothing -> CE gradient to the trunk is
+        # exactly zero -> deadlock while the aux losses (bridge/bank) keep
+        # inflating the branches: bridge._inj_alpha/beta were the top Adam
+        # movers of the dead checkpoint). The fuse below caps the stream
+        # magnitude per layer, scale-invariantly (direction preserved),
+        # so the head always sees a finite signal and the CE gradient can
+        # always pull back. C=1e3: healthy streams measure 30-70.
+        _STREAM_CAP = float(getattr(self.cfg, 'stream_cap', 1e3))
+
         new_state = []
         pred_errs = []  # per-layer pred_error_norm means for the maturation controller
         # ─── Cross-layer bus scratch (intent bridge) ───
@@ -578,6 +601,7 @@ class EVAStack(nn.Module):
                                  context_mem=context_mem, allow_write=allow_write,
                                   tau_s=_vsa_tau_i, step=step, intent=intent_i, salience=_sal,
                                    maturity=(mat_gate[i] if mat_gate is not None else None))
+            h = _stream_cap(h, _STREAM_CAP)   # M50: blow-up fuse (see above)
             # ─── Unified Concept Layer (global, after first layer provides hp) ───
             # Called once after first layer to read/write concepts from expert K-space.
             # Injects concept-augmented signal into h for all subsequent layers.
@@ -672,7 +696,12 @@ class EVAStack(nn.Module):
         if self.maturation is not None and step is not None and len(pred_errs) == n_layers:
             self.maturation.update(step, torch.stack(pred_errs))
         
-        h = self.final_norm_w * h * torch.rsqrt(h.pow(2).mean(dim=-1, keepdim=True) + 1e-7)
+        # M50: overflow-safe final norm — the old form's mean(h^2) overflows
+        # to inf for h>1e19 and rsqrt(inf)=0 silently zeroed the whole model
+        # output (the deadlock's trigger). amax-rescaling is exact and cheap.
+        _fm = h.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6)
+        _hs = h / _fm
+        h = self.final_norm_w * _hs * torch.rsqrt(_hs.pow(2).mean(dim=-1, keepdim=True) + 1e-7)
 
         # ─── Explicit Reasoning ───
         if self.explicit_reasoning:
