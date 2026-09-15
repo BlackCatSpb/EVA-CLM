@@ -783,7 +783,12 @@ class EVAStack(nn.Module):
             _nov = None
             if pred_errs:
                 _nov = float(torch.stack(pred_errs).mean())
-            h = self.logit_cache.augment(h, novelty=_nov)
+            # M56: R1 — the previous step's logits let the cache run its
+            # scheduled sampling (5% inference-mode) during training. Eval keeps
+            # the h-mode (eval-isolation); the first step has no stale logits.
+            _lc_logits = getattr(self, '_last_logits', None) if self.training else None
+            h = self.logit_cache.augment(h, novelty=_nov, logits=_lc_logits,
+                                         training=True)
 
         return h, new_state, global_state, (reasoning_buffer, reasoning_count)
 
@@ -1014,6 +1019,10 @@ class EVAStack(nn.Module):
         # Store salience of THIS step's output for use as the next step's
         # intent signal (1-step delay). Keeps the loop stable and geometry clean.
         self._last_salience = self.compute_salience(logits).detach()
+        # M56: the same 1-step-delayed logits feed the logit cache's R1
+        # scheduled sampling (the compressed-logits inference mode). Detached:
+        # no graph is pinned; ~117MB held for exactly one step.
+        self._last_logits = logits.detach()
 
     def process_with_cache(self, h: torch.Tensor, logits: torch.Tensor,
                            use_cache: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:

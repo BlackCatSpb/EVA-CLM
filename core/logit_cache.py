@@ -549,7 +549,9 @@ class LogitCacheAttention(nn.Module):
 
         return h_augmented, logits
 
-    def augment(self, h: torch.Tensor, novelty: Optional[float] = None) -> torch.Tensor:
+    def augment(self, h: torch.Tensor, novelty: Optional[float] = None,
+                logits: Optional[torch.Tensor] = None,
+                training: bool = True) -> torch.Tensor:
         """Training/inference-loop integration (decision #3).
 
         Stores the current hidden state (the live newest entry keeps a
@@ -557,7 +559,14 @@ class LogitCacheAttention(nn.Module):
         the cache over it. cache_gate is zero-init ⇒ output == h until CE
         learns to consult the cache — identity at init, checkpoint/rollback
         safe.
+
+        M56: `logits` (the PREVIOUS step's, one-step-stale) enables the R1
+        scheduled sampling — with probability `scheduled_sampling_ratio` the
+        cache stores/attends the COMPRESSED logits (the inference mode) so the
+        model is trained against the representation it will meet at deployment.
+        logits=None (the first step, or a caller that never observes the head)
+        falls back to the h-mode — the historical behavior.
         """
-        out = self.forward(h, logits=None, training=True, use_cache=True,
+        out = self.forward(h, logits=logits, training=training, use_cache=True,
                            novelty=novelty)[0]
         return out if torch.isfinite(out).all() else h
