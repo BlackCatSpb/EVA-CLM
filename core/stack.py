@@ -1093,6 +1093,11 @@ class EVAStack(nn.Module):
         lac = getattr(h, '_last_lacuna', None)
         if lac is not None:
             out['lacuna'] = float(lac)
+        for _k, _a in (('lacuna_rel', '_last_lacuna_rel'),
+                       ('lacuna_gate', '_last_lacuna_gate')):
+            _v = getattr(h, _a, None)
+            if _v is not None:
+                out[_k] = float(_v)
         sat = getattr(h, '_last_sat', None)
         if sat is not None:
             out['sat'] = float(sat)

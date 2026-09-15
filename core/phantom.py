@@ -66,9 +66,8 @@ class PhantomBank(nn.Module):
         if n_sel == 0:
             return 0
         E = E[sel]
-        if E.shape[0] > self.max_observe:                      # a random budget
-            pick = torch.randperm(E.shape[0], device=E.device)[:self.max_observe]
-            E = E[pick]
+        if E.shape[0] > self.max_observe:                      # a deterministic budget
+            E = E[:self.max_observe]                           # (no global-RNG draw)
         En = F.normalize(E, dim=-1)
         with torch.no_grad():
             Dn = F.normalize(self.directions, dim=-1)

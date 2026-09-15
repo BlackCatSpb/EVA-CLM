@@ -298,8 +298,16 @@ class SigmoidCodedHead(nn.Module):
             self.phantom_basis: nn.Parameter = nn.Parameter(
                 _orth_rows(torch.randn(self.Kp, D, generator=_pgen)))
             self.phantom_mix: nn.Parameter = nn.Parameter(torch.zeros(self.K, self.Kp))
-            self.lacuna_w: nn.Parameter = nn.Parameter(torch.tensor(10.0))
-            self.lacuna_b: nn.Parameter = nn.Parameter(torch.tensor(-1.0))
+            self.lacuna_w: nn.Parameter = nn.Parameter(torch.tensor(30.0))
+            self.lacuna_b: nn.Parameter = nn.Parameter(torch.tensor(-3.0))
+            # M55b: the lacuna self-calibration. The ABSOLUTE ell is ~0.97 for
+            # any realistic state (the readout spans K of D dims, so the
+            # orthogonal remainder always dominates); the gate must read the
+            # RELATIVE novelty ell/EMA(ell). ell_ema is non-persistent (it
+            # re-calibrates within ~1000 steps after a resume).
+            self.lacuna_ema: float = float(getattr(cfg, 'head_lacuna_ema', 0.99))
+            self.register_buffer('ell_ema', torch.zeros(1), persistent=False)
+            self._noise_gen = None
             self.log_eta: nn.Parameter = nn.Parameter(torch.tensor(
                 math.log(max(float(getattr(cfg, 'head_phantom_noise', 0.05)), 1e-4))))
             # M54: the phantom-concept bank (the EVA-Ai lacuna lifecycle at
@@ -439,23 +447,47 @@ class SigmoidCodedHead(nn.Module):
             return u
         _hn = h.reshape(e_l.shape).norm(dim=-1, keepdim=True) + 1e-6
         ell = e_l.norm(dim=-1, keepdim=True) / _hn
+        # M55b: the RELATIVE novelty (self-calibrating): ~1 for the running
+        # level, > 1 for a spike. The gate and the bank read this, not ell.
+        with torch.no_grad():
+            if float(self.ell_ema) <= 0.0:
+                self.ell_ema.fill_(float(ell.detach().mean()))
+            else:
+                self.ell_ema.mul_(self.lacuna_ema).add_(
+                    ell.detach().mean(), alpha=1.0 - self.lacuna_ema)
+        ell_rel = (ell / (self.ell_ema + 1e-6)).clamp(0.0, 5.0)
         if self.training:
             _eta = torch.exp(self.log_eta).clamp(0.0, 0.2)
-            e_in = e_l + _eta * torch.randn_like(e_l)
+            e_in = e_l + _eta * self._noise_like(e_l)
         else:
             e_in = e_l
         p = torch.tanh(e_in @ self.phantom_basis.T)          # (...,Kp)
-        p = p * torch.sigmoid(self.lacuna_w * ell + self.lacuna_b)
+        g = torch.sigmoid(self.lacuna_w * (ell_rel - 1.0) + self.lacuna_b)
+        p = p * g
         if self.training:
             self._last_lacuna = ell.detach().mean()
+            self._last_lacuna_rel = ell_rel.detach().mean()
+            self._last_lacuna_gate = g.detach().mean()
             self._last_p = p                                  # live: the L1 aux
             _pb = getattr(self, 'phantom_bank', None)
             if _pb is not None and getattr(self, '_pb_active', True):
                 _pb.decay()
                 if int(self._pb_step.item()) % self.phantom_every == 0:
-                    _pb.observe(e_l, ell, self.phantom_thr)
+                    _pb.observe(e_l, ell_rel, self.phantom_thr)
                 self._pb_step += 1
         return u + p @ self.phantom_mix.T
+
+    def _noise_like(self, x: torch.Tensor) -> torch.Tensor:
+        """M55b: the exploration noise from a DEDICATED generator. The head is
+        called INSIDE the stack's forward (_last_conf), so a global-RNG draw here
+        shifted the scheduled sampling and the concept births of the same step —
+        two runs with identical weights then diverged from step 0."""
+        g = self._noise_gen
+        if g is None or g.device != x.device:
+            g = torch.Generator(device=x.device)
+            g.manual_seed(1234)
+            self._noise_gen = g
+        return torch.randn(x.shape, generator=g, device=x.device, dtype=x.dtype)
 
     def forward(self, h: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if h.dim() == 2:

@@ -114,5 +114,7 @@ def test_phantom_bank_waits_for_the_warmup():
     h = m.embed_tokens(x)
     m(h, None, step=0, tokens=x)
     assert int(m.lm_head.phantom_bank._obs) == 0, 'the bank observed before the warmup'
+    with torch.no_grad():
+        m.lm_head.ell_ema.mul_(0.5)      # M55b: the bank is selective on ell/EMA
     m(h, None, step=10, tokens=x)
     assert int(m.lm_head.phantom_bank._obs) >= 1, 'the bank did not observe after the warmup'
