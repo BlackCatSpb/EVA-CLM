@@ -550,6 +550,25 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
                                   'mean': float(d.mean().item()), 'std': float(d.std().item())})
             print(f'  {name:24s}: shape={list(d.shape)} mean={d.mean().item():.6f} '
                   f'std={d.std().item():.6f}')
+        # M53b/M54: the 2970-post-mortem channels (gate wall, lacuna/phantom, SRL).
+        _pb = getattr(lm, 'phantom_bank', None)
+        if _pb is not None:
+            _f = _pb.filled
+            _n = int(_f.sum())
+            _cf = float(_pb.confidence[_f].mean()) if _n else 0.0
+            print(f'  [M54] phantom bank: slots={_pb.n_slots} alive={_n} '
+                  f'confirmed={int((_f & (_pb.confidence >= _pb.confirm)).sum())} '
+                  f'births={int(_pb._births)} obs={int(_pb._obs)} mean_conf={_cf:.3f}')
+        if hasattr(lm, 'emphasis_gain'):
+            print(f'  [M52a] emphasis_gain={float(lm.emphasis_gain):.4f}  '
+                  f'head_wall w={getattr(cfg, "head_u_wall", 0.0)} u0={getattr(cfg, "head_u_wall_u0", 6.0)}')
+        if hasattr(lm, 'phantom_mix'):
+            print(f'  [M52b] phantom: Kp={lm.Kp} mix_norm={float(lm.phantom_mix.norm()):.4f} '
+                  f'eta={float(torch.exp(lm.log_eta).clamp(0.0, 0.2)):.4f} '
+                  f'lacuna_w={float(lm.lacuna_w):.2f} lacuna_b={float(lm.lacuna_b):.2f}')
+        if hasattr(lm, 'srl_on'):
+            print(f'  [M53] SRL: on={lm.srl_on} steps={lm.srl_steps} '
+                  f'shortlist={lm.srl_shortlist} expl_thr={lm.srl_expl_thr}')
 
     params = list(model.parameters())
     numel = 0
@@ -867,6 +886,11 @@ def run_live(model, cfg, batch=1, seq=128, gradinfo=True):
     print(f'INPUT/OUTPUT:  in_norm={h.norm(dim=-1).mean().item():.3f}  '
           f'out_norm={h_out.norm(dim=-1).mean().item():.3f}  '
           f'out_std={h_out.std().item():.4f}')
+    _tel = model.head_telemetry() if hasattr(model, 'head_telemetry') else {}
+    if _tel:
+        _ts = ' '.join((f'{k}={v:.4f}' if isinstance(v, float) else f'{k}={v}')
+                       for k, v in _tel.items())
+        print(f'  [M53b] head telemetry: {_ts}')
     tgt = torch.randint(1, cfg.vocab, (batch, seq), device=device)
     ls, aux = model.compute_losses(h_out[:, :-1], tgt[:, 1:])
     print(f'CE(random)={ls.item():.3f}  pred={aux["pred"]:.3f}  '
