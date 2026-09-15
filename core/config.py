@@ -68,6 +68,12 @@ class WideBindConfig:
     head_phantom_noise: float = 0.05  # M52b: exploration-noise init (eta,
                                       # learnable; EVA-Ai used 0.05)
     head_phantom_l1: float = 1e-4  # M52b: light sparsity on the phantom firing
+    head_srl: bool = False        # M53: run the State Resolution Loop in the
+                                  # forward (off = bit-identical to M52b)
+    head_srl_steps: int = 3       # M53: refinement passes (T)
+    head_srl_shortlist: int = 64  # M53: candidate codes per pass
+    head_srl_expl_thr: float = 0.7  # M53: explanation cost (nats/bit) above
+                                   # which a state is classified a lacuna
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)

@@ -301,6 +301,11 @@ class SigmoidCodedHead(nn.Module):
             self.lacuna_b: nn.Parameter = nn.Parameter(torch.tensor(-1.0))
             self.log_eta: nn.Parameter = nn.Parameter(torch.tensor(
                 math.log(max(float(getattr(cfg, 'head_phantom_noise', 0.05)), 1e-4))))
+        # M53: the State Resolution Loop knobs (off by default).
+        self.srl_on: bool = bool(getattr(cfg, 'head_srl', False))
+        self.srl_steps: int = int(getattr(cfg, 'head_srl_steps', 3))
+        self.srl_shortlist: int = int(getattr(cfg, 'head_srl_shortlist', 64))
+        self.srl_expl_thr: float = float(getattr(cfg, 'head_srl_expl_thr', 0.7))
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
 
@@ -354,6 +359,55 @@ class SigmoidCodedHead(nn.Module):
             self._last_u = u        # M52a (P1): the saturation wall reads this
         return u, base
 
+    def srl(self, u0: torch.Tensor, steps: int = None, tau0: float = 1.0,
+            gamma: float = 0.6, alpha: float = 0.7, shortlist: int = None):
+        """M53: State Resolution Loop — annealed EM over the code dictionary.
+
+        E: p(v|u) ∝ exp( u·(2C_v−1)/τ_t )   the softmax commitment
+        M: ĉ = Σ p·C_v                       the expected code
+        refine: u ← u + α(logit(ĉ) − u)      known + the sigmoid's start
+        τ_t = τ0·γ^t                         the resolution sharpens
+
+        Classification (verified on the prototype: a clean code -> conf 1.0,
+        expl 0.03 nats/bit; a mix of two codes -> conf 0.50; random noise ->
+        expl 1.08 nats/bit):
+          concept       : max_p > 0.9 and expl < thr
+          contradiction : max_p <= 0.9 (a split posterior)
+          lacuna        : expl >= thr (the bits must be rewritten to fit)
+
+        The explanation cost = the NLL of the ORIGINAL bits under the found
+        code, per bit — scale-free. The candidate set is a shortlist taken from
+        the first pass (cheap; the refinement never leaves it).
+        """
+        steps = self.srl_steps if steps is None else int(steps)
+        M = min(int(self.srl_shortlist if shortlist is None else shortlist), self.codes.shape[0])
+        if steps <= 0 or M <= 0:
+            z = u0.new_zeros(u0.shape[:-1])
+            return u0, {'conf': z + 1.0, 'ent': z, 'expl': z}
+        shape = u0.shape
+        uf = u0.reshape(-1, shape[-1])
+        C = self.codes.float()
+        Sc = 2.0 * C - 1.0
+        idx = (uf @ Sc.T).topk(M, dim=-1).indices          # (N,M) shortlist
+        Cs = C[idx]                                        # (N,M,K)
+        Ss = Sc[idx]
+        tau = tau0
+        for t in range(steps):
+            p = F.softmax((uf.unsqueeze(1) * Ss).sum(-1) / max(tau, 0.05), dim=-1)
+            chat = (p.unsqueeze(-1) * Cs).sum(1)
+            uf = uf + alpha * (torch.logit(chat.clamp(1e-4, 1 - 1e-4)) - uf)
+            tau = tau * gamma
+        p = F.softmax((uf.unsqueeze(1) * Ss).sum(-1) / max(tau, 0.05), dim=-1)
+        star = p.argmax(-1)
+        cstar = Cs.gather(1, star[:, None, None].expand(-1, 1, C.shape[-1])).squeeze(1)
+        a0 = torch.sigmoid(uf.new_zeros(()) + u0.reshape(-1, shape[-1]))
+        nll = -(cstar * F.logsigmoid(u0.reshape(-1, shape[-1]))
+                + (1 - cstar) * F.logsigmoid(-u0.reshape(-1, shape[-1]))).sum(-1) / C.shape[-1]
+        info = {'conf': p.max(-1).values.reshape(shape[:-1]),
+                'ent': (-(p * (p + 1e-9).log()).sum(-1)).reshape(shape[:-1]),
+                'expl': nll.reshape(shape[:-1])}
+        return uf.reshape(shape), info
+
     def _phantom_mix(self, u: torch.Tensor, e_l: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         """M52b: lacuna -> potential state. The residual (optionally noised by
         the learnable eta — the EVA-Ai exploration) is read by the phantom
@@ -384,6 +438,10 @@ class SigmoidCodedHead(nn.Module):
         zt, z_data, e_l = self._gates(h, bus_bias=bus_bias, return_data=True)
         u, base = self._su(zt, z_data)
         u = self._phantom_mix(u, e_l, h)
+        if self.srl_on:
+            u, _srl_info = self.srl(u)
+            if self.training:
+                self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
         logits: torch.Tensor = u @ self.codes.T + base[..., None] + self.token_bias
         if self.normalize:
             logits = logits - logits.logsumexp(dim=-1, keepdim=True)
@@ -408,6 +466,10 @@ class SigmoidCodedHead(nn.Module):
         zt, z_data, e_l = self._gates(h2, bus_bias=bus_bias, return_data=True)  # (N,K)
         u, _base = self._su(zt, z_data)                                         # (N,K) log-odds
         u = self._phantom_mix(u, e_l, h2)
+        if self.srl_on:
+            u, _srl_info = self.srl(u)
+            if self.training:
+                self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
         c: torch.Tensor = self.codes[t].to(u.dtype)
         lp: torch.Tensor = (c * F.logsigmoid(u) + (1 - c) * F.logsigmoid(-u)).sum(-1)
         return lp + self.token_bias[t]
