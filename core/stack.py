@@ -393,6 +393,13 @@ class EVAStack(nn.Module):
             _st = -1 if step is None else int(step)
             _head._srl_active = bool(_head.srl_on) and _st >= int(getattr(_head, 'srl_after', 0))
             _head._pb_active = _st >= int(getattr(_head, 'phantom_after', 0))
+            _head._temper_active = bool(getattr(_head, 'temper_on', False)) and _st >= int(getattr(_head, 'temper_after', 0))
+        # M55a: the one-step-stale lacuna (the streaming convention) drives the
+        # memory-search broadening; the memory read direction feeds the head's
+        # contradiction tempering.
+        _lac = None
+        if _head is not None and _st >= int(getattr(_head, 'phantom_after', 1045)):
+            _lac = float(getattr(_head, '_last_lacuna', 0.0) or 0.0)
 
         new_state = []
         pred_errs = []  # per-layer pred_error_norm means for the maturation controller
@@ -568,7 +575,11 @@ class EVAStack(nn.Module):
             if (self.memory_bank is not None and tokens is not None
                     and (_mg_l is None or _mg_l[i] >= self.memory_bank._min_write_maturation)):
                 _mb_mat_i = _mg_l[i] if _mg_l is not None else 1.0
-                h = self.memory_bank(h, tokens, step=step, mat_gate=_mb_mat_i)
+                h = self.memory_bank(h, tokens, step=step, mat_gate=_mb_mat_i,
+                                     lacuna=_lac)
+                _mrd = getattr(self.memory_bank, '_last_read', None)
+                if _head is not None and _mrd is not None:
+                    _head._mem_dir = _mrd
 
             if self.cfg.gradient_checkpointing and self.training:
                 from torch.utils.checkpoint import checkpoint as _cp
@@ -1082,6 +1093,12 @@ class EVAStack(nn.Module):
         lac = getattr(h, '_last_lacuna', None)
         if lac is not None:
             out['lacuna'] = float(lac)
+        sat = getattr(h, '_last_sat', None)
+        if sat is not None:
+            out['sat'] = float(sat)
+        cfl = getattr(h, '_last_conflict', None)
+        if cfl is not None:
+            out['conflict'] = float(cfl)
         srl = getattr(h, '_last_srl', None)
         if isinstance(srl, dict):
             for k, v in srl.items():

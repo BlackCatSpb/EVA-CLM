@@ -569,6 +569,10 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
         if hasattr(lm, 'srl_on'):
             print(f'  [M53] SRL: on={lm.srl_on} steps={lm.srl_steps} '
                   f'shortlist={lm.srl_shortlist} expl_thr={lm.srl_expl_thr}')
+        if hasattr(lm, 'temper_on'):
+            print(f'  [M55a] temper: on={lm.temper_on} k={lm.temper_k} '
+                  f'cos_thr={lm.temper_cos} after={lm.temper_after} | '
+                  f'mem_lacuna_k={getattr(cfg, "mem_lacuna_k", 0.0)}')
 
     params = list(model.parameters())
     numel = 0

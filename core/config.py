@@ -79,6 +79,18 @@ class WideBindConfig:
                                   # 11.47 -> 22.39, measured); 0 = from the start
     head_phantom_after: int = 1045  # M53c: the bank observes from this step (at
                                     # init every residual is noise)
+    mem_lacuna_k: float = 0.5     # M55a: memory-search broadening on the lacuna
+                                  # (attn temp *= 1 + k*lacuna; 0 disables)
+    head_temper: bool = True      # M55a: contradiction tempering (head<->memory)
+    head_temper_k: float = 0.5    # M55a: logits /= (1 + k*chi)
+    head_temper_cos: float = 0.3  # M55a: chi = relu(cos_thr - cos(implied, mem))
+    head_temper_after: int = 1045  # M55a: warmup (the memory is noise at init)
+    mem_lacuna_k: float = 0.5     # M55a: memory-search broadening on the lacuna
+                                  # (attn temp *= 1 + k*lacuna; 0 disables)
+    head_temper: bool = True      # M55a: contradiction tempering (head<->memory)
+    head_temper_k: float = 0.5    # M55a: logits /= (1 + k*chi)
+    head_temper_cos: float = 0.3  # M55a: chi = relu(cos_thr - cos(implied, mem))
+    head_temper_after: int = 1045  # M55a: warmup (the memory is noise at init)
     head_phantom_slots: int = 16  # M54: the phantom-concept bank slots
     head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
     head_phantom_thr: float = 0.1  # M54: lacuna above which a position is observed

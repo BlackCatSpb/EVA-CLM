@@ -139,10 +139,11 @@ class L1Buffer(nn.Module):
         self._n_overwrites += 1
         self._write_idx += 1
 
-    def read(self, query: torch.Tensor) -> torch.Tensor:
+    def read(self, query: torch.Tensor, temp_k: float = 1.0) -> torch.Tensor:
         """Read from buffer using hybrid attention.
 
         query: (B, L, D) — current hidden state
+        temp_k: M55a — the lacuna broadening (attn temp multiplier)
         returns: (B, L, D) — memory read output
         """
         B, L, _ = query.shape
@@ -150,7 +151,7 @@ class L1Buffer(nn.Module):
         k = F.normalize(self.proj(self.buf), dim=-1)  # (n_slots, bridge_dim) — normalized!
         v = self.out_proj(self.buf)  # (n_slots, D)
 
-        temp = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
+        temp = torch.exp(self.log_tau).clamp(min=0.1, max=10.0) * float(temp_k)
         age_decay = torch.exp(-0.01 * self.buf_age)  # age-based decay
         attn = _memory_attention(q, k, temp, self.bridge_dim, 
                                  self._softmax_free, age_decay)  # (B, L, n_slots)
@@ -284,10 +285,11 @@ class L2Bank(nn.Module):
         if 0 <= slot < self.n_slots:
             self.slot_consumed.data[slot] = True
 
-    def read(self, query: torch.Tensor) -> torch.Tensor:
+    def read(self, query: torch.Tensor, temp_k: float = 1.0) -> torch.Tensor:
         """Read from bank using hybrid attention.
 
         query: (B, L, D)
+        temp_k: M55a — the lacuna broadening (attn temp multiplier)
         returns: (B, L, D)
         """
         B, L, _ = query.shape
@@ -295,7 +297,7 @@ class L2Bank(nn.Module):
         k = self.keys  # (n_slots, bridge_dim)
         v = self.val_norm(self.vals)  # (n_slots, bridge_dim) — normalized for stability
 
-        temp = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
+        temp = torch.exp(self.log_tau).clamp(min=0.1, max=10.0) * float(temp_k)
         age_decay = torch.exp(-0.01 * self.slot_age)
         attn = _memory_attention(q, k, temp, self.bridge_dim,
                                  self._softmax_free, age_decay)  # (B, L, n_slots)
@@ -353,6 +355,8 @@ class StreamingMemoryBank(nn.Module):
         self.D = D
         self.bridge_dim = bridge_dim
         self.cfg = cfg
+        # M55a: the lacuna-driven search broadening (a big lacuna widens retrieval).
+        self.lacuna_k: float = float(getattr(cfg, 'mem_lacuna_k', 0.5))
         self._min_write_maturation = min_write_maturation
         self._softmax_free = softmax_free
         self.tau_config = tau_config
@@ -395,7 +399,8 @@ class StreamingMemoryBank(nn.Module):
         self._sent_start = 0
 
     def forward(self, h: torch.Tensor, tokens: torch.Tensor,
-                step: int = None, mat_gate: float = None) -> torch.Tensor:
+                step: int = None, mat_gate: float = None,
+                lacuna: float = None) -> torch.Tensor:
         """Read from memory at each position.
 
         h: (B, L, D) — current hidden state (after embedding)
@@ -434,9 +439,10 @@ class StreamingMemoryBank(nn.Module):
 
                         sent_start = t + 1
 
-        # Read from all levels
-        mem_l1 = self.l1.read(h)  # (B, L, D)
-        mem_l2 = self.l2.read(h)  # (B, L, D)
+        # Read from all levels (M55a: a big lacuna widens the search)
+        _tk = 1.0 + self.lacuna_k * max(0.0, float(lacuna or 0.0))
+        mem_l1 = self.l1.read(h, temp_k=_tk)  # (B, L, D)
+        mem_l2 = self.l2.read(h, temp_k=_tk)  # (B, L, D)
 
 
         # U6 (audit M11 made it real): _fusion_tau_alpha is an actual
@@ -462,6 +468,9 @@ class StreamingMemoryBank(nn.Module):
             scale = scale * (0.3 + 0.7 * tau_norm)
 
         # When maturation too low, bypass memory bank entirely (no-op)
+        if self.training:
+            # M55a: the read direction, for the head<->memory conflict channel.
+            self._last_read = fused.detach()
         if not _can_write:
             return h
 

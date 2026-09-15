@@ -319,6 +319,14 @@ class SigmoidCodedHead(nn.Module):
         self.phantom_after: int = int(getattr(cfg, 'head_phantom_after', 1045))
         self._srl_active: bool = self.srl_on
         self._pb_active: bool = True
+        # M55a: the contradiction tempering (head<->memory). The stack stashes
+        # the memory read direction in _mem_dir; the head compares it with the
+        # direction its own bits imply and softens the logits on a conflict.
+        self.temper_on: bool = bool(getattr(cfg, 'head_temper', True))
+        self.temper_k: float = float(getattr(cfg, 'head_temper_k', 0.5))
+        self.temper_cos: float = float(getattr(cfg, 'head_temper_cos', 0.3))
+        self.temper_after: int = int(getattr(cfg, 'head_temper_after', 1045))
+        self._temper_active: bool = self.temper_on
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
 
@@ -370,6 +378,7 @@ class SigmoidCodedHead(nn.Module):
                               gain=self.emphasis_gain)
         if self.training:
             self._last_u = u        # M52a (P1): the saturation wall reads this
+            self._last_sat = (u.detach().abs() > 12.0).float().mean()   # M55a (P6)
         return u, base
 
     def srl(self, u0: torch.Tensor, steps: int = None, tau0: float = 1.0,
@@ -461,7 +470,24 @@ class SigmoidCodedHead(nn.Module):
             u, _srl_info = self.srl(u)
             if self.training:
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
-        logits: torch.Tensor = u @ self.codes.T + base[..., None] + self.token_bias
+        # M55a (P5): `base` is EXACTLY dead in the normalized path (a constant
+        # over the vocab cancels in the logsumexp — verified 0 gradient), so it
+        # is only added when the raw logits are returned. The "unknown" channel
+        # now lives in the lacuna (ell), not in this term.
+        logits: torch.Tensor = (u @ self.codes.T
+                                + (base[..., None] if not self.normalize else 0.0)
+                                + self.token_bias)
+        if self.temper_on and getattr(self, '_temper_active', True):
+            _md = getattr(self, '_mem_dir', None)
+            if (_md is not None and _md.shape[-1] == self.D
+                    and tuple(_md.shape[:-1]) == tuple(u.shape[:-1])):
+                _a = torch.sigmoid(u)
+                _h_impl = (_a.unsqueeze(-1) * self.readout).reshape(*u.shape[:-1], self.D)
+                _cos = F.cosine_similarity(_h_impl, _md.reshape(_h_impl.shape), dim=-1, eps=1e-6)
+                _chi = F.relu(self.temper_cos - _cos).unsqueeze(-1)
+                if self.training:
+                    self._last_conflict = _chi.detach().mean()
+                logits = logits / (1.0 + self.temper_k * _chi)
         if self.normalize:
             logits = logits - logits.logsumexp(dim=-1, keepdim=True)
         if squeeze:
