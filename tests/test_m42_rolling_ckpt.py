@@ -17,21 +17,21 @@ def _cell8():
     return ''.join(nb['cells'][8]['source'])
 
 
-def test_cell10_periodic_rolling_checkpoint_and_flush():
+def test_cell10_periodic_flush_no_rolling_ckpt():
     s = _cell10()
-    assert 'def _envelope(_step):' in s and 'def _atomic_save(env, name):' in s
     assert 'step % 495 == 0' in s
-    assert "_atomic_save(_envelope(step), 'latest.pt')" in s
     assert 'model.reset_cache()' in s and 'torch.cuda.empty_cache()' in s
     assert 'val_history.jsonl' in s
+    # operator: the checkpoint name is best, as before M42 — no latest.pt
+    assert 'latest.pt' not in s
     # the best save must go through the shared builder now (no duplicated dict)
     assert s.count("'code_fp': codebook_fingerprint(model)") == 1, 'two envelope copies?'
 
 
-def test_resume_prefers_latest():
+def test_resume_prefers_best_only():
     s = _cell8()
-    assert "latest.pt" in s and 'resume source: latest.pt' in s
+    assert 'best.pt' in s and 'latest.pt' not in s
     t = open(os.path.join(ROOT, 'scripts', 'train.py'),
              encoding='utf-8', errors='replace').read()
-    assert "'latest.pt'" in t and '_full_env' in t and '_atomic42' in t
-    assert 'step % 495 == 0' in t
+    assert "'best.pt'" in t and "'latest.pt'" not in t
+    assert 'step % 495 == 0' in t   # the flush stays

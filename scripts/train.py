@@ -307,17 +307,17 @@ def train(cfg=None, resume_path=None):
     _m12_rng = None
     _m12_data_rng = None
     if resume_path == 'auto':
-        # Find latest checkpoint: interrupt > step_* > best
+        # Find the checkpoint: interrupt > step_* > best (operator: the name is
+        # best, as before — the M42 rolling latest.pt is gone: the poisoned
+        # 2970 file was auto-resumed once and cost a whole session).
         ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'interrupt_step_*.pt')))
-        if not ckpts:
-            ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'latest.pt')))   # M42 rolling
         if not ckpts:
             ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'step_*.pt')))
         if not ckpts:
             ckpts = sorted(glob.glob(os.path.join(cfg.save_dir, 'best.pt')))
         if ckpts:
             resume_path = ckpts[-1]
-            print(f'Auto-resuming from latest: {resume_path}')
+            print(f'Auto-resuming from: {resume_path}')
     if resume_path and os.path.exists(resume_path):
         print(f'Resuming from {resume_path}')
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
@@ -669,15 +669,16 @@ def train(cfg=None, resume_path=None):
                         print(f'  [report] skipped: {_re}')   # diagnostics, not training.
 
             
-            # M42: rolling latest.pt every 495 steps + flush of non-continuity
-            # caches (logit cache, mirror stream caches, allocator) — bounds
-            # the ggeo-spike fragmentation creep seen on the A100 cycle.
+            # M42 flush (the rolling latest.pt is gone — operator: the
+            # checkpoint name is best, as before). The 495-step flush of
+            # non-continuity caches (logit cache, mirror stream caches,
+            # allocator) stays: it bounds the ggeo-spike fragmentation creep
+            # seen on the A100 cycle.
             if step > 0 and step % 495 == 0:
-                _p42t = _atomic42(_full_env(step), 'latest.pt')
                 model.reset_cache()
                 if device == 'cuda':
                     torch.cuda.empty_cache()
-                print(f'  [save-latest] step={step} -> {_p42t}; caches flushed')
+                print(f'  [flush] step={step}: non-continuity caches flushed')
     except KeyboardInterrupt:
         print('\n[EVA] Ctrl+C detected - keeping last best.pt (no separate checkpoint written)')
         print('[EVA] Exiting gracefully.')
