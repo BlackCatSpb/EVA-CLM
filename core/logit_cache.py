@@ -479,6 +479,9 @@ class LogitCacheAttention(nn.Module):
         self.attention = LogitAttention(D, V, n_heads, codes=codes, sparsity=sparsity)
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
         self.mode = str(mode)
+        # M56c: how many times the R1 inference-mode actually fired (rides in
+        # the checkpoint; the analyzer prints it - the definitive live check).
+        self.register_buffer('_r1_steps', torch.zeros(1, dtype=torch.long))
 
         # Project the CODE-SPACE logit summary to hidden space (inference
         # mode). Was V×D xavier; now K×D — decision #3 (K known only when
@@ -514,6 +517,8 @@ class LogitCacheAttention(nn.Module):
         if training and self.scheduled_sampling_ratio > 0 and logits is not None:
             if torch.rand(1).item() < self.scheduled_sampling_ratio:
                 use_inference_mode = True
+        if use_inference_mode:
+            self._r1_steps += 1            # M56c
 
         # Store in cache
         if training and not use_inference_mode:

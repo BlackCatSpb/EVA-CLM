@@ -566,6 +566,11 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
             print(f'  [M52b] phantom: Kp={lm.Kp} mix_norm={float(lm.phantom_mix.norm()):.4f} '
                   f'eta={float(torch.exp(lm.log_eta).clamp(0.0, 0.2)):.4f} '
                   f'lacuna_w={float(lm.lacuna_w):.2f} lacuna_b={float(lm.lacuna_b):.2f}')
+        _lc = getattr(model, 'logit_cache', None)
+        if _lc is not None:
+            print(f'  [M56] logit cache: R1 steps={int(_lc._r1_steps)} '
+                  f'h-entries={len(_lc.cache._h_cache)} '
+                  f'compressed={len(_lc.cache._logit_cache)}')
         if hasattr(lm, 'srl_on'):
             print(f'  [M53] SRL: on={lm.srl_on} steps={lm.srl_steps} '
                   f'shortlist={lm.srl_shortlist} expl_thr={lm.srl_expl_thr}')
