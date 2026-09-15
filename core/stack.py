@@ -1063,6 +1063,26 @@ class EVAStack(nn.Module):
                     n += 1
         return n
 
+    def head_telemetry(self) -> dict:
+        """M53b/M54: the head's live telemetry for the logs and the analyzer:
+        the lacuna magnitude, the SRL classification stats and the phantom bank."""
+        h = getattr(self, 'lm_head', None)
+        out: dict = {}
+        if h is None:
+            return out
+        lac = getattr(h, '_last_lacuna', None)
+        if lac is not None:
+            out['lacuna'] = float(lac)
+        srl = getattr(h, '_last_srl', None)
+        if isinstance(srl, dict):
+            for k, v in srl.items():
+                out[f'srl_{k}'] = float(v)
+        pb = getattr(h, 'phantom_bank', None)
+        if pb is not None:
+            for k, v in pb.stats().items():
+                out[f'ph_{k}'] = v
+        return out
+
     def flush_control_pending(self) -> None:
         """B16: make every deferred control write durable before a save."""
         for _l in self.layers:

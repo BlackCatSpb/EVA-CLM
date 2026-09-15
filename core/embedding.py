@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from .config import EVAConfig
 from .vsa_utils import zeckendorf_codes, sparse_block_codes, build_codes
 from .adaptive_gate import hybrid_gate
+from .phantom import PhantomBank
 
 
 class RotaryEmbedding(nn.Module):
@@ -301,6 +302,13 @@ class SigmoidCodedHead(nn.Module):
             self.lacuna_b: nn.Parameter = nn.Parameter(torch.tensor(-1.0))
             self.log_eta: nn.Parameter = nn.Parameter(torch.tensor(
                 math.log(max(float(getattr(cfg, 'head_phantom_noise', 0.05)), 1e-4))))
+            # M54: the phantom-concept bank (the EVA-Ai lacuna lifecycle at
+            # hidden-state level). Buffers ride in the checkpoint.
+            self.phantom_bank = PhantomBank(
+                n_slots=int(getattr(cfg, 'head_phantom_slots', 16)), D=D)
+            self.phantom_thr: float = float(getattr(cfg, 'head_phantom_thr', 0.1))
+            self.phantom_every: int = max(1, int(getattr(cfg, 'head_phantom_every', 25)))
+            self.register_buffer('_pb_step', torch.zeros(1, dtype=torch.long), persistent=False)
         # M53: the State Resolution Loop knobs (off by default).
         self.srl_on: bool = bool(getattr(cfg, 'head_srl', False))
         self.srl_steps: int = int(getattr(cfg, 'head_srl_steps', 3))
@@ -427,6 +435,12 @@ class SigmoidCodedHead(nn.Module):
         if self.training:
             self._last_lacuna = ell.detach().mean()
             self._last_p = p                                  # live: the L1 aux
+            _pb = getattr(self, 'phantom_bank', None)
+            if _pb is not None:
+                _pb.decay()
+                if int(self._pb_step.item()) % self.phantom_every == 0:
+                    _pb.observe(e_l, ell, self.phantom_thr)
+                self._pb_step += 1
         return u + p @ self.phantom_mix.T
 
     def forward(self, h: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:

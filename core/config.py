@@ -74,6 +74,10 @@ class WideBindConfig:
     head_srl_shortlist: int = 64  # M53: candidate codes per pass
     head_srl_expl_thr: float = 0.7  # M53: explanation cost (nats/bit) above
                                    # which a state is classified a lacuna
+    head_phantom_slots: int = 16  # M54: the phantom-concept bank slots
+    head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
+    head_phantom_thr: float = 0.1  # M54: lacuna above which a position is observed
+    head_phantom_every: int = 25  # M54: observe cadence (steps)
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)
