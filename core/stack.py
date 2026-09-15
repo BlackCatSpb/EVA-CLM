@@ -399,7 +399,9 @@ class EVAStack(nn.Module):
         # contradiction tempering.
         _lac = None
         if _head is not None and _st >= int(getattr(_head, 'phantom_after', 1045)):
-            _lac = float(getattr(_head, '_last_lacuna', 0.0) or 0.0)
+            # M55b: the RELATIVE excess, not the absolute ell (~0.97 always):
+            # the broadening must fire on a novelty spike, not on every step.
+            _lac = max(0.0, float(getattr(_head, '_last_lacuna_rel', 1.0) or 1.0) - 1.0)
 
         new_state = []
         pred_errs = []  # per-layer pred_error_norm means for the maturation controller
