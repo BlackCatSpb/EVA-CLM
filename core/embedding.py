@@ -451,8 +451,12 @@ class SigmoidCodedHead(nn.Module):
         # level, > 1 for a spike. The gate and the bank read this, not ell.
         with torch.no_grad():
             if float(self.ell_ema) <= 0.0:
+                # lazy init in BOTH modes (a fresh model must not saturate the
+                # gate at eval) ...
                 self.ell_ema.fill_(float(ell.detach().mean()))
-            else:
+            elif self.training:
+                # ... but the running statistic only moves in training (M55c:
+                # the M8 eval-isolation doctrine — eval must not drift it).
                 self.ell_ema.mul_(self.lacuna_ema).add_(
                     ell.detach().mean(), alpha=1.0 - self.lacuna_ema)
         ell_rel = (ell / (self.ell_ema + 1e-6)).clamp(0.0, 5.0)

@@ -78,3 +78,14 @@ def test_noise_generator_is_device_local():
     _ = m.lm_head._phantom_mix(torch.zeros(1, 8, m.lm_head.K), h, h)
     assert m.lm_head._noise_gen is not None
     assert str(m.lm_head._noise_gen.device) == str(h.device)
+
+
+def test_ell_ema_does_not_drift_at_eval():
+    m = _model(head_phantom_every=1).eval()
+    x, h = _hq(m)
+    m(h, None, step=1, tokens=x)          # lazy init happens in eval too
+    e0 = float(m.lm_head.ell_ema)
+    assert e0 > 0.0, 'the eval did not even initialize the EMA'
+    for _ in range(5):
+        m(h, None, step=2, tokens=x)
+    assert float(m.lm_head.ell_ema) == e0, 'the eval drifted the training statistic'
