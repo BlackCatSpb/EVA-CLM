@@ -70,7 +70,8 @@ def test_bank_state_rides_in_checkpoint():
 
 
 def test_head_telemetry_reports_lacuna_srl_phantoms():
-    m = _model(head_phantom_every=1, head_srl=True).train()
+    m = _model(head_phantom_every=1, head_srl=True,
+               head_srl_after=0, head_phantom_after=0).train()
     x = torch.randint(1, SMALL['vocab'], (1, 8))
     h = m.embed_tokens(x)
     out, st, gs, _ = m(h, None, step=1, tokens=x)

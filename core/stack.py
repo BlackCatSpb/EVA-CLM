@@ -385,6 +385,15 @@ class EVAStack(nn.Module):
         # always pull back. C=1e3: healthy streams measure 30-70.
         _STREAM_CAP = float(getattr(self.cfg, 'stream_cap', 1e3))
 
+        # M53c: step-based warmups for the head's new channels. At init the SRL
+        # commits to random codes (measured: ce 11.47 -> 22.39) and every
+        # residual is noise for the phantom bank — both wait for real semantics.
+        _head = getattr(self, 'lm_head', None)
+        if _head is not None and hasattr(_head, 'srl_on'):
+            _st = -1 if step is None else int(step)
+            _head._srl_active = bool(_head.srl_on) and _st >= int(getattr(_head, 'srl_after', 0))
+            _head._pb_active = _st >= int(getattr(_head, 'phantom_after', 0))
+
         new_state = []
         pred_errs = []  # per-layer pred_error_norm means for the maturation controller
         # ─── Cross-layer bus scratch (intent bridge) ───

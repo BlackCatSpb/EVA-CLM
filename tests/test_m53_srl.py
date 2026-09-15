@@ -82,7 +82,7 @@ def test_srl_shortlist_agrees_with_full():
 
 
 def test_forward_runs_srl_and_reports_telemetry():
-    m = _model(head_srl=True).train()
+    m = _model(head_srl=True, head_srl_after=0).train()
     x = torch.randint(1, SMALL['vocab'], (1, 8))
     h = m.embed_tokens(x)
     out, st, gs, _ = m(h, None, step=1, tokens=x)
@@ -94,3 +94,25 @@ def test_forward_runs_srl_and_reports_telemetry():
 def test_srl_off_by_default():
     m = _model()
     assert m.lm_head.srl_on is False
+
+
+def test_srl_waits_for_the_warmup():
+    # M53c: at init the SRL commits to random codes (measured: the CE doubles),
+    # so it activates only from cfg.head_srl_after.
+    m = _model(head_srl=True, head_srl_after=10).train()
+    x = torch.randint(1, SMALL['vocab'], (1, 8))
+    h = m.embed_tokens(x)
+    m(h, None, step=0, tokens=x)
+    assert not hasattr(m.lm_head, '_last_srl'), 'SRL ran before the warmup'
+    m(h, None, step=10, tokens=x)
+    assert hasattr(m.lm_head, '_last_srl'), 'SRL did not activate at the warmup step'
+
+
+def test_phantom_bank_waits_for_the_warmup():
+    m = _model(head_phantom_every=1, head_phantom_after=10).train()
+    x = torch.randint(1, SMALL['vocab'], (1, 8))
+    h = m.embed_tokens(x)
+    m(h, None, step=0, tokens=x)
+    assert int(m.lm_head.phantom_bank._obs) == 0, 'the bank observed before the warmup'
+    m(h, None, step=10, tokens=x)
+    assert int(m.lm_head.phantom_bank._obs) >= 1, 'the bank did not observe after the warmup'

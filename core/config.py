@@ -74,6 +74,11 @@ class WideBindConfig:
     head_srl_shortlist: int = 64  # M53: candidate codes per pass
     head_srl_expl_thr: float = 0.7  # M53: explanation cost (nats/bit) above
                                    # which a state is classified a lacuna
+    head_srl_after: int = 1045    # M53c: SRL activates from this step (at init
+                                  # the commitment to random codes doubled the CE:
+                                  # 11.47 -> 22.39, measured); 0 = from the start
+    head_phantom_after: int = 1045  # M53c: the bank observes from this step (at
+                                    # init every residual is noise)
     head_phantom_slots: int = 16  # M54: the phantom-concept bank slots
     head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
     head_phantom_thr: float = 0.1  # M54: lacuna above which a position is observed

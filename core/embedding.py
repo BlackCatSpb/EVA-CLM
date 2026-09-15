@@ -314,6 +314,11 @@ class SigmoidCodedHead(nn.Module):
         self.srl_steps: int = int(getattr(cfg, 'head_srl_steps', 3))
         self.srl_shortlist: int = int(getattr(cfg, 'head_srl_shortlist', 64))
         self.srl_expl_thr: float = float(getattr(cfg, 'head_srl_expl_thr', 0.7))
+        # M53c: warmups — the stack flips these per forward from the live step.
+        self.srl_after: int = int(getattr(cfg, 'head_srl_after', 1045))
+        self.phantom_after: int = int(getattr(cfg, 'head_phantom_after', 1045))
+        self._srl_active: bool = self.srl_on
+        self._pb_active: bool = True
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
 
@@ -436,7 +441,7 @@ class SigmoidCodedHead(nn.Module):
             self._last_lacuna = ell.detach().mean()
             self._last_p = p                                  # live: the L1 aux
             _pb = getattr(self, 'phantom_bank', None)
-            if _pb is not None:
+            if _pb is not None and getattr(self, '_pb_active', True):
                 _pb.decay()
                 if int(self._pb_step.item()) % self.phantom_every == 0:
                     _pb.observe(e_l, ell, self.phantom_thr)
@@ -452,7 +457,7 @@ class SigmoidCodedHead(nn.Module):
         zt, z_data, e_l = self._gates(h, bus_bias=bus_bias, return_data=True)
         u, base = self._su(zt, z_data)
         u = self._phantom_mix(u, e_l, h)
-        if self.srl_on:
+        if self.srl_on and getattr(self, '_srl_active', True):
             u, _srl_info = self.srl(u)
             if self.training:
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
@@ -480,7 +485,7 @@ class SigmoidCodedHead(nn.Module):
         zt, z_data, e_l = self._gates(h2, bus_bias=bus_bias, return_data=True)  # (N,K)
         u, _base = self._su(zt, z_data)                                         # (N,K) log-odds
         u = self._phantom_mix(u, e_l, h2)
-        if self.srl_on:
+        if self.srl_on and getattr(self, '_srl_active', True):
             u, _srl_info = self.srl(u)
             if self.training:
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
