@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .config import EVAConfig
-from .block import EVABlock, PrecisionGate, ExactSequenceMemory
+from .block import EVABlock, PrecisionGate, ExactSequenceMemory, _stream_cap
 from .bridge import SemanticBridge
 from .maturation import MaturationController
 from .layer_bridge_gate import LayerBridgeGate
@@ -20,17 +20,6 @@ from .adaptive_controller import AdaptiveController
 from .lr_scheduler import MirrorLRScheduler
 from .losses import compute_losses as _compute_losses_fn
 from .logit_cache import LogitCacheAttention
-
-def _stream_cap(x, cap):
-    """M50: scale-invariant residual-stream magnitude cap (the 2970 explosion
-    fuse). Values above `cap` are rescaled to it with the direction preserved;
-    at the cap the Jacobian is O(1) — unlike the 1/|h| vanishing that made a
-    1e16 stream unrecoverable. cap <= 0 disables."""
-    if cap <= 0.0:
-        return x
-    m = x.abs().amax(dim=-1, keepdim=True)
-    return x * (cap / m.clamp_min(cap))
-
 
 class EVAStack(nn.Module):
     """Stack of EVABlock layers with embedding and lm_head."""

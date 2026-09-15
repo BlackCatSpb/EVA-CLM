@@ -394,6 +394,11 @@ class WideBindConfig:
     eval_interval: int = 1000
     stream_cap: float = 1e3        # M50: per-layer residual-stream magnitude
                                    # cap (scale-invariant fuse); 0 disables
+    branch_cap: float = 1e4        # M51: per-branch injection cap (conv/bind/
+                                   # mirror/VPM/spectral/MLP); 0 disables
+    branch_var_anchor: float = 0.5  # M51: absolute-scale anchor in the branch
+                                    # loss (needs branch_balance_weight>0);
+                                    # 0 disables
     eval_early_until: int = 3000   # M49: early measurement evals (no control
                                    # updates) until this step; 0 disables
     eval_early_every: int = 250    # M49: their cadence

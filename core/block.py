@@ -18,6 +18,19 @@ from .vsa_utils import dct_basis, fib_sigmoid_init
 
 _EPS_SCAN = 1e-6
 
+
+def _stream_cap(x, cap):
+    """M50/M51: scale-invariant magnitude cap (the 2970 explosion fuse).
+    Values above `cap` are rescaled to it with the direction preserved;
+    at the cap the Jacobian is O(1) — unlike the 1/|h| vanishing that made
+    a 1e16 stream unrecoverable. Used on the residual stream between blocks
+    (stack.py, M50) and on every branch injection (block.py, M51).
+    cap <= 0 disables."""
+    if cap <= 0.0:
+        return x
+    m = x.abs().amax(dim=-1, keepdim=True)
+    return x * (cap / m.clamp_min(cap))
+
 def pen_decay_factor(pen: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """Prediction-error modulation of the decay gate, CENTERED at 1.0 (audit
     M3): the old form 1 − 0.5·σ(pen+w) applied ≈0.75 to EVERY channel already
@@ -197,6 +210,11 @@ class EVABlock(nn.Module):
         self.K: int = cfg.bind_K
         self.layer_idx: int = layer_idx
         self.tie_bind: bool = cfg.tie_bind
+        # M51: per-branch injection cap — no single branch (conv/bind/
+        # mirror/VPM/spectral/MLP) can dump more than this into the stream
+        # per layer; healthy branches measure O(1)–O(1e3), so 1e4 is a
+        # no-op until something runs away.
+        self.branch_cap: float = float(getattr(cfg, 'branch_cap', 1e4))
         # Store τ_norm for this layer (U1, U3). __init__ value is only the
         # fallback; forward refreshes it from the LIVE τ-field (audit M7:
         # _tau_dev trains during the run, a snapshot froze U3/U10/ψ at their
@@ -456,7 +474,7 @@ class EVABlock(nn.Module):
         conv_state_out = h_perm[:, :, -self._conv_pad:]
         if conv_state_out.shape[-1] < self._conv_pad:              # B1: fixed-width carry
             conv_state_out = F.pad(conv_state_out, (self._conv_pad - conv_state_out.shape[-1], 0))
-        h = h + h_conv
+        h = h + _stream_cap(h_conv, self.branch_cap)
         if _chk(h, 'conv'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         if self.training:
             self._cache_conv_out = h_conv  # for branch_loss (with grad)
@@ -672,7 +690,8 @@ class EVABlock(nn.Module):
         bind_gate = torch.sigmoid(self.w_bind_gate).unsqueeze(0).unsqueeze(0)
         bind_gated = (bind_out.reshape(B, L, g, d) * mm * bind_gate.unsqueeze(-1)).reshape(B, L, D)
         enhanced_base = bind_gated + mem_modulated * self.w_mem2v * mem2v_scale
-        enhanced = enhanced_base + mirror
+        enhanced = (_stream_cap(enhanced_base, self.branch_cap)
+                    + _stream_cap(mirror, self.branch_cap))
         # Concept layer moved to stack.py (UnifiedConceptLayer — global, after embedding)
         if _chk(enhanced, 'enhanced'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         if self.training:
@@ -697,7 +716,8 @@ class EVABlock(nn.Module):
                 # value: hard; grad w.r.t. precision.mean(): 1 (even while 0)
                 soft_gate = hard + (precision.mean() - precision.mean().detach())
                 exact = self.exact_memory(_ln(h).float())
-                h = h + (precision * exact * soft_gate).to(h.dtype)
+                h = h + _stream_cap((precision * exact * soft_gate).to(h.dtype),
+                                    self.branch_cap)
             if self.training:
                 self._precision_mean = precision.mean()
 
@@ -713,7 +733,8 @@ class EVABlock(nn.Module):
             else:
                 _cheb_damp = 1.0
             h_dct = h_dct * self.lambda_k.float() * float(spectral_mod) * _cheb_damp
-            h = h + (h_dct @ self.V_dct).to(h.dtype)
+            h = h + _stream_cap((h_dct @ self.V_dct).to(h.dtype),
+                                self.branch_cap)
         if _chk(h, 'spectral'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
         
         # ─── MLP (mirror-conditioned SwiGLU, variant A) ───
@@ -748,7 +769,7 @@ class EVABlock(nn.Module):
                 self._mlp_base_ema.mul_(0.999).add_(_mrms, alpha=0.001)
             self._mlp_cnt.add_(1)
             self._mlp_ratio = float((self._mlp_now_ema / (self._mlp_base_ema + 1e-12)).item())
-        h = h + h_mlp
+        h = h + _stream_cap(h_mlp, self.branch_cap)
         if _chk(h, 'post_mlp'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
 
         return h, (mem_state_out, mu_state_out, conv_state_out, traj_state_out, pen)

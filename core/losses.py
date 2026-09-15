@@ -224,6 +224,16 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     branch_loss = 0.0
     n_branch = 0
     if getattr(stack.cfg, 'branch_balance_weight', 0.0) > 0:
+        # M51 (the 2970 explosion post-mortem): the three terms below are
+        # log-RATIOS — scale-free, so a uniform x10/layer growth of ALL branches
+        # was invisible to this loss (measured: the stream hit ~1e16 while
+        # 'branch' stayed finite). The anchor pins the ABSOLUTE scale: each
+        # branch's log-variance is pulled to a slow EMA of itself, seeded at
+        # the first observation (a healthy fresh run), so gradual drift is
+        # allowed while a runaway is penalized. The reference is detached.
+        _anchor_w = float(getattr(stack.cfg, 'branch_var_anchor', 0.0))
+        _ref = getattr(stack, '_branch_var_ref', None)
+        _seen = []
         for layer in stack.layers:
             conv = getattr(layer, '_cache_conv_out', None)
             bnd = getattr(layer, '_cache_bind_out', None)
@@ -236,8 +246,19 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
                 branch_loss = branch_loss + (torch.log(vc) - torch.log(vm)).pow(2)
                 branch_loss = branch_loss + (torch.log(vb) - torch.log(vm)).pow(2)
                 n_branch = n_branch + 3
+                if _anchor_w > 0.0:
+                    _vs = torch.stack([vc, vb, vm])
+                    if _ref is None:
+                        _ref = _vs.detach().mean().clone()
+                    branch_loss = branch_loss + _anchor_w * (torch.log(_vs) - torch.log(_ref)).pow(2).sum()
+                    n_branch = n_branch + 3
+                    _seen.append(_vs.detach().mean())
         if n_branch > 0:
             branch_loss = branch_loss / n_branch
+        if _anchor_w > 0.0 and _ref is not None:
+            with torch.no_grad():
+                _cm = torch.stack(_seen).mean() if _seen else _ref
+                stack._branch_var_ref = (_ref * 0.999 + _cm * 0.001).detach()
     
     signal_entropy = 0.0
     n_sig = 0
