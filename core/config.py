@@ -63,6 +63,11 @@ class WideBindConfig:
                                   # (keeps the CE gradient alive at |u|>u0);
                                   # 0 disables
     head_u_wall_u0: float = 6.0   # M52a: the wall's threshold
+    head_lacuna: bool = True      # M52b: lacuna residual + phantom channel
+    head_phantom_bits: int = 32   # M52b: K_p (the phantom basis rank)
+    head_phantom_noise: float = 0.05  # M52b: exploration-noise init (eta,
+                                      # learnable; EVA-Ai used 0.05)
+    head_phantom_l1: float = 1e-4  # M52b: light sparsity on the phantom firing
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)

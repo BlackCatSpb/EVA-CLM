@@ -266,6 +266,7 @@ class SigmoidCodedHead(nn.Module):
         self._embed_rope = rope
         self.register_buffer('codes', codes, persistent=False)
         D: int = cfg.D
+        self.D: int = D
         assert D % self.K == 0
         d: int = D // self.K
         if embed_basis is not None:
@@ -284,6 +285,22 @@ class SigmoidCodedHead(nn.Module):
         # M52a: learnable gain on the softmax emphasis (init 1 = the old
         # behavior bit-for-bit; the model sizes the competition itself).
         self.emphasis_gain: nn.Parameter = nn.Parameter(torch.ones(1))
+        # M52b: the lacuna + phantom channel. The lacuna is the part of h that
+        # is orthogonal to EVERY readout direction (mathematically invisible to
+        # the known bits; verified |<e_l, R_k>| ~ 7e-7). A separate phantom
+        # basis reads it, gated by the lacuna magnitude; the zero-init mix makes
+        # the forward start bit-identical to the known-bits-only head.
+        _Kp = int(getattr(cfg, 'head_phantom_bits', 32)) if getattr(cfg, 'head_lacuna', True) else 0
+        self.Kp: int = max(0, min(_Kp, D))
+        if self.Kp > 0:
+            _pgen = torch.Generator().manual_seed(7)
+            self.phantom_basis: nn.Parameter = nn.Parameter(
+                _orth_rows(torch.randn(self.Kp, D, generator=_pgen)))
+            self.phantom_mix: nn.Parameter = nn.Parameter(torch.zeros(self.K, self.Kp))
+            self.lacuna_w: nn.Parameter = nn.Parameter(torch.tensor(10.0))
+            self.lacuna_b: nn.Parameter = nn.Parameter(torch.tensor(-1.0))
+            self.log_eta: nn.Parameter = nn.Parameter(torch.tensor(
+                math.log(max(float(getattr(cfg, 'head_phantom_noise', 0.05)), 1e-4))))
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
 
@@ -309,11 +326,18 @@ class SigmoidCodedHead(nn.Module):
             # Phase-2 stencil: cross-layer gist biases the projector readout.
             # bus_bias shape matches zt's (B,L,K) or (N,1,K) -> broadcasts cleanly.
             zt = zt + bus_bias
+        if return_data:
+            # M52b: the lacuna — the per-block orthogonal residual. It is
+            # invisible to the readout by construction (the known bits cannot
+            # represent it), which is exactly why the phantom basis exists.
+            e_l = h - (z.unsqueeze(-1) * self.readout).reshape(B, L, self.D)
+            if squeeze:
+                zt = zt.squeeze(1)
+                z_data = z_data.squeeze(1)
+                e_l = e_l.squeeze(1)
+            return zt, z_data, e_l
         if squeeze:
             zt = zt.squeeze(1)
-            z_data = z_data.squeeze(1)
-        if return_data:
-            return zt, z_data
         return zt
 
     def _su(self, zt: torch.Tensor, z_data: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -330,14 +354,36 @@ class SigmoidCodedHead(nn.Module):
             self._last_u = u        # M52a (P1): the saturation wall reads this
         return u, base
 
+    def _phantom_mix(self, u: torch.Tensor, e_l: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        """M52b: lacuna -> potential state. The residual (optionally noised by
+        the learnable eta — the EVA-Ai exploration) is read by the phantom
+        basis, gated by the lacuna magnitude and mixed into the known bits.
+        Zero-init mix => the forward is identity at init."""
+        if self.Kp <= 0:
+            return u
+        _hn = h.reshape(e_l.shape).norm(dim=-1, keepdim=True) + 1e-6
+        ell = e_l.norm(dim=-1, keepdim=True) / _hn
+        if self.training:
+            _eta = torch.exp(self.log_eta).clamp(0.0, 0.2)
+            e_in = e_l + _eta * torch.randn_like(e_l)
+        else:
+            e_in = e_l
+        p = torch.tanh(e_in @ self.phantom_basis.T)          # (...,Kp)
+        p = p * torch.sigmoid(self.lacuna_w * ell + self.lacuna_b)
+        if self.training:
+            self._last_lacuna = ell.detach().mean()
+            self._last_p = p                                  # live: the L1 aux
+        return u + p @ self.phantom_mix.T
+
     def forward(self, h: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if h.dim() == 2:
             h = h.unsqueeze(1)
             squeeze: bool = True
         else:
             squeeze = False
-        zt, z_data = self._gates(h, bus_bias=bus_bias, return_data=True)
+        zt, z_data, e_l = self._gates(h, bus_bias=bus_bias, return_data=True)
         u, base = self._su(zt, z_data)
+        u = self._phantom_mix(u, e_l, h)
         logits: torch.Tensor = u @ self.codes.T + base[..., None] + self.token_bias
         if self.normalize:
             logits = logits - logits.logsumexp(dim=-1, keepdim=True)
@@ -359,8 +405,9 @@ class SigmoidCodedHead(nn.Module):
         if self.normalize:
             logits: torch.Tensor = self.forward(h2, bus_bias=bus_bias)   # (N,V), 2D-in -> 2D-out
             return torch.gather(logits, 1, t[:, None]).squeeze(1)
-        zt, z_data = self._gates(h2, bus_bias=bus_bias, return_data=True)  # (N,K)
-        u, _base = self._su(zt, z_data)                                    # (N,K) log-odds
+        zt, z_data, e_l = self._gates(h2, bus_bias=bus_bias, return_data=True)  # (N,K)
+        u, _base = self._su(zt, z_data)                                         # (N,K) log-odds
+        u = self._phantom_mix(u, e_l, h2)
         c: torch.Tensor = self.codes[t].to(u.dtype)
         lp: torch.Tensor = (c * F.logsigmoid(u) + (1 - c) * F.logsigmoid(-u)).sum(-1)
         return lp + self.token_bias[t]
