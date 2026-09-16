@@ -341,7 +341,8 @@ def train(cfg=None, resume_path=None):
         # Fix for "MLP asleep": reopen the cognitive gate on resume. The REAL gate
         # is mirror.hybrid_gate (sigmoid+softmax) replacing frozen mod_scale_mlp.
         # On resume set hybrid_gate tau so the gate starts clearly open.
-        if getattr(cfg, 'mlp_gate_b_init', 0.0) > 0:
+        _gate_missing = any('mlp_gate_b' in _m for _m in missing)   # M58c (B15)
+        if getattr(cfg, 'mlp_gate_b_init', 0.0) > 0 and _gate_missing:
             for layer in model.layers:
                 layer.mlp.mlp_gate_b.data.fill_(cfg.mlp_gate_b_init)
                 # Initialize hybrid gate tau (sigmoid+softmax temperature)
@@ -541,15 +542,9 @@ def train(cfg=None, resume_path=None):
 
             
 
-            # Per-layer LS-based LR modulation (cfg.per_layer_ls_lr)
-            ls_mults = getattr(scheduler, '_ls_mult', None)
-            if ls_mults is not None:
-                mirror_hi = getattr(cfg, 'ls_mirror_mult_max', 2.0)
-                for i, layer in enumerate(model.layers):
-                    ls_m = ls_mults[i]
-                    for p in layer.base_parameters:
-                        if p.grad is not None:
-                            p.grad.mul_(ls_m)
+            # M58c: the per-layer LS-LR modulation is applied ONCE, inside
+            # apply_tau_lr below (the direct grad.mul_ here was a second copy:
+            # ls_mult landed on the base parameters squared).
             tokens_seen += cfg.batch_size * seq_len
             
             # Clip gradients (AGC — scale-free ratio, replaces magic grad_clip)
@@ -823,10 +818,7 @@ if __name__ == '__main__':
     cfg.log_interval = args.log_interval
     cfg.eval_interval = args.eval_interval
 
-    # B19: first OOM reaction = recompute (3x activations),
-    # window halving only as the second resort.
-    if not getattr(cfg, 'gradient_checkpointing', False):
-        cfg.gradient_checkpointing = True
-        print('  [OOM] gradient_checkpointing ON (recompute)', flush=True)
-    else:
-        cfg.seq_len //= 2
+    # B19 fix (M58c): this block was a MISPLACED copy of the OOM reaction —
+    # it ran at startup, so every run that already had gradient_checkpointing
+    # on (the production default) silently HALVED cfg.seq_len (224 -> 112).
+    # The config is the user's; the OOM ladder reacts at runtime if at all.

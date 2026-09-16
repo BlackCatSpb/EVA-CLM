@@ -482,6 +482,17 @@ class SigmoidCodedHead(nn.Module):
                 _pb.decay()
                 if int(self._pb_step.item()) % self.phantom_every == 0:
                     _pb.observe(e_l, ell_rel, self.phantom_thr)
+                # M58b (M55's consumer): the CONFIRMED phantom directions steer
+                # the phantom basis (a slow EMA, no_grad) — the recurring
+                # novelties become the channel's own readout instead of the
+                # bank staying a pure observer.
+                if (int(self._pb_step.item()) % (self.phantom_every * 4) == 0
+                        and self.Kp > 0):
+                    _cd = _pb.confirmed_directions()
+                    if _cd.shape[0] > 0:
+                        _n = min(_cd.shape[0], self.Kp)
+                        _sub = self.phantom_basis.data[:_n]
+                        _sub.mul_(0.99).add_(_cd[:_n].to(_sub.dtype), alpha=0.01)
                 self._pb_step += 1
         return u + p @ self.phantom_mix.T
 
@@ -524,6 +535,14 @@ class SigmoidCodedHead(nn.Module):
                                 + self.token_bias)
         if self.temper_on and getattr(self, '_temper_active', True):
             _md = getattr(self, '_mem_dir', None)
+            if _md is not None and _md.shape[-1] == self.D:
+                # M58b: the CE path calls the head with h2 = (N, D) while the
+                # memory read is (B, L, D) — the old equality check silently
+                # skipped the tempering exactly on the CE. Reshape (same memory
+                # order) when the element count matches.
+                if (tuple(_md.shape[:-1]) != tuple(u.shape[:-1])
+                        and _md.numel() == int(u.shape[:-1].numel()) * self.D):
+                    _md = _md.reshape(*u.shape[:-1], self.D)
             if (_md is not None and _md.shape[-1] == self.D
                     and tuple(_md.shape[:-1]) == tuple(u.shape[:-1])):
                 _a = torch.sigmoid(u)

@@ -400,7 +400,7 @@ class StreamingMemoryBank(nn.Module):
 
     def forward(self, h: torch.Tensor, tokens: torch.Tensor,
                 step: int = None, mat_gate: float = None,
-                lacuna: float = None) -> torch.Tensor:
+                lacuna: float = None, write: bool = True) -> torch.Tensor:
         """Read from memory at each position.
 
         h: (B, L, D) — current hidden state (after embedding)
@@ -420,9 +420,11 @@ class StreamingMemoryBank(nn.Module):
         _can_write = ((mat_gate is None) or
                       (mat_gate >= self._min_write_maturation))
 
-        # Detect boundaries and write to all levels
+        # Detect boundaries and write to all levels (M58b: the stack passes
+        # write=False after the first active layer — one sentence is written
+        # ONCE per forward, not once per layer).
         with torch.no_grad():
-            for b in range(B):
+            for b in range(B if write else 0):
                 sent_start = 0
                 for t in range(L):
                     if is_sep[b, t]:
@@ -468,9 +470,10 @@ class StreamingMemoryBank(nn.Module):
             scale = scale * (0.3 + 0.7 * tau_norm)
 
         # When maturation too low, bypass memory bank entirely (no-op)
-        if self.training:
-            # M55a: the read direction, for the head<->memory conflict channel.
-            self._last_read = fused.detach()
+        # M55a/M58b: the read direction for the head<->memory conflict
+        # channel — cached in BOTH modes (the eval must not hand the head a
+        # stale training direction; the eval snapshot covers it either way).
+        self._last_read = fused.detach()
         if not _can_write:
             return h
 

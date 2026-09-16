@@ -397,6 +397,7 @@ class EVAStack(nn.Module):
         # M55a: the one-step-stale lacuna (the streaming convention) drives the
         # memory-search broadening; the memory read direction feeds the head's
         # contradiction tempering.
+        _mb_wrote = False   # M58b: one write per forward (see the bank call)
         _lac = None
         if _head is not None and _st >= int(getattr(_head, 'phantom_after', 1045)):
             # M55b: the RELATIVE excess, not the absolute ell (~0.97 always):
@@ -578,7 +579,8 @@ class EVAStack(nn.Module):
                     and (_mg_l is None or _mg_l[i] >= self.memory_bank._min_write_maturation)):
                 _mb_mat_i = _mg_l[i] if _mg_l is not None else 1.0
                 h = self.memory_bank(h, tokens, step=step, mat_gate=_mb_mat_i,
-                                     lacuna=_lac)
+                                     lacuna=_lac, write=not _mb_wrote)
+                _mb_wrote = True
                 _mrd = getattr(self.memory_bank, '_last_read', None)
                 if _head is not None and _mrd is not None:
                     _head._mem_dir = _mrd
@@ -1143,6 +1145,24 @@ class EVAStack(nn.Module):
         """Clear the logit cache (for new sequence)."""
         if self.logit_cache is not None:
             self.logit_cache.cache.clear()
+        # M58b: the block-level trajectory carry and the head's live pins
+        # survive a rollback otherwise (the mirror loop below only scrubs the
+        # mirror's own attrs).
+        for l in self.layers:
+            for _an in ('_traj_state', '_cache_conv_out', '_cache_bind_out',
+                        '_cache_mirror_out', '_cache_mlp_out'):
+                if hasattr(l, _an):
+                    setattr(l, _an, None)
+        _head = getattr(self, 'lm_head', None)
+        if _head is not None:
+            for _an in ('_mem_dir', '_last_u', '_last_p', '_last_srl',
+                        '_last_lacuna', '_last_lacuna_rel', '_last_lacuna_gate',
+                        '_last_conflict', '_last_sat'):
+                if hasattr(_head, _an):
+                    setattr(_head, _an, None)
+        _bank = getattr(self, 'memory_bank', None)
+        if _bank is not None and hasattr(_bank, '_last_read'):
+            _bank._last_read = None
         # Restore = a fresh healthy state: the mlp-scale observer must re-warm
         # from the restored weights, not carry a pre-rollback baseline.
         for l in self.layers:
@@ -1169,7 +1189,8 @@ class EVAStack(nn.Module):
                 mir = getattr(l, 'mirror', None)
                 if mir is not None:
                     for _an in ('_cached_hp', '_cached_pred_k', '_cached_pred_error_norm',
-                                '_pred_loss_term', '_cached_gate', '_traj_state'):
+                                '_pred_loss_term', '_cached_gate', '_traj_state',
+                                '_cached_usefulness'):   # M58b: the chain found it surviving
                         if hasattr(mir, _an):
                             setattr(mir, _an, None)
                     if hasattr(mir, 'reset_stream_bufs'):
@@ -1188,7 +1209,8 @@ class EVAStack(nn.Module):
         snap = {k: v.detach().clone() for k, v in self.named_buffers()}
         _ex = {}
         for _an in ('_last_bus', '_intent_stream',            # B1: non-buffer streaming state
-                    '_reasoning_buffer', '_reasoning_count'):  # M32: chain is snapshot-covered
+                    '_reasoning_buffer', '_reasoning_count',   # M32: chain is snapshot-covered
+                    '_last_logits'):                           # M56: the R1 stash
             _a = getattr(self, _an, None)
             if isinstance(_a, torch.Tensor):
                 _ex[_an] = _a.detach().clone()
@@ -1197,6 +1219,14 @@ class EVAStack(nn.Module):
             else:
                 _ex[_an] = _a          # None/scalar must restore too (a document
                                        # boundary reset is state, not absence)
+        # M58b: the memory<->head channel lives on SUBMODULES (the chain found
+        # the eval handing the head a stale training direction).
+        for _pfx, _mod, _an in (('bank', getattr(self, 'memory_bank', None), '_last_read'),
+                                ('head', getattr(self, 'lm_head', None), '_mem_dir')):
+            if _mod is None:
+                continue
+            _a = getattr(_mod, _an, None)
+            _ex[f'{_pfx}.{_an}'] = _a.detach().clone() if isinstance(_a, torch.Tensor) else _a
         # M33: per-layer streaming caches ARE forward inputs (see mirror M33) —
         # they must round-trip through the eval isolation contract as well.
         for _i, _l in enumerate(self.layers):
@@ -1236,6 +1266,13 @@ class EVAStack(nn.Module):
                         _tgt = _tgt.mirror
                     setattr(_tgt, _attr,
                             _v.clone() if isinstance(_v, torch.Tensor) else _v)
+                    continue
+                if _an.startswith(('bank.', 'head.')):               # M58b submodule route
+                    _pfx, _attr = _an.split('.', 1)
+                    _tgt = getattr(self, 'memory_bank' if _pfx == 'bank' else 'lm_head', None)
+                    if _tgt is not None:
+                        setattr(_tgt, _attr,
+                                _v.clone() if isinstance(_v, torch.Tensor) else _v)
                     continue
                 _cur = getattr(self, _an, None)
                 if isinstance(_v, list) and isinstance(_cur, list):

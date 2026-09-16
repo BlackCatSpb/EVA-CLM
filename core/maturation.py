@@ -80,7 +80,12 @@ class MaturationController(nn.Module):
         self.register_buffer("tau_norm", torch.zeros(self.n_layers))
         self.register_buffer("readiness", torch.zeros(self.n_layers))
         self.register_buffer("gate", torch.zeros(self.n_layers))
-        self.register_buffer("pen_init", torch.full((self.n_layers,), 1.0))
+        # M58c (the chain: `mat` was a TIMER): pen_init started at 1.0, so the
+        # warmup max kept it at 1.0 and `readiness` measured the DECAY FROM 1.0
+        # (a clock) instead of the prediction error's improvement over the
+        # observed maximum (competence). It now starts at 0 and is seeded by
+        # the first observation.
+        self.register_buffer("pen_init", torch.zeros(self.n_layers))
         self.register_buffer("pen_ema", torch.full((self.n_layers,), 1.0))
 
         self.alpha: float = float(getattr(cfg, "matur_alpha", 1.0))
