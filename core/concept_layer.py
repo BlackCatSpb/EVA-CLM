@@ -418,8 +418,9 @@ class UnifiedConceptLayer(nn.Module):
             'concept_tau_read': torch.exp(self.log_tau_read).item(),
             'concept_read_scale': torch.sigmoid(self.read_scale).item(),
             'concept_scale_effective': float(getattr(
-                self, '_last_scale', torch.sigmoid(self.read_scale).item())),
-            'concept_write_alpha': float(torch.sigmoid(-self.log_tau_update).clamp(0.001, 0.5)),
+                self, '_last_scale', torch.sigmoid(self.read_scale.detach()).item())),
+            'concept_write_alpha': float(
+                torch.sigmoid(-self.log_tau_update.detach()).clamp(0.001, 0.5)),
             'concept_scale_floor': float(getattr(self, '_scale_floor', 0.0) or 0.0),
             'concept_confidence_mean': self.concept_confidence.mean().item(),
         }
