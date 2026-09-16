@@ -273,6 +273,11 @@ def train(cfg=None, resume_path=None):
             'reasoning_enabled_step': reasoning_enabled_step,
             'active_depth': depth.active, 'depth_state': depth.get_state(),
             'balancer': balancer.state_dict(),
+            # M58c: the M51 branch-anchor reference rides too — without it a
+            # resume re-seeds the anchor from the (possibly drifted) current
+            # branch variances instead of the original healthy scale.
+            'branch_var_ref': (model._branch_var_ref.detach().cpu()
+                               if getattr(model, '_branch_var_ref', None) is not None else None),
             'stream_idx': int(stream_idx), 'offset': int(offset),
             'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
             'stream_state': _dstate(state), 'stream_gs': _dstate(gs if gs is not None else None),
@@ -396,6 +401,8 @@ def train(cfg=None, resume_path=None):
         depth.put_state(ckpt.get('depth_state'))  # B14 (F4-06)
         if ckpt.get('balancer') is not None:
             balancer.load_state_dict(ckpt['balancer'])
+        if ckpt.get('branch_var_ref') is not None:      # M58c (M51 anchor)
+            model._branch_var_ref = ckpt['branch_var_ref'].to(device)
         if ckpt.get('stream_state') is not None:   # B15 (F5-07): mid-document
             state = _tstate(ckpt['stream_state'], device)   # streaming continuity
             if ckpt.get('stream_gs') is not None:
@@ -599,9 +606,17 @@ def train(cfg=None, resume_path=None):
                 except Exception:
                     pass
             if step % max(cfg.log_interval, 1) == 0:
+                # M58c: the head telemetry (lacuna/SRL/phantom/conflict/wall) was
+                # visible only in the notebook and the analyzer — the CLI's log
+                # showed nothing of the M52-M56 channels.
+                _tel = model.head_telemetry() if hasattr(model, 'head_telemetry') else {}
+                _tel_str = ' '.join(f'{k}={v:.4f}' if isinstance(v, float) else f'{k}={v}'
+                                    for k, v in _tel.items())
                 print(f'  step={step:>6} loss={ce_loss.item():.4f} mod_mlp={mod_scl:.3f} lr={current_lr:.2e} '
                       f'tok/s={tok_s:.0f} stream={stream_idx} '
                       f'{aux_str}{gate_str}')
+                if _tel_str:
+                    print(f'  head: {_tel_str}')
             
             # Eval
             # M49: early measurement evals (see the notebook twin)

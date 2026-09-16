@@ -142,3 +142,24 @@ def test_watchdog_is_gone_everywhere():
     assert 'class FailureDetector' not in tc and 'def hard_veto_ceiling' not in tc
     import core.adaptation as ad
     assert not hasattr(ad, 'FailureDetector')
+
+
+def test_notebook_resume_restores_are_present():
+    # The coverage gap that let the M58a watchdog removal eat two resume
+    # restores (they sat inside the deleted block): a static lock on the
+    # notebook's resume contract.
+    import json
+    nb = json.load(open(os.path.join(ROOT, 'notebooks', 'eva_colab.ipynb'),
+                        encoding='utf-8'))
+    s9 = ''.join(nb['cells'][9]['source'])
+    for need in ('balancer.load_state_dict(_resume_balancer_sd)',
+                 'depth.put_state(',
+                 'if _resume_branch_var_ref is not None:'):
+        assert need in s9, f'cell 9 lost {need!r}'
+    s8 = ''.join(nb['cells'][8]['source'])
+    assert "_resume_balancer_sd = ckpt.get('balancer')" in s8
+    assert "_resume_branch_var_ref = ckpt.get('branch_var_ref')" in s8
+    s10 = ''.join(nb['cells'][10]['source'])
+    assert "'balancer': balancer.state_dict()" in s10
+    assert "'branch_var_ref'" in s10
+    assert 'head_telemetry' in s10, 'the head telemetry row vanished from the log'
