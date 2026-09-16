@@ -371,6 +371,12 @@ class UnifiedConceptLayer(nn.Module):
 
         # ─── Output ───
         scale = torch.sigmoid(self.read_scale)
+        # M59: the experiment floor — while active the model cannot close the
+        # UCL's output (the chain measured read_scale -4.0 within 120 steps).
+        _fl = float(getattr(self, '_scale_floor', 0.0) or 0.0)
+        if _fl > 0.0:
+            scale = scale.clamp(min=_fl)
+        self._last_scale = float(scale.mean().detach())   # M59: the EFFECTIVE scale
         out = read * u_gate * c_gate * scale
         # B1: per-position amplitude bound — measured 5-6×‖h‖ injection at
         # wake-up (read of unnormalized vals): the branch could dominate the
@@ -410,8 +416,48 @@ class UnifiedConceptLayer(nn.Module):
             'concept_novelty_gap': torch.sigmoid(self._log_tau_novelty_thr).item(),
             'concept_tau_birth': torch.exp(self.log_tau_birth).item(),
             'concept_tau_read': torch.exp(self.log_tau_read).item(),
+            'concept_read_scale': torch.sigmoid(self.read_scale).item(),
+            'concept_scale_effective': float(getattr(
+                self, '_last_scale', torch.sigmoid(self.read_scale).item())),
+            'concept_write_alpha': float(torch.sigmoid(-self.log_tau_update).clamp(0.001, 0.5)),
+            'concept_scale_floor': float(getattr(self, '_scale_floor', 0.0) or 0.0),
             'concept_confidence_mean': self.concept_confidence.mean().item(),
         }
+
+    @torch.no_grad()
+    def birth_from_direction(self, direction: torch.Tensor,
+                             confidence: float = 0.6) -> bool:
+        """M59 (link A): an EXTERNAL birth — the head's confirmed phantom
+        direction (a unit vector in the same D-space) becomes a trunk-level
+        concept. The key is the direction in the READ's query space (q_proj),
+        the value is the direction scaled to the current concepts' mean norm.
+        Returns True if a slot was taken."""
+        d = direction.detach().reshape(-1).to(self.concept_vals.dtype)
+        if d.numel() != self.concept_vals.shape[-1] or not torch.isfinite(d).all():
+            return False
+        _n = float(self.concept_vals.norm(dim=-1).mean().clamp(min=1e-3))
+        key = F.normalize(self.q_proj(d).reshape(-1), dim=-1)
+        empty = torch.nonzero(self.concept_count == 0)
+        if empty.numel() > 0:
+            idx = int(empty[0].item())
+        else:
+            utility = self.concept_confidence * self.concept_count.clamp(min=1)
+            idx = int(utility.argmin().item())
+        self.concept_keys[idx].copy_(key)
+        self.concept_vals[idx].copy_(d / (d.norm() + 1e-8) * _n)
+        self.concept_count[idx] = 1
+        self.concept_confidence[idx] = float(confidence)
+        self.concept_age[idx] = 0.0
+        self._n_births += 1
+        return True
+
+    @torch.no_grad()
+    def active_directions(self, min_conf: float = 0.3):
+        """M59 (link B): the active concepts' unit directions (S_active, D)."""
+        m = (self.concept_count > 0) & (self.concept_confidence >= min_conf)
+        if not bool(m.any()):
+            return self.concept_vals.new_zeros(0, self.concept_vals.shape[-1])
+        return F.normalize(self.concept_vals[m], dim=-1)
 
     @torch.no_grad()
     def birth_gate_mean(self) -> torch.Tensor:

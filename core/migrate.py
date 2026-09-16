@@ -57,6 +57,22 @@ def migrate_state_dict(
             sd[name] = new
             changed += 1
 
+    # M59c: the phantom channel's capacity may have grown — prefix-pad.
+    for name, p in model.named_parameters():
+        if name.endswith(('phantom_basis', 'phantom_mix')):
+            old = sd.get(name)
+            if old is None or tuple(old.shape) == tuple(p.shape):
+                continue
+            new = torch.zeros_like(p)
+            if name.endswith('phantom_basis'):
+                n = min(old.shape[0], p.shape[0])
+                new[:n] = old[:n]
+            else:                                   # (K, Kp): pad the columns
+                n = min(old.shape[1], p.shape[1])
+                new[:, :n] = old[:, :n]
+            sd[name] = new
+            changed += 1
+
     # Add missing bind_coh_gate and freq_scale
     for name, p in model.named_parameters():
         if name.endswith('bind_coh_gate'):

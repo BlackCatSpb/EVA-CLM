@@ -394,6 +394,37 @@ class EVAStack(nn.Module):
             _head._srl_active = bool(_head.srl_on) and _st >= int(getattr(_head, 'srl_after', 0))
             _head._pb_active = _st >= int(getattr(_head, 'phantom_after', 0))
             _head._temper_active = bool(getattr(_head, 'temper_on', False)) and _st >= int(getattr(_head, 'temper_after', 0))
+            # M59: the UCL floor + the head<->UCL concept links
+            _ucl = getattr(self, 'concept_layer', None)
+            if _ucl is not None:
+                _fl = float(getattr(self.cfg, 'ucl_read_scale_floor', 0.0) or 0.0)
+                _fl_until = int(getattr(self.cfg, 'ucl_read_scale_floor_until', 0) or 0)
+                _ucl._scale_floor = _fl if _st < _fl_until else 0.0
+                _head._ext_phantom_dirs = _ucl.active_directions()
+                # (A) the confirmed phantoms birth UCL concepts (idempotent:
+                # a direction already close to a slot is skipped).
+                _pb = getattr(_head, 'phantom_bank', None)
+                if (_pb is not None and _st >= int(getattr(_head, 'phantom_after', 1045))
+                        and _st % max(1, int(getattr(_head, 'phantom_every', 25))) == 0):
+                    _cds = _pb.confirmed_directions()
+                    for _i in range(min(_cds.shape[0], 4)):
+                        _d = _cds[_i]
+                        # the keys live in the bridge space: compare in the
+                        # READ's query space (the same projection the birth uses)
+                        _kn = torch.nn.functional.normalize(
+                            _ucl.concept_keys.detach(), dim=-1)
+                        _dk = torch.nn.functional.normalize(
+                            _ucl.q_proj(_d.detach()).reshape(-1), dim=-1)
+                        _sim = float((_kn @ _dk).abs().max())
+                        if _sim < 0.9:
+                            _ucl.birth_from_direction(_d, confidence=0.6)
+                # (C) the phantom channel grows from the UCL's active concepts
+                if (_ucl is not None and _head.Kp > 0
+                        and _st % max(1, int(getattr(_head, 'phantom_every', 25)) * 100) == 0):
+                    _dirs = _ucl.active_directions(min_conf=0.5)
+                    _grew = _head.grow_phantom_bits(_dirs)
+                    if _grew:
+                        self._m59_grew = int(getattr(self, '_m59_grew', 0)) + _grew
         # M55a: the one-step-stale lacuna (the streaming convention) drives the
         # memory-search broadening; the memory read direction feeds the head's
         # contradiction tempering.

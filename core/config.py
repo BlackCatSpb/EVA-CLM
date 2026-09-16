@@ -65,6 +65,14 @@ class WideBindConfig:
     head_u_wall_u0: float = 6.0   # M52a: the wall's threshold
     head_lacuna: bool = True      # M52b: lacuna residual + phantom channel
     head_phantom_bits: int = 32   # M52b: K_p (the phantom basis rank)
+    head_phantom_max: int = 64    # M59c (link C): the phantom channel's CAPACITY —
+                                  # the active count grows in place from
+                                  # head_phantom_bits up to this as the concepts
+                                  # accumulate (no shape changes ever)
+    head_phantom_max: int = 64    # M59c (link C): the phantom channel's CAPACITY —
+                                  # the active count grows in place from
+                                  # head_phantom_bits up to this as the concepts
+                                  # accumulate (no shape changes ever)
     head_phantom_noise: float = 0.05  # M52b: exploration-noise init (eta,
                                       # learnable; EVA-Ai used 0.05)
     head_phantom_l1: float = 1e-4  # M52b: light sparsity on the phantom firing
@@ -436,6 +444,11 @@ class WideBindConfig:
     max_steps: int = 500000
     log_interval: int = 100
     eval_interval: int = 1000
+    ucl_read_scale_floor: float = 0.0   # M59: floor on sigmoid(read_scale) until
+                                        # `ucl_read_scale_floor_until` (0 = off);
+                                        # lets the UCL prove itself before the model
+                                        # self-closes it (measured: -4.0 in 120 steps)
+    ucl_read_scale_floor_until: int = 0  # M59: the step until which the floor holds
     stream_cap: float = 1e3        # M50: per-layer residual-stream magnitude
                                    # cap (scale-invariant fuse); 0 disables
     branch_cap: float = 1e4        # M51: per-branch injection cap (conv/bind/

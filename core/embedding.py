@@ -294,10 +294,14 @@ class SigmoidCodedHead(nn.Module):
         _Kp = int(getattr(cfg, 'head_phantom_bits', 32)) if getattr(cfg, 'head_lacuna', True) else 0
         self.Kp: int = max(0, min(_Kp, D))
         if self.Kp > 0:
+            # M59c: allocate the CAPACITY; only the first `_kp_active` rows/cols
+            # participate in the forward, so growth never changes a shape.
+            self._Kp_max: int = max(self.Kp, int(getattr(cfg, 'head_phantom_max', 64)))
             _pgen = torch.Generator().manual_seed(7)
             self.phantom_basis: nn.Parameter = nn.Parameter(
-                _orth_rows(torch.randn(self.Kp, D, generator=_pgen)))
-            self.phantom_mix: nn.Parameter = nn.Parameter(torch.zeros(self.K, self.Kp))
+                _orth_rows(torch.randn(self._Kp_max, D, generator=_pgen)))
+            self.phantom_mix: nn.Parameter = nn.Parameter(torch.zeros(self.K, self._Kp_max))
+            self.register_buffer('_kp_active', torch.tensor(self.Kp, dtype=torch.long))
             self.lacuna_w: nn.Parameter = nn.Parameter(torch.tensor(30.0))
             self.lacuna_b: nn.Parameter = nn.Parameter(torch.tensor(-3.0))
             # M55b: the lacuna self-calibration. The ABSOLUTE ell is ~0.97 for
@@ -469,7 +473,8 @@ class SigmoidCodedHead(nn.Module):
             e_in = e_l + _eta * self._noise_like(e_l)
         else:
             e_in = e_l
-        p = torch.tanh(e_in @ self.phantom_basis.T)          # (...,Kp)
+        _kp = int(self._kp_active.item())                    # M59c: the active slice
+        p = torch.tanh(e_in @ self.phantom_basis[:_kp].T)    # (...,Kp_active)
         g = torch.sigmoid(self.lacuna_w * (ell_rel - 1.0) + self.lacuna_b)
         p = p * g
         if self.training:
@@ -487,14 +492,43 @@ class SigmoidCodedHead(nn.Module):
                 # novelties become the channel's own readout instead of the
                 # bank staying a pure observer.
                 if (int(self._pb_step.item()) % (self.phantom_every * 4) == 0
-                        and self.Kp > 0):
-                    _cd = _pb.confirmed_directions()
+                        and int(self._kp_active.item()) > 0):
+                    _srcs = [_pb.confirmed_directions()]
+                    _ext = getattr(self, '_ext_phantom_dirs', None)   # M59 (B): UCL
+                    if _ext is not None and _ext.shape[0] > 0:
+                        _srcs.append(_ext.detach().to(self.phantom_basis.dtype))
+                    _cd = torch.cat([x for x in _srcs if x.shape[0] > 0], dim=0) \
+                        if any(x.shape[0] > 0 for x in _srcs) else _srcs[0]
                     if _cd.shape[0] > 0:
-                        _n = min(_cd.shape[0], self.Kp)
+                        _n = min(_cd.shape[0], int(self._kp_active.item()))
                         _sub = self.phantom_basis.data[:_n]
                         _sub.mul_(0.99).add_(_cd[:_n].to(_sub.dtype), alpha=0.01)
                 self._pb_step += 1
-        return u + p @ self.phantom_mix.T
+        return u + p @ self.phantom_mix[:, :_kp].T
+
+    @torch.no_grad()
+    def grow_phantom_bits(self, directions: torch.Tensor) -> int:
+        """M59c (link C): grow the phantom channel — the uncovered directions
+        (the concepts) take the next capacity rows. The forward is UNCHANGED
+        until the activation: the new rows read the residual only after the
+        active count passes them, and their mix columns start at zero.
+        Returns the number of bits added."""
+        if directions is None or directions.shape[0] == 0 or self.Kp <= 0:
+            return 0
+        _kp = int(self._kp_active.item())
+        if _kp >= self._Kp_max:
+            return 0
+        dn = F.normalize(directions.detach().float(), dim=-1)
+        bn = F.normalize(self.phantom_basis.data[:_kp].float(), dim=-1) if _kp > 0 else None
+        if bn is not None:
+            sim = (dn @ bn.T).abs().max(dim=-1).values
+            dn = dn[sim < 0.7]                      # only the uncovered
+        if dn.shape[0] == 0:
+            return 0
+        n = min(int(dn.shape[0]), self._Kp_max - _kp)
+        self.phantom_basis.data[_kp:_kp + n].copy_(dn[:n].to(self.phantom_basis.dtype))
+        self._kp_active.fill_(_kp + n)
+        return n
 
     def _noise_like(self, x: torch.Tensor) -> torch.Tensor:
         """M55b: the exploration noise from a DEDICATED generator. The head is

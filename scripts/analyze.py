@@ -209,8 +209,15 @@ def run_mech(model, cfg):
         conf = float(ucl.concept_confidence.max())
         step = int(ucl._step)
         warn = '  ⚠ не рождал концептов за 5k+ шагов — novelty ниже порога?' if (nb == 0 and step > 5000) else ''
+        # M59: the read scale — the chain measured the model self-closing the UCL
+        # (read_scale -4.0 = 0.018 within 120 steps). Print it, with the floor.
+        _rs = float(torch.sigmoid(ucl.read_scale.detach()))
+        _mature = float(ucl._mature)
+        _warn2 = '  ⚠ read_scale закрыт моделью — UCL выключен' if _rs < 0.05 else ''
         print(f'  UCL: births={nb} updates={nu} skipped={ns} занято={used}/{S} '
               f'step={step}; thr σ(birth)={thr:.3f} σ(novelty)={nov:.3f} max_conf={conf:.3f}{warn}')
+        print(f'       read_scale σ={_rs:.4f} (floor cfg={getattr(cfg, "ucl_read_scale_floor", 0.0)} '
+              f'until={getattr(cfg, "ucl_read_scale_floor_until", 0)}) mature={_mature:.3f}{_warn2}')
         out['ucl'] = {'births': nb, 'updates': nu, 'used': used, 'step': step}
     n_sig = int(model.layers[0].mirror._signal_log_weights.numel())
     hs = []
