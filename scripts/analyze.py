@@ -572,7 +572,8 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
                   f'h-entries={len(_lc.cache._h_cache)} '
                   f'compressed={len(_lc.cache._logit_cache)}')
         if hasattr(lm, 'srl_on'):
-            print(f'  [M53] SRL: on={lm.srl_on} steps={lm.srl_steps} '
+            print(f'  [M53] SRL: on={lm.srl_on} apply={getattr(lm, "srl_apply", False)} '
+                  f'steps={lm.srl_steps} '
                   f'shortlist={lm.srl_shortlist} expl_thr={lm.srl_expl_thr}')
         if hasattr(lm, 'temper_on'):
             print(f'  [M55a] temper: on={lm.temper_on} k={lm.temper_k} '

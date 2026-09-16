@@ -68,8 +68,11 @@ class WideBindConfig:
     head_phantom_noise: float = 0.05  # M52b: exploration-noise init (eta,
                                       # learnable; EVA-Ai used 0.05)
     head_phantom_l1: float = 1e-4  # M52b: light sparsity on the phantom firing
-    head_srl: bool = False        # M53: run the State Resolution Loop in the
-                                  # forward (off = bit-identical to M52b)
+    head_srl: bool = False        # M53: compute the SRL classification telemetry
+                                  # (concept/contradiction/lacuna) in the forward
+    head_srl_apply: bool = False  # M53d: ALSO apply the refinement to u (the
+                                  # 1045 post-mortem: the hard pull snapped the bits
+                                  # to the codes and killed the run - opt-in only)
     head_srl_steps: int = 3       # M53: refinement passes (T)
     head_srl_shortlist: int = 64  # M53: candidate codes per pass
     head_srl_expl_thr: float = 0.7  # M53: explanation cost (nats/bit) above

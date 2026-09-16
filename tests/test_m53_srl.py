@@ -118,3 +118,18 @@ def test_phantom_bank_waits_for_the_warmup():
         m.lm_head.ell_ema.mul_(0.5)      # M55b: the bank is selective on ell/EMA
     m(h, None, step=10, tokens=x)
     assert int(m.lm_head.phantom_bank._obs) >= 1, 'the bank did not observe after the warmup'
+
+
+def test_srl_is_diagnostic_only_by_default():
+    # M53d (the 1045 post-mortem): with head_srl=True the classification is
+    # computed, but the forward must be UNCHANGED unless head_srl_apply=True.
+    m0 = _model(head_srl=False).eval()
+    m1 = _model(head_srl=True, head_srl_after=0).eval()
+    m2 = _model(head_srl=True, head_srl_after=0, head_srl_apply=True).eval()
+    h = torch.randn(1, 8, m1.cfg.D)
+    with torch.no_grad():
+        lg0 = m0.lm_head(h)
+        lg1 = m1.lm_head(h)
+        lg2 = m2.lm_head(h)
+    assert torch.allclose(lg1, lg0, atol=1e-6), 'diagnostic-only SRL changed the forward'
+    assert not torch.allclose(lg2, lg0, atol=1e-6), 'apply=True had no effect'

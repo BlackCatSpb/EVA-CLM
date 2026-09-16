@@ -319,6 +319,7 @@ class SigmoidCodedHead(nn.Module):
             self.register_buffer('_pb_step', torch.zeros(1, dtype=torch.long), persistent=False)
         # M53: the State Resolution Loop knobs (off by default).
         self.srl_on: bool = bool(getattr(cfg, 'head_srl', False))
+        self.srl_apply: bool = bool(getattr(cfg, 'head_srl_apply', False))
         self.srl_steps: int = int(getattr(cfg, 'head_srl_steps', 3))
         self.srl_shortlist: int = int(getattr(cfg, 'head_srl_shortlist', 64))
         self.srl_expl_thr: float = float(getattr(cfg, 'head_srl_expl_thr', 0.7))
@@ -503,7 +504,9 @@ class SigmoidCodedHead(nn.Module):
         u, base = self._su(zt, z_data)
         u = self._phantom_mix(u, e_l, h)
         if self.srl_on and getattr(self, '_srl_active', True):
-            u, _srl_info = self.srl(u)
+            _u_srl, _srl_info = self.srl(u)
+            if self.srl_apply:
+                u = _u_srl              # M53d: opt-in; diagnostic-only otherwise
             if self.training:
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
         # M55a (P5): `base` is EXACTLY dead in the normalized path (a constant
@@ -548,7 +551,9 @@ class SigmoidCodedHead(nn.Module):
         u, _base = self._su(zt, z_data)                                         # (N,K) log-odds
         u = self._phantom_mix(u, e_l, h2)
         if self.srl_on and getattr(self, '_srl_active', True):
-            u, _srl_info = self.srl(u)
+            _u_srl, _srl_info = self.srl(u)
+            if self.srl_apply:
+                u = _u_srl              # M53d: opt-in
             if self.training:
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
         c: torch.Tensor = self.codes[t].to(u.dtype)
