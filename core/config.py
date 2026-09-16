@@ -70,6 +70,8 @@ class WideBindConfig:
     head_phantom_l1: float = 1e-4  # M52b: light sparsity on the phantom firing
     head_srl: bool = False        # M53: compute the SRL classification telemetry
                                   # (concept/contradiction/lacuna) in the forward
+    head_srl_every: int = 50      # M53e: compute the SRL telemetry every N forwards
+                                  # (the live cost is ~25% tok/s + ~2.5GB; 1 = every step)
     head_srl_apply: bool = False  # M53d: ALSO apply the refinement to u (the
                                   # 1045 post-mortem: the hard pull snapped the bits
                                   # to the codes and killed the run - opt-in only)

@@ -133,3 +133,16 @@ def test_srl_is_diagnostic_only_by_default():
         lg2 = m2.lm_head(h)
     assert torch.allclose(lg1, lg0, atol=1e-6), 'diagnostic-only SRL changed the forward'
     assert not torch.allclose(lg2, lg0, atol=1e-6), 'apply=True had no effect'
+
+
+def test_srl_cadence_skips_forwards():
+    # M53e: the SRL telemetry runs every N forwards (the live cost was ~25% tok/s).
+    # NOTE: call the HEAD directly - the stack's forward also calls it (_last_conf),
+    # so a model-level forward advances the cadence twice.
+    m = _model(head_srl=True, head_srl_after=0, head_srl_every=3).train()
+    h = torch.randn(1, 8, m.cfg.D)
+    m.lm_head(h)
+    assert hasattr(m.lm_head, '_last_srl'), 'the first (0 % 3 == 0) forward must compute it'
+    del m.lm_head._last_srl
+    m.lm_head(h)
+    assert not hasattr(m.lm_head, '_last_srl'), 'the cadence did not skip'

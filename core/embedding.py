@@ -320,6 +320,9 @@ class SigmoidCodedHead(nn.Module):
         # M53: the State Resolution Loop knobs (off by default).
         self.srl_on: bool = bool(getattr(cfg, 'head_srl', False))
         self.srl_apply: bool = bool(getattr(cfg, 'head_srl_apply', False))
+        self.srl_every: int = max(1, int(getattr(cfg, 'head_srl_every', 50)))
+        self.register_buffer('_srl_step', torch.zeros(1, dtype=torch.long),
+                             persistent=False)
         self.srl_steps: int = int(getattr(cfg, 'head_srl_steps', 3))
         self.srl_shortlist: int = int(getattr(cfg, 'head_srl_shortlist', 64))
         self.srl_expl_thr: float = float(getattr(cfg, 'head_srl_expl_thr', 0.7))
@@ -503,12 +506,15 @@ class SigmoidCodedHead(nn.Module):
         zt, z_data, e_l = self._gates(h, bus_bias=bus_bias, return_data=True)
         u, base = self._su(zt, z_data)
         u = self._phantom_mix(u, e_l, h)
-        if self.srl_on and getattr(self, '_srl_active', True):
+        if self.srl_on and getattr(self, '_srl_active', True) and (
+                self.srl_every <= 1 or int(self._srl_step.item()) % self.srl_every == 0):
             _u_srl, _srl_info = self.srl(u)
             if self.srl_apply:
                 u = _u_srl              # M53d: opt-in; diagnostic-only otherwise
             if self.training:
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
+        if self.srl_on and getattr(self, '_srl_active', True):
+            self._srl_step += 1         # M53e: the cadence counter
         # M55a (P5): `base` is EXACTLY dead in the normalized path (a constant
         # over the vocab cancels in the logsumexp — verified 0 gradient), so it
         # is only added when the raw logits are returned. The "unknown" channel
@@ -550,12 +556,15 @@ class SigmoidCodedHead(nn.Module):
         zt, z_data, e_l = self._gates(h2, bus_bias=bus_bias, return_data=True)  # (N,K)
         u, _base = self._su(zt, z_data)                                         # (N,K) log-odds
         u = self._phantom_mix(u, e_l, h2)
-        if self.srl_on and getattr(self, '_srl_active', True):
+        if self.srl_on and getattr(self, '_srl_active', True) and (
+                self.srl_every <= 1 or int(self._srl_step.item()) % self.srl_every == 0):
             _u_srl, _srl_info = self.srl(u)
             if self.srl_apply:
                 u = _u_srl              # M53d: opt-in
             if self.training:
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
+        if self.srl_on and getattr(self, '_srl_active', True):
+            self._srl_step += 1         # M53e
         c: torch.Tensor = self.codes[t].to(u.dtype)
         lp: torch.Tensor = (c * F.logsigmoid(u) + (1 - c) * F.logsigmoid(-u)).sum(-1)
         return lp + self.token_bias[t]
