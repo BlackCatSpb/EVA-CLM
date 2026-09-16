@@ -394,6 +394,7 @@ class EVAStack(nn.Module):
             _head._srl_active = bool(_head.srl_on) and _st >= int(getattr(_head, 'srl_after', 0))
             _head._pb_active = _st >= int(getattr(_head, 'phantom_after', 0))
             _head._temper_active = bool(getattr(_head, 'temper_on', False)) and _st >= int(getattr(_head, 'temper_after', 0))
+            _head._bus_cap = float(getattr(self.cfg, 'head_bus_cap', 3.0) or 0.0)   # M61
             # M59: the UCL floor + the head<->UCL concept links
             _ucl = getattr(self, 'concept_layer', None)
             if _ucl is not None:

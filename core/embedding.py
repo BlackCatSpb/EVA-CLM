@@ -367,6 +367,14 @@ class SigmoidCodedHead(nn.Module):
         if bus_bias is not None:
             # Phase-2 stencil: cross-layer gist biases the projector readout.
             # bus_bias shape matches zt's (B,L,K) or (N,1,K) -> broadcasts cleanly.
+            # M61: scale-invariant cap (the 165-spike: this channel is learnable
+            # and unbounded; the live run saturated the bits at lr 3.3e-4 while
+            # intent_eff climbed to 0.48). The Jacobian stays C/m — alive.
+            _bc = float(getattr(self, '_bus_cap', 0.0) or 0.0)
+            if _bc > 0.0:
+                # amax, not sqrt: sqrt's derivative is inf at the zero-init
+                _m = bus_bias.abs().amax(dim=-1, keepdim=True)
+                bus_bias = bus_bias * (_bc / _m.clamp_min(_bc))
             zt = zt + bus_bias
         if return_data:
             # M52b: the lacuna — the per-block orthogonal residual. It is
@@ -721,7 +729,12 @@ class CognitiveCodedHead(nn.Module):
         if bus_bias is not None:
             # intent-bus phase-2 stencil: per-bit bias, same convention as
             # SigmoidCodedHead._gates (applied before the base normalization).
-            z = z + bus_bias.reshape(B, L, self.K)
+            _bb = bus_bias.reshape(B, L, self.K)
+            _bc = float(getattr(self, '_bus_cap', 0.0) or 0.0)   # M61
+            if _bc > 0.0:
+                _m = _bb.abs().amax(dim=-1, keepdim=True)
+                _bb = _bb * (_bc / _m.clamp_min(_bc))
+            z = z + _bb
         base: torch.Tensor = F.logsigmoid(-z).sum(dim=-1)
         return z, base
 

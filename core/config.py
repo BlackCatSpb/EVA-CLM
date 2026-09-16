@@ -64,6 +64,12 @@ class WideBindConfig:
 
     head_mode: str = "sigmoid_coded"
     head_normalize: bool = True
+    head_bus_cap: float = 3.0     # M61: scale-invariant cap on the intent stencil
+                                  # (|bus_bias| RMS; 0 disables) — the 165-spike:
+                                  # zt += bus_bias was the unbounded channel
+    head_bus_cap: float = 3.0     # M61: scale-invariant cap on the intent stencil
+                                  # (|bus_bias| RMS; 0 disables) — the 165-spike:
+                                  # zt += bus_bias was the unbounded channel
     head_u_wall: float = 1e-3     # M52a: soft wall on the head's bit log-odds
                                   # (keeps the CE gradient alive at |u|>u0);
                                   # 0 disables
