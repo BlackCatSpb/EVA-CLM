@@ -16,8 +16,13 @@ class WideBindConfig:
     vocab: int = 65536  # B7: real corpus ids reach 65535 (50000 silently folded 7.8% of FANTASY)
     seq_len: int = 256
     batch_size: int = 2
-    lr: float = 3e-4
-    warmup_steps: int = 1000
+    # M60 (the corpus arithmetic): the unigram's log-frequencies (~-3..-5) need
+    # |Delta| ~ lr*steps, so 3e-4 took ~10-17k steps just for the unigram
+    # (measured: token_bias std 0.0028 at 250 steps, ce_raw 10.8 vs the corpus
+    # unigram 7.48 / bigram 4.21). 6e-4 halves that; the guards (AGC, M50/M51,
+    # plateau damping) carry the spike risk.
+    lr: float = 6e-4
+    warmup_steps: int = 300   # M60: 1000 -> 300 (the full LR from step 300)
     weight_decay: float = 0.01
     # (grad_clip removed B3: AGC ratio c is the live clipper knob; this field
     # was constructed, logged and never consumed)

@@ -458,7 +458,7 @@ def test_lambda_d_hierarchy():
     cfg2 = EVAConfig(lambda_d_enabled=False)
     assert abs(cfg2.exploration_threshold - 0.25) < 1e-6
     assert abs(cfg2.ema_alpha_max - 0.99) < 1e-6
-    assert cfg2.warmup_steps == 1000
+    assert cfg2.warmup_steps == 300   # M60: 1000 -> 300 (the unigram arithmetic)
 
 
 # ─── LiveInference ─────────────────────────────────────────────────
