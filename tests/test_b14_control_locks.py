@@ -77,18 +77,3 @@ def test_f406_depth_integrator_roundtrip():
     d2.put_state(st)
     assert d2._val_ema == d._val_ema and d2._last_depth_step == d._last_depth_step
 
-
-def test_f405_watchdog_uses_lr_clock_both_copies():
-    # M28 SUPERSEDES the loop-side call: the operator removed every loop
-    # intervention (vetoes/watchdog/guards) — stabilization lives only in
-    # core.adaptation. The lock now pins BOTH directions: the sensor keeps
-    # its LR-clock contract at class level, and the loops must not call it.
-    t = open(os.path.join(ROOT, 'scripts', 'train.py'), encoding='utf-8').read()
-    assert 'watchdog.check' not in t
-    nb = json.load(open(os.path.join(ROOT, 'notebooks', 'eva_colab.ipynb'), encoding='utf-8'))
-    s10 = ''.join(''.join(c['source']) for c in nb['cells'] if c['cell_type'] == 'code')
-    assert 'watchdog.check' not in s10
-    import inspect
-    from core.training_control import FailureDetector
-    sig = inspect.signature(FailureDetector.check)
-    assert list(sig.parameters) == ['self', 'ce', 'step', 'metrics']

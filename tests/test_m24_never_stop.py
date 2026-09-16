@@ -50,7 +50,3 @@ class TestLoopIsPure:
         assert 'sys.exit' not in s
         t = self._srcs()['train.py']
         assert 'sys.exit(2)' not in t
-        tc = open(os.path.join(R, 'core', 'training_control.py'),
-                  encoding='utf-8', errors='replace').read()
-        assert 'log-only, operator supervises' in tc
-        assert 'stop on confirmed second' not in tc

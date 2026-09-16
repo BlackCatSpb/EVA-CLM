@@ -116,8 +116,8 @@ def run_envelope(ckpt):
               'для resume не годится. Ждём первую eval-запись.')
         return {'seed': True}
     need = ['step', 'model', 'optimizer', 'param_names', 'scheduler', 'best_val_loss',
-            'cfg', 'reasoning_enabled_step', 'recover_count', 'active_depth',
-            'detector', 'balancer', 'stream_idx', 'offset', 'rng', 'data_rng',
+            'cfg', 'reasoning_enabled_step', 'active_depth',
+            'balancer', 'stream_idx', 'offset', 'rng', 'data_rng',
             'code_fp', 'depth_state', 'stream_state', 'stream_gs', 'cuda_rng']
     # load_ckpt streaming-pop выбрасывает тяжёлые части; восстанавливаем факт их
     # наличия из метаданных, иначе они вечно ложно падают как MISSING.
@@ -132,14 +132,10 @@ def run_envelope(ckpt):
         present.add('param_names')
     miss = [k for k in need if k not in present]
     extra = [k for k in present if k not in need]
-    d = ckpt.get('detector') or {}
     b = ckpt.get('balancer') or {}
     print(f'  step={step}  best_val={ckpt.get("best_val_loss", float("nan")):.4f}  '
           f'depth={ckpt.get("active_depth")}  reasoning_ramp={ckpt.get("reasoning_enabled_step")}')
     print(f'  data cursor: stream_idx={ckpt.get("stream_idx")} offset={ckpt.get("offset")}')
-    print(f'  detector: recover={d.get("recover_count", ckpt.get("recover_count"))} '
-          f'armed={d.get("ce_armed")} baselines={sorted((d.get("stats") or {}).keys())} '
-          f'viol={d.get("viol")}')
     print(f'  balancer: ema_ce={b.get("ema_ce")} align={b.get("align")}')
     print(f'  rng: cpu={("rng" in present)} data_gen={("data_rng" in present)}  '
           f'optimizer: groups={ckpt.get("_opt_groups", 0)} slots={ckpt.get("_opt_slots", 0)} '

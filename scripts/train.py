@@ -13,7 +13,7 @@ import numpy as np
 from torch.serialization import add_safe_globals
 
 from core import EVAConfig, EVAStack, MirrorLRScheduler
-from core.training_control import (hard_veto_ceiling, codebook_fingerprint,
+from core.training_control import (codebook_fingerprint,
                                 verify_identity_resume, apply_tau_lr)
 
 
@@ -233,8 +233,7 @@ def train(cfg=None, resume_path=None):
     # Replaces the old scattered guard: cosine/CosineWarmup LR, ReadinessActivator
     # fixed schedule, Watchdog ce>15, and the inline bypass/aligned aux weighting.
     from core.adaptation import (LossBalancer, DepthController, LRController,
-                                 FailureDetector, GradientClipper,
-                                 nonfinite_gradient_names,
+                                 GradientClipper,
                                  set_active_depth, build_optimizer)
 
     def _make_opt(lr):
@@ -250,10 +249,6 @@ def train(cfg=None, resume_path=None):
                             unfreeze_inc=4, eval_interval=cfg.eval_interval)
     # Aux-loss balancer: spectral alignment (bounds aux grad by ||g_CE||).
     balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval)
-    # Relative-divergence ALARM sensor (decision D6: detection only — the
-    # loop stops on an alarm; recovery is a human call from a clean best.pt).
-    watchdog = FailureDetector(model, k_sigma=3.0, warmup=cfg.warmup_steps)
-    alarm_strikes = 0
     # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
@@ -276,8 +271,7 @@ def train(cfg=None, resume_path=None):
             'scheduler': scheduler.state_dict(),
             'best_val_loss': float(best_val_loss), 'cfg': cfg,
             'reasoning_enabled_step': reasoning_enabled_step,
-            'recover_count': watchdog.recover_count, 'active_depth': depth.active,
-            'detector': watchdog.state_dict(), 'depth_state': depth.get_state(),
+            'active_depth': depth.active, 'depth_state': depth.get_state(),
             'balancer': balancer.state_dict(),
             'stream_idx': int(stream_idx), 'offset': int(offset),
             'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
@@ -395,12 +389,9 @@ def train(cfg=None, resume_path=None):
             depth.set_depth(_saved_depth)
         else:
             depth.set_depth(min(8 + (ckpt['step'] // 15000) * 4, cfg.n_layers))  # legacy fallback (pre-fix ckpts)
-        watchdog = FailureDetector(model, k_sigma=3.0, warmup=cfg.warmup_steps)
         print('  Optimizer/scheduler rebuilt FRESH (no momentum restore)')
         start_step = ckpt['step']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
-        # M12: full-state resume — watchdog/balancer baselines ride in best.pt
-        watchdog.load_state_dict(ckpt.get('detector'))
         depth.put_state(ckpt.get('depth_state'))  # B14 (F4-06)
         if ckpt.get('balancer') is not None:
             balancer.load_state_dict(ckpt['balancer'])
@@ -508,10 +499,6 @@ def train(cfg=None, resume_path=None):
             ce_loss, aux_dict = model.compute_losses(out, y, h_emb=h)
 
             depth.update(step)
-            # Statistical watchdog: CE explosion -> rollback + fresh Adam + LR rewind.
-            # Audit M8: train.py never passed the protective metrics and never
-            # armed CE (watchdog.ce_armed stays False) — the Colab loop has both;
-            # here the watchdog was decoration. Metrics mirror the notebook.
             # ── Gradient-reactive governance loss ─────────────────────────
             # Moved into core.losses.compute_losses (audit M5): the target
             # ‖∂CE/∂mlp_out‖ per expert is captured by a backward HOOK in the
@@ -654,8 +641,7 @@ def train(cfg=None, resume_path=None):
                         'reasoning_enabled_step': reasoning_enabled_step,
                         'active_depth': depth.active,
                         # M12: one checkpoint carries the FULL restart state
-                        'recover_count': watchdog.recover_count,
-                        'detector': watchdog.state_dict(), 'depth_state': depth.get_state(),
+                        'depth_state': depth.get_state(),
                         'balancer': balancer.state_dict(),
                         'stream_idx': int(stream_idx), 'offset': int(offset),
                         'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),

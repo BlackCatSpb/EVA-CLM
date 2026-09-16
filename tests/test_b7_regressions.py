@@ -10,7 +10,6 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import EVAConfig, EVAStack                      # noqa: E402
-from core.training_control import hard_veto_ceiling       # noqa: E402
 
 
 def _mini(**kw):
@@ -18,16 +17,6 @@ def _mini(**kw):
                     vocab=600, save_dir='.', **kw)
     torch.manual_seed(0)
     return EVAStack(cfg).train()
-
-
-def test_f07_ceiling_is_geometry_free_and_history_consistent():
-    # The M14-era calibration was K*ln2 = 32*0.693 = 22.17 at code_dim=32;
-    # 2*ln(V) at the real vocab must reproduce it (and stay put when the
-    # code geometry moves to 64 — the exact bug F-07 describes).
-    assert abs(hard_veto_ceiling(65536) - 2 * math.log(65536)) < 1e-9
-    assert abs(hard_veto_ceiling(65536) - 22.18) < 0.05
-    assert hard_veto_ceiling(65536) < 34.0        # the live garbage class is caught
-    assert hard_veto_ceiling(50000) < 21.7
 
 
 def test_f01_tokenstream_mismatch_is_loud(tmp_path):

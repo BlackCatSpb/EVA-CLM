@@ -355,10 +355,9 @@ class EVABlock(nn.Module):
         # ─── Spectral (self-organizing frequency filters) ───
         self.register_buffer('V_dct', dct_basis(cfg.D))
         # ─── MLP-output runaway tracker (self-referencing, τ-linked) ───
-        # fast (0.99) vs slow (0.999) EMA of ‖h_mlp‖ — same a/a_slow convention as
-        # the FailureDetector. Healthy ratio ≈ 1; a ×2–50 runaway lifts it past the
-        # detector's relative margin within a few steps, unlike an absolute SPC
-        # bound which the runaway's growing variance absorbs.
+        # fast (0.99) vs slow (0.999) EMA of ‖h_mlp‖. Healthy ratio ≈ 1; a
+        # ×2–50 runaway lifts it within a few steps, unlike an absolute bound
+        # which the runaway's growing variance absorbs.
         self.register_buffer('_mlp_now_ema', torch.ones(1), persistent=False)
         self.register_buffer('_mlp_base_ema', torch.ones(1), persistent=False)
         self.register_buffer('_mlp_cnt', torch.zeros(1), persistent=False)

@@ -641,22 +641,6 @@ def test_snapshot_restore_buffers():
 
 
 # ── M8.2 non-finite CE forces rollback; buffers get scrubbed ────────────────
-def test_nan_ce_forces_alarm_without_side_effects():
-    """D6: non-finite CE forces the ALARM (check()->True) — the sensor itself
-    must not swap optimizers, load files or rewrite buffers; the caller stops
-    the run and the NaN state dies with the process (resume reloads weights)."""
-    from core.training_control import FailureDetector
-    m = _stack()
-    wd = FailureDetector(m, warmup=0)
-    for i in range(5):
-        wd.check(10.0, i, {'mlp_ratio': 1.0})
-    fired = wd.check(float('nan'), 100, {'mlp_ratio': 1.0})
-    assert fired, 'non-finite CE did not force the alarm'
-    assert not hasattr(wd, 'optimizer'), 'D6 detector must not own an optimizer'
-    assert not hasattr(wd, 'best_path'), 'D6 detector must not touch the filesystem'
-    assert m is not None  # weights untouched by the sensor itself
-
-# ── M8.3 TokenStream contract: wrapped flag + stream.len (train.py) ──────────
 def test_tokenstream_wrapped(tmp_path=None):
     import importlib.util, numpy as np, tempfile, pathlib
     if tmp_path is None:
@@ -823,56 +807,6 @@ def test_logit_cache_incremental_kv_and_identity_init():
     assert abs(float(a.attention.cache_gate[2].bias.detach()) + 10.0) < 1e-6
 
 
-def test_checkpoint_state_roundtrip():
-    """M12 single-best.pt: watchdog & balancer statistics must round-trip —
-    a resumed session continues its signal baselines, violation streaks and
-    alarm history instead of silently re-bootstrapping (recover_count
-    was saved by M8 but never RESTORED until now)."""
-    from core.training_control import FailureDetector, LossBalancer
-    model = torch.nn.Module()
-    wd = FailureDetector(model)
-    for i in range(30):                       # stable series: stats build, no trigger
-        assert not wd.check(7.0 + 0.001 * i, i)
-    wd.ce_armed = True
-    sd = wd.state_dict()
-    assert 'ce' in sd['stats'] and len(sd['stats']['ce']) == 7  # fast,prev,n,slow,dvar,ph,phmin (B4)
-    wd2 = FailureDetector(model)
-    wd2.load_state_dict(sd)
-    assert wd2._stats == wd._stats and wd2.recover_count == wd.recover_count
-    assert wd2.ce_armed and wd2._viol == wd._viol
-    # empty/legacy payload must be a no-ops, not crashes
-    wd2.load_state_dict(None)
-    bal = LossBalancer(align=False)
-    ce, aux = torch.tensor(2.0), {'u': torch.tensor(0.5), 'v': torch.tensor(-1.0)}
-    for _ in range(5):
-        bal.loss(ce, aux)
-    bsd = bal.state_dict()
-    assert bsd['ema_ce'] is not None and set(bsd['ema_aux']) == {'u', 'v'}
-    bal2 = LossBalancer(align=False)
-    bal2.load_state_dict(bsd)
-    assert bal2.ema_aux == bal.ema_aux and abs(bal2.ema_ce - bal.ema_ce) < 1e-12
-    bal2.load_state_dict(None)
-
-
-def test_arm_ce_rebootstraps_warmup_baseline():
-    """Live L4 incident (step 1045/1052): arm-ing CE at the first eval while
-    its baseline still carries the WARMUP ramp rolled the run back on the very
-    first healthy CE oscillation. arm_ce() must disarm-and-rebootstrap: a fresh
-    baseline, violation counter zeroed, and only THEN the watch is live."""
-    from core.training_control import FailureDetector
-    model = torch.nn.Module()
-    wd = FailureDetector(model)
-    for i in range(60):                       # ramping (warmup) CE, un-armed
-        wd.check(6.0 + 0.05 * i, i)
-    assert 'ce' in wd._stats and not wd.ce_armed
-    wd.arm_ce()
-    assert wd.ce_armed and 'ce' not in wd._stats and 'ce' not in wd._viol
-    # the old ramp level must not veto a spike the very next steps: 100-sample
-    # bootstrap grace (min_samples) before the rule can fire at all
-    for i in range(70):
-        assert not wd.check(9.5, 100 + i), 'warmup baseline survived arming'
-
-
 def test_log_analyzer_tracks_live_format():
     """analyze.py's log parser must keep matching the notebook's live line
     format — it already drifted once (intent_w vs intent_eff) and died
@@ -960,68 +894,6 @@ def test_b6_grad_geometry_is_exact_diagnostic():
                for a, b in zip(before, after)), '.grad must stay untouched'
     ce.backward()                          # graph survived the diagnostic
     assert lin.weight.grad is not None and torch.isfinite(lin.weight.grad).all()
-
-
-def test_b5_warmup_is_not_an_incident():
-    """Live incident (2026-09, A100 L4 run): at step 273 the watchdog ALARMED
-    on gate_l1 while the model was HEALTHY — the LR warmup ramp legitimately
-    fell gate_l1 0.49->0.45 and diversity 0.58->0.26, dvar EMAs were still
-    warming, and PH roulette (5 channels x ARL~2.3k, D6 = STOP) fired.
-    Lock: (a) a full warmup-shaped ramp (drift + real per-step jitter) must
-    produce ZERO alarms while step < warmup; (b) a genuine runaway of the
-    mlp_ratio-doubling kind AFTER warmup must still be caught fast."""
-    from core.training_control import FailureDetector
-    import random
-    random.seed(7)
-    torch.manual_seed(7)
-    model = torch.nn.Linear(4, 4)
-    wd = FailureDetector(model, warmup=1200)
-    wd.ce_armed = True
-    base = {'gate_l1': 0.488, 'diversity': 0.585, 'ce': 6.35,
-            'mlp_ratio': 1.2, 'ig_eff': 0.055}
-    for step in range(1400):
-        m = {k: v + (0.45 - 0.488) * min(step, 1200) / 1200.0
-             if k == 'gate_l1' else
-             v + (0.26 - 0.585) * min(step, 1200) / 1200.0
-             if k == 'diversity' else v for k, v in base.items()}
-        m = {k: v + random.gauss(0.0, 0.015 * (abs(v) if v else 1.0))
-             for k, v in m.items()}          # real batch jitter
-        assert not wd.check(m['ce'], step, m), f'false alarm at step {step}'
-    # armed now: double mlp_ratio every ~50 steps (the classic runaway)
-    v = 1.2
-    fired = None
-    for step in range(1400, 1600):
-        v *= 1.014                             # ~doubling/50
-        if wd.check(6.3, step, {'mlp_ratio': v}):
-            fired = step
-            break
-    assert fired is not None and fired < 1520, 'PH must catch a 1.4%/step creep'
-
-
-def test_alarm_sensor_never_touches_model():
-    """Decision D6: check() only SOUNDS (returns True after 3 consecutive
-    relative violations) — it must NOT roll weights back, NOT build
-    optimizers, NOT read files, NOT clear its own baselines. The caller
-    stops; recovery is a human call. Cooldown must suppress re-alarm spam."""
-    from core.training_control import FailureDetector
-    model = torch.nn.Linear(4, 4)
-    wd = FailureDetector(model, warmup=0)  # B5: exercise the armed regime
-    wd.ce_armed = True
-    with torch.no_grad():
-        model.weight.add_(10.0)               # corrupt the weights
-    corrupt = model.weight.detach().clone()
-    for i in range(120):                      # warm, stable baseline
-        assert not wd.check(6.0, 100 + i)
-    fired = False
-    for i in range(20):                       # sudden sustained spike
-        fired = wd.check(50.0, 300 + i)
-        if fired:
-            break
-    assert fired and wd.recover_count >= 1
-    assert torch.equal(model.weight.detach(), corrupt), \
-        'D6: sensor touched model state — must be side-effect free'
-    assert wd._stats.get('ce') is not None, 'sensor must NOT wipe its baselines'
-    assert not wd.check(50.0, 400), 'cooldown must gate alarm spam'
 
 
 def test_runtime_checkpoint_toggle_is_equivalent():

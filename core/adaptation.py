@@ -38,12 +38,9 @@ Controllers
     val-loss regression.  On recovery it ``rewind()``s (re-warmup from a small
     LR) instead of an arbitrary 0.5 halving.
 
-* ``FailureDetector``
-    Statistical divergence detection (SPC 3σ rule): maintains EWMA + variance of
-    CE; flags a genuine explosion only when ``CE > mean + k_sigma·σ`` AND is
-    still rising, after an initial warmup.  Replaces the arbitrary
-    relative rule (decision D6).  On trigger it sounds the alarm; the caller stops,
-    rebuilds a FRESH Adam (no momentum), and rewinds the LR controller.
+* ``LossBalancer``
+    Spectral alignment (PCGrad): the aux-gradient is bounded by ``‖g_CE‖``
+    by construction, so no per-loss magic weights and no cap are needed.
 
 * ``GradientClipper``
     Adaptive Gradient Clipping (AGC, Brock et al. 2021, "High-Performance
@@ -327,7 +324,7 @@ class LRController:
         self.cfg: Any = cfg
 
     # ── re-binding after rollback ───────────────────────────────────────────
-    # ``FailureDetector.check`` does ``lr_controller.optimizer = new_opt``.
+    # A recovery re-bind does ``lr_controller.optimizer = new_opt``.
     # That MUST propagate into the wrapped MirrorLRScheduler — it anneals
     # ``_inner.optimizer.param_groups`` from ``_inner._orig_lrs``; assigning
     # only the wrapper attribute left the fresh optimizer unscheduled (no
@@ -399,10 +396,7 @@ class LRController:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Failure detection & loss balancing live in core/training_control.py:
-#   - `FailureDetector` — multi-signal statistical SPC k·sigma rule
-#     (CE + diversity + gate_mean + mlp_out + effective gate amplitude),
-#     live after the EMA half-life bootstrap (not a hand-picked warmup).
+# Loss balancing lives in core/training_control.py:
 #   - `LossBalancer` — spectral alignment (PCGrad) with NO align_cap:
 #     the cos-projection already bounds the aux gradient by ||g_CE||.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -500,7 +494,7 @@ def nonfinite_gradient_names(model: torch.nn.Module) -> list[str]:
 # Re-export (single adaptive module: core/training_control.py)
 # ─────────────────────────────────────────────────────────────────────────────
 from .training_control import (   # noqa: F401,E402
-    FailureDetector, LossBalancer, hard_veto_ceiling,
+    LossBalancer,
     codebook_fingerprint, verify_identity_resume,
     apply_tau_lr, layer_tau_ctx, mirror_lstats,
 )
