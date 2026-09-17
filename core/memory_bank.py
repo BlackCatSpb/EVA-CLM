@@ -230,53 +230,78 @@ class L2Bank(nn.Module):
         self.register_buffer('_write_idx', torch.zeros(1, dtype=torch.long), persistent=True)
         self._n_overwrites = 0
         self._n_consumed = 0
+        self._keys_eff = None   # M64: the graph-carrying store of this forward
+        self._vals_eff = None
 
-    @torch.no_grad()
     def write(self, embedding: torch.Tensor) -> int:
         """Write to bank. Returns slot index that was written.
 
         Prioritizes overwriting consumed slots.
         Falls back to overwriting oldest slot.
+
+        M64 (M63-D): the projections LIVE in the autograd graph now. The old
+        body ran W_k/W_v under @torch.no_grad and copied the result into the
+        buffers, so the keys/vals the READ consumed were detached constants:
+        W_k/W_v never received a gradient (measured: p.grad is None for the
+        whole run) and the read degenerated into a per-forward bias
+        (cos(r_t, r_t') ~ 1.0 between positions). The write is functional now:
+        the effective store (keys_eff/vals_eff) carries the graph, the read
+        consumes it, and the persistent buffer is committed with the detached
+        copy so the checkpoint stays correct.
         """
         novelty_score = torch.sigmoid(self.novelty_gate(embedding))
 
         n_filled = min(self._write_idx.item(), self.n_slots)
 
+        # the slot choice is a state decision (ages/flags), not a gradient path
         with torch.no_grad():
-            # Hybrid normalization: F.normalize + tau-based scaling
-            # Keys: normalized for stable cosine similarity
-            raw_key = self.W_k(embedding.detach())
-            new_key = F.normalize(raw_key, dim=-1) * torch.sigmoid(self.key_log_scale)
-            
-            # Vals: normalized + tau-scaled (matches key normalization for stable attention)
-            raw_val = self.W_v(embedding.detach())
-            new_val = F.normalize(raw_val, dim=-1) * torch.sigmoid(self.val_log_scale)
-
-        if n_filled < self.n_slots:
-            # Fill empty slot
-            slot = n_filled
-        else:
-            # Prioritize overwriting consumed slots
-            consumed_mask = self.slot_consumed
-            if consumed_mask.any():
-                # Pick oldest consumed slot
-                consumed_ages = self.slot_age.clone()
-                consumed_ages[~consumed_mask] = -1  # ignore non-consumed
-                slot = int(consumed_ages.argmax().item())
-                self._n_consumed += 1
+            if n_filled < self.n_slots:
+                # Fill empty slot
+                slot = n_filled
             else:
-                # Overwrite oldest slot
-                slot = int(self.slot_age.argmax().item())
+                # Prioritize overwriting consumed slots
+                consumed_mask = self.slot_consumed
+                if consumed_mask.any():
+                    # Pick oldest consumed slot
+                    consumed_ages = self.slot_age.clone()
+                    consumed_ages[~consumed_mask] = -1  # ignore non-consumed
+                    slot = int(consumed_ages.argmax().item())
+                    self._n_consumed += 1
+                else:
+                    # Overwrite oldest slot
+                    slot = int(self.slot_age.argmax().item())
 
-        self.keys.data[slot] = new_key
-        self.vals.data[slot] = new_val
-        self.slot_age.data[slot] = 0.0
-        self.slot_novelty.data[slot] = novelty_score.item()
-        self.slot_consumed.data[slot] = False  # clear consumed flag
-        mask = torch.arange(self.n_slots, device=self.slot_age.device) != slot
-        self.slot_age.data[mask] += 1.0
-        self._n_overwrites += 1
-        self._write_idx += 1
+        # M64: live projections — the CE gradient flows through the read's
+        # attention into W_k/W_v (and, via the value scale, into novelty_gate).
+        raw_key = self.W_k(embedding)
+        new_key = F.normalize(raw_key, dim=-1) * torch.sigmoid(self.key_log_scale)
+        raw_val = self.W_v(embedding)
+        new_val = F.normalize(raw_val, dim=-1) * torch.sigmoid(self.val_log_scale)
+        # the novelty gate was a dead diagnostic (no gradient path at all);
+        # it now scales the written value, so the CE teaches it WHICH writes
+        # are worth keeping (its intended semantics).
+        new_val = new_val * novelty_score.to(new_val.dtype)
+
+        # out-of-place row replacement (index_copy, the UCL pattern): an
+        # in-place `keys_eff[slot] = ...` on a non-grad constant silently
+        # DETACHES the new row (autograd does not track in-place ops on
+        # tensors that do not require grad) — measured: W_k.grad stayed None.
+        _slot_t = torch.tensor([slot], device=self.keys.device, dtype=torch.long)
+        keys_eff = self.keys.index_copy(0, _slot_t, new_key.unsqueeze(0))
+        vals_eff = self.vals.index_copy(0, _slot_t, new_val.unsqueeze(0))
+        self._keys_eff = keys_eff          # per-forward, consumed by read()
+        self._vals_eff = vals_eff
+
+        with torch.no_grad():
+            self.keys.data.copy_(keys_eff.detach())
+            self.vals.data.copy_(vals_eff.detach())
+            self.slot_age.data[slot] = 0.0
+            self.slot_novelty.data[slot] = novelty_score.item()
+            self.slot_consumed.data[slot] = False  # clear consumed flag
+            mask = torch.arange(self.n_slots, device=self.slot_age.device) != slot
+            self.slot_age.data[mask] += 1.0
+            self._n_overwrites += 1
+            self._write_idx += 1
         return slot
 
     @torch.no_grad()
@@ -294,8 +319,15 @@ class L2Bank(nn.Module):
         """
         B, L, _ = query.shape
         q = self.q_proj(query)  # (B, L, bridge_dim)
-        k = self.keys  # (n_slots, bridge_dim)
-        v = self.val_norm(self.vals)  # (n_slots, bridge_dim) — normalized for stability
+        # M64 (M63-D): prefer the graph-carrying effective store from this
+        # forward's write; fall back to the committed buffer (eval/fresh).
+        k = getattr(self, '_keys_eff', None)
+        if k is None:
+            k = self.keys  # (n_slots, bridge_dim)
+        v_raw = getattr(self, '_vals_eff', None)
+        if v_raw is None:
+            v_raw = self.vals
+        v = self.val_norm(v_raw)  # (n_slots, bridge_dim) — normalized for stability
 
         temp = torch.exp(self.log_tau).clamp(min=0.1, max=10.0) * float(temp_k)
         age_decay = torch.exp(-0.01 * self.slot_age)
@@ -325,6 +357,8 @@ class L2Bank(nn.Module):
         self._write_idx.zero_()
         self._n_overwrites = 0
         self._n_consumed = 0
+        self._keys_eff = None   # M64: drop the stale effective store
+        self._vals_eff = None
 
 
 class StreamingMemoryBank(nn.Module):
