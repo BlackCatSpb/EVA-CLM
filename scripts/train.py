@@ -653,9 +653,12 @@ def train(cfg=None, resume_path=None):
                 # M58c: the head telemetry (lacuna/SRL/phantom/conflict/wall) was
                 # visible only in the notebook and the analyzer — the CLI's log
                 # showed nothing of the M52-M56 channels.
-                _tel = model.head_telemetry() if hasattr(model, 'head_telemetry') else {}
-                _tel_str = ' '.join(f'{k}={v:.4f}' if isinstance(v, float) else f'{k}={v}'
-                                    for k, v in _tel.items())
+                try:   # M64.2r2: telemetry must never kill the run
+                    _tel = model.head_telemetry() if hasattr(model, 'head_telemetry') else {}
+                    _tel_str = ' '.join(f'{k}={v:.4f}' if isinstance(v, float) else f'{k}={v}'
+                                        for k, v in _tel.items())
+                except Exception as _te2:
+                    _tel_str = f'skipped ({str(_te2)[:60]})'
                 # M64.4 (R3 review): the balancer's cadence telemetry — without
                 # it the A/B (align_every=8 vs 1) is indistinguishable in the log.
                 _bal = (f'bal_a={getattr(balancer, "n_align", 0)} '

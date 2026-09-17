@@ -174,8 +174,12 @@ class PhantomBank(nn.Module):
         # the best-cos telemetry (R3): p50/p90/p99 over the last <=64 observes
         _cnt = int(min(self._cos_ptr.item(), self._cos_ring.numel()))
         if _cnt > 0:
-            _h = self._cos_ring[:_cnt]
-            _q = torch.quantile(_h, torch.tensor([0.5, 0.9, 0.99]))
+            _h = self._cos_ring[:_cnt].float()
+            # the q tensor MUST live on _h's device — the first landing built it
+            # on the CPU and CRASHED the live run at step 7425 (quantile() q
+            # device check). CPU tests could never catch it.
+            _q = torch.quantile(_h, torch.tensor([0.5, 0.9, 0.99],
+                                                 device=_h.device, dtype=_h.dtype))
             cos_p50, cos_p90, cos_p99 = (float(_q[0]), float(_q[1]), float(_q[2]))
         else:
             cos_p50 = cos_p90 = cos_p99 = 0.0
