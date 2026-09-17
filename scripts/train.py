@@ -14,7 +14,8 @@ from torch.serialization import add_safe_globals
 
 from core import EVAConfig, EVAStack, MirrorLRScheduler
 from core.training_control import (codebook_fingerprint,
-                                verify_identity_resume, apply_tau_lr)
+                                verify_identity_resume, apply_tau_lr,
+                                grad_census, training_telemetry)  # M64.8
 
 
 def _save_checkpoint_safely(state, path):
@@ -585,7 +586,10 @@ def train(cfg=None, resume_path=None):
             # apply_tau_lr below (the direct grad.mul_ here was a second copy:
             # ls_mult landed on the base parameters squared).
             tokens_seen += cfg.batch_size * seq_len
-            
+            # M64.8 (M63-E): the liveness census — captured AFTER backward,
+            # BEFORE zero_grad (an absent/zero entry is the dead-channel signal).
+            _gc = grad_census(model) if step % max(cfg.log_interval, 1) == 0 else None
+
             # Clip gradients (AGC — scale-free ratio, replaces magic grad_clip)
             # U9: keep the τ-AGC per-layer map fresh (τ ladder drifts slowly).
             if step % cfg.eval_interval == 0:
@@ -656,6 +660,17 @@ def train(cfg=None, resume_path=None):
                       f'{aux_str}{gate_str}')
                 if _tel_str:
                     print(f'  head: {_tel_str}')
+                # M64.8: the telemetry batch (stable rank / alpha std / usage H
+                # / the spike snapshot) + the grad census (live != effective)
+                try:
+                    _tt = training_telemetry(model)
+                    _tt.update(_gc or {})
+                    if _tt:
+                        print('  tele: ' + ' '.join(
+                            f'{k}={v:.4g}' if isinstance(v, float) else f'{k}={v}'
+                            for k, v in _tt.items()))
+                except Exception as _te:
+                    print(f'  tele: skipped ({str(_te)[:60]})')
             
             # Eval
             # M49: early measurement evals (see the notebook twin)

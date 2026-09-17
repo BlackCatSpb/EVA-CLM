@@ -576,3 +576,93 @@ class LossBalancer:
         if phase_model is not None:
             for _l in getattr(phase_model, 'layers', []):
                 _l._ga_record = True
+
+
+# ───────────────────── M64.8: the telemetry batch (M63-A/E requests) ─────────
+
+@torch.no_grad()
+def grad_census(model) -> dict:
+    """The liveness census: gradient norms of the channels whose death the M63
+    audits had to guess at ('live' is not 'effective' — the M64.3 review found
+    W_k's gradient ~400x weaker than W_v's). Call AFTER backward, BEFORE
+    zero_grad (the caller's job). Missing/None grads are reported as None —
+    an absent key here is itself the signal (a dead channel)."""
+    out = {}
+    probes = {
+        'g_readout': ('embed', 'basis'),
+        'g_token_bias': ('lm_head', 'token_bias'),
+        'g_bit_bias': ('lm_head', 'bit_bias'),
+        'g_emphasis': ('lm_head', 'emphasis_gain'),
+        'g_log_temp': ('lm_head', 'log_temp'),
+        'g_phantom_mix': ('lm_head', 'phantom_mix'),
+        'g_ucl_scale': ('concept_layer', 'read_scale'),
+        'g_wk': ('memory_bank.l2', 'W_k.weight'),
+        'g_wv': ('memory_bank.l2', 'W_v.weight'),
+        'g_wq': ('memory_bank.l2', 'q_proj.weight'),
+        'g_wo': ('memory_bank.l2', 'W_o.weight'),
+        'g_fusion2': ('memory_bank', 'fusion.2.weight'),
+        'g_l1_proj': ('memory_bank.l1', 'proj.weight'),
+    }
+    for key, (mod, attr) in probes.items():
+        p = model
+        for a in mod.split('.'):
+            p = getattr(p, a, None)
+            if p is None:
+                break
+        if p is None:
+            continue
+        for a in attr.split('.'):
+            p = getattr(p, a, None)
+            if p is None:
+                break
+        if p is None:
+            continue
+        g = getattr(p, 'grad', None)
+        out[key] = float(g.norm()) if g is not None else 0.0
+    return out
+
+
+@torch.no_grad()
+def training_telemetry(model) -> dict:
+    """The cheap per-log-interval telemetry (M63-E/A): the stable rank of the
+    bind projections (the removed `nuc`'s metric — a pure observer), std(alpha)
+    (the removed push's observable), H(softmax(usage)) next to HHI (the removed
+    gate_repulse's metric), and the bus/stencil norms."""
+    out = {}
+    layers = getattr(model, 'layers', [])
+    srs, als, hs = [], [], []
+    for l in layers:
+        w = getattr(getattr(l, 'bind', None), 'W_proj', None)
+        if w is not None:
+            W = w.weight.detach()
+            if W.ndim == 2 and min(W.shape) > 1:
+                v = torch.randn(W.shape[1], device=W.device, dtype=W.dtype)
+                v = v / (v.norm() + 1e-12)
+                for _ in range(4):
+                    v = W.t() @ (W @ v)
+                    v = v / (v.norm() + 1e-12)
+                s = (W @ v).norm()
+                rk = float(min(W.shape))
+                sr = float((W.pow(2).sum() / (s.pow(2) + 1e-12)).clamp(1.0, rk))
+                srs.append(sr / rk)
+        mir = getattr(l, 'mirror', None)
+        if mir is not None:
+            ad = getattr(mir, 'alpha_diag', None)
+            if ad is not None:
+                als.append(float(ad.detach().float().std()))
+            gu = getattr(mir, '_cached_gate_usage', None)
+            if gu is not None:
+                p = torch.softmax(gu.detach().float(), dim=0)
+                hs.append(float(-(p * (p + 1e-9).log()).sum()))
+    if srs:
+        out['sr_wproj'] = sum(srs) / len(srs)
+    if als:
+        out['alpha_std'] = sum(als) / len(als)
+    if hs:
+        out['usage_H'] = sum(hs) / len(hs)
+    head = getattr(model, 'lm_head', None)
+    if head is not None:
+        sp = getattr(head, '_spike_stats', None)
+        if sp:
+            out.update({f'spk_{k}': v for k, v in sp.items()})
+    return out

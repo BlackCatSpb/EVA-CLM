@@ -393,7 +393,8 @@ class SigmoidCodedHead(nn.Module):
             zt = zt.squeeze(1)
         return zt
 
-    def _su(self, zt: torch.Tensor, z_data: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def _su(self, zt: torch.Tensor, z_data: Optional[torch.Tensor] = None,
+            h_norm: Optional[float] = None) -> tuple[torch.Tensor, torch.Tensor]:
         # Single per-bit temperature: T already scaled z in _gates, so the
         # emphasis softmax reads the SAME logits (passing tau=exp(log_temp)
         # here again divided twice: z/T/tau = z/T^2 — audit M1).
@@ -406,6 +407,20 @@ class SigmoidCodedHead(nn.Module):
         if self.training:
             self._last_u = u        # M52a (P1): the saturation wall reads this
             self._last_sat = (u.detach().abs() > 12.0).float().mean()   # M55a (P6)
+            # M64.8 (M63-A's F3-A): the live spike capture. The old analysis
+            # could only say 'sat=1.0' — the u/h/temp VALUES at the spike were
+            # overwritten by the next forward. Snapshot them (no_grad, only on
+            # saturation steps — rare) so the next log line / analyze can print
+            # the actual numbers. The audit found the historical wall=3541
+            # geometrically impossible for the current head — this settles it.
+            if float(self._last_sat) > 0.0:
+                with torch.no_grad():
+                    self._spike_stats = {
+                        'u_max': float(u.detach().abs().max()),
+                        'u_std': float(u.detach().std()),
+                        'h_norm': float(h_norm) if h_norm is not None else -1.0,
+                        'sat': float(self._last_sat),
+                    }
         return u, base
 
     def srl(self, u0: torch.Tensor, steps: int = None, tau0: float = 1.0,
@@ -562,7 +577,7 @@ class SigmoidCodedHead(nn.Module):
         else:
             squeeze = False
         zt, z_data, e_l = self._gates(h, bus_bias=bus_bias, return_data=True)
-        u, base = self._su(zt, z_data)
+        u, base = self._su(zt, z_data, h_norm=float(h.detach().norm(dim=-1).mean()))
         u = self._phantom_mix(u, e_l, h)
         if self.srl_on and getattr(self, '_srl_active', True) and (
                 self.srl_every <= 1 or int(self._srl_step.item()) % self.srl_every == 0):
