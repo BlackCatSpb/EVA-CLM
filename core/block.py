@@ -527,7 +527,8 @@ class EVABlock(nn.Module):
         # to 1.0 at rest is NOT the fix: it removes the decay floor, memory stops
         # decaying across a 512-window, downstream norm saturates and
         # layer_bridge_gate gradients vanish (caught by the dead-parameter
-        # detector in B11). Widening the ladder needs a BOUNDED rest (<1) with
+        # detector in B11; the LBG itself was removed in M64.5). Widening the
+        # ladder needs a BOUNDED rest (<1) with
         # (1-a) write-normalization — a B12 design decision, not a silent edit.
         # B18 (audit 02b closure, corrected): the content gate is REST-NORMALIZED,
         # sigma(h.w_d+b_d)/sigma(b_d) — at rest == 1.0, so the tau ladder IS the

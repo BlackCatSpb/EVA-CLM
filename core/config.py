@@ -387,7 +387,8 @@ class WideBindConfig:
     # embeddings but does not inject a spatial stream signal.
     bridge_depth: bool = True
 
-    # bridge_lr_mult: REMOVED — bridge uses base LR with LayerBridgeGate routing
+    # bridge_lr_mult: REMOVED — bridge uses base LR (the LBG routing was
+    # removed in M64.5 as a dead channel; see docs/WHITEBOARD.md)
 
     # ─── Streaming Memory Bank (hierarchical L1+L2+L3) ───
     memory_bank: bool = False       # enable streaming memory bank

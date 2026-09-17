@@ -91,9 +91,9 @@ class SemanticBridge(nn.Module):
         self.register_buffer(
             "bridge_stream", torch.zeros(n_layers, bridge_dim), persistent=True
         )
-        # Per-forward injection share ‖inj‖/‖h‖ — LIVE feature 3 of the
-        # LayerBridgeGate diagnostics (was pinned to a 0.5 constant in the
-        # stack's inline duplicate, audit M2).
+        # Per-forward injection share ‖inj‖/‖h‖ — write-only telemetry since
+        # M64.5 (it was LIVE feature 3 of the removed LayerBridgeGate
+        # diagnostics; audit M2 pinned the stack's duplicate to 0.5).
         self.register_buffer("inj_ratio", torch.zeros(n_layers), persistent=False)
         self._preds: Optional[list[torch.Tensor]] = None
 

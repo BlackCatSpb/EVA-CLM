@@ -383,6 +383,12 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         'ls_reg': log_scale_reg.item() if isinstance(log_scale_reg, torch.Tensor) else log_scale_reg,
         'decorr': decorr_loss.item() if isinstance(decorr_loss, torch.Tensor) else decorr_loss,
     }
+    # (M64.5 TOMBSTONE: the Layer Bridge Gate block stood here — the per-layer
+    # SpectrumGate telemetry (lbg_*) + the lbg_diversity aux term. Removed with
+    # the dead channel: the gate was computed and discarded, the term measured
+    # 2.75e-6 with its graph touching only the gate's own log_tau, and the B3
+    # parity incident broke the bridge (0.26 train vs 3.69 eval < chance). The
+    # log contract change: lbg_tau/lbg_diversity/layer_gate_* no longer exist.)
     # ─── Memory Bank diagnostics (consolidation stats) ───
     if stack.memory_bank is not None:
         try:

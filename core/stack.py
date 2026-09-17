@@ -1393,7 +1393,7 @@ class EVAStack(nn.Module):
         cfg = self.cfg
         lr = lr or cfg.lr
         wd = weight_decay or cfg.weight_decay
-        bridge_lr = lr  # bridge uses base LR (LayerBridgeGate handles routing)
+        bridge_lr = lr  # bridge uses base LR (M64.5: the LBG routing is gone)
         
         if getattr(cfg, 'lambda_lr_hierarchy', False):
             from .lambda_utils import lambda_d

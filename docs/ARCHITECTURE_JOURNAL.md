@@ -348,7 +348,9 @@ EVA (Единая Вычислительная Архитектура) — мн�
 
 **Зависимости:**
 - **Maturation** — bridge injection gated by mat_gate[i]
-- **LayerBridgeGate** — per-layer spectrum gate для bridge routing
+- **LayerBridgeGate** — УДАЛЁН в M64.5 (мёртвый канал: гейт считался и выбрасывался,
+  `lbg_diversity`=2.75e-6 без градиента, B3-инцидент: 0.26 train vs 3.69 eval;
+  идея «health-gated bridge routing» — кандидат M65 с A/B)
 - **BridgeGLU** — bridge delta модулирует MLP gate
 - **IntentBridge** — parallel semantic stream
 

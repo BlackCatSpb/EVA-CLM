@@ -28,13 +28,14 @@
 | M64.2 | Phantom bank: soft-route (`merge_lo`), drop вместо eviction, decay per-observe, счётчик merged | ревью | `test_m64_phantom_lifecycle.py` (5) + обновлённые M54 | — | ba795b5 |
 | M64.3 | Memory L2: запись в графе (`W_k/W_v/novelty_gate` живые; `index_copy`; commit detached; stash `_keys_eff/_vals_eff`) | ревью | `test_m64_memory_write.py` (4) | — | (тек.) |
 | M64.4 | LossBalancer: 3 backward → 1 (align=False / раз в k) + A/B | план | — | — | — |
-| M64.5 | LBG: подключить привод (`probe(gate·h)`) или удалить | план | — | — | — |
+| M64.5 | LBG: подключить привод (`probe(gate·h)`) или удалить | ✅ удалён | ревью R1/R2+R3: градиенты бит-идентичны 234/234, resume PASS | cae0ebd |
 | M64.6 | Aux-гигиена: удалить `nuc`/`gate_repulse`, метрика `usef` (std вместо mean) | план | — | — | — |
 | M64.7 | Readout: флаг разморозки (λ⁻²→1) для A/B | план | — | — | — |
 | M64.8 | Телеметрия: per-branch `r_i`, невидимые термы, live-захват `_last_u` при спайке | план | — | — | — |
 | M64.9 | Ноутбук: `stream_chunk_steps` 250→1000 (решение F: CE-стабильность) | план | — | — | — |
 | M64.10 | Liveness-census тесты (T5/T6) на каждый канал | план | — | — | — |
 | M65.x | С A/B: шина доказательств, валютный lifecycle, predictive memory, per-bit emphasis, reasoning | отложено | M63 отчёты | — | — |
+| M65.x | **health-gated bridge routing (ex-LBG)** — A/B против сырого probe (учесть B3: диагностики текущего форварда, не кэш) | отложено | M63_zone_B_gates §1, B3 | — | — |
 
 ## Открытые вопросы к ревью (M64.1–M64.3)
 
@@ -130,6 +131,16 @@ M64.2/M64.3 — переработаны, ожидают верификацио�
 | M64.4 | **REVISE (docs-only)** → закрыто | Все функциональные условия подтверждены независимо (guard/кап/P3a/zero-crossing/мутация заморозки убита/k=1 бит-идентичен/телеметрия/447 passed); не закрыт один явно названный пункт — модульный docstring «bounded by construction» (байт-в-байт как в b9c7184 при заявленном исправлении). |
 
 **Закрыто (раунд 5, docs/nits):** модульный docstring квалифицирован («on the align steps ... by construction; the cadence cheap path is approximately bounded»); `load_state_dict` клампит `scale_ema` (legacy-ckpt риск); комментарий `last_scale` → «capped»; обоснование `scale_ema_decay` в коде; «2e6» → измеренные 1.0e6. **M64.4 закрыт (ACCEPT-эквивалент: функционально подтверждён, документация исправлена).**
+
+### M64.5 (LayerBridgeGate) — раунд 1
+
+| ID | R1/R2 | R3 | Итог |
+|---|---|---|---|
+| M64.5 | **REVISE (docs-only)** | **REVISE (docs-only)** | код ACCEPT; docs закрыты |
+
+**Подтверждено независимо:** forward/gradients **бит-идентичны** до/после (S1/S2/S3: out SHA совпал, max_abs_diff=0.0 на 234 общих параметрах — гейт действительно ничего не масштабировал); реальный `best.pt`: 24 LBG-ключа → missing=0/unexpected=24, resume PASS, optimizer 258/2 skipped; 440 passed; `lbg_diversity` измерен 2.75e-6 (не ровно 0 — «dead by measurement», поправка к формулировке коммита); **бонус-улика: M2-метод `layer_diagnostics` был сиротой** (`get_diagnostics()` — 0 вызовов), т.е. удалён дубль-ловушка, а не рабочий инструмент. Ложная находка ревьюера: `core/spectrum_gate.py` в репо отсутствует (`git ls-files` — пусто).
+
+**Закрыто (docs/cleanup):** тумбстоуны в losses.py/bridge.py/block.py/config.py/stack.py; `gate_tau` помечен «no live consumer since M64.5» (не удалён — ckpt-compat + M65-кандидат); `maturation.global_ready` аннотирован (0 читателей); запись в доске + M65-кандидат «health-gated bridge routing (ex-LBG) — A/B vs raw probe»; изменение контракта логов (`lbg_*`/`layer_gate_*` исчезли) отмечено (внешние дашборды вне репо сломаются молча).
 
 ### Раунд 3 (верификация переработки)
 

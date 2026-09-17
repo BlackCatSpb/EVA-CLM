@@ -33,9 +33,10 @@ learn. Bridge injection per-layer is gated by M_l, so immature layers are
 protected from perturbation.
 
 GLOBAL READINESS: When ALL layers have M_l > bridge_control_threshold, the
-system is "globally ready" for distributed bridge control (LayerBridgeGate
-with SpectrumGate). Before that, bridge uses simple maturation gating only.
-This prevents the complex per-layer bridge routing from killing immature layers.
+system is "globally ready" for distributed bridge control. (M64.5: the
+LayerBridgeGate that consumed this signal was removed as a dead channel —
+`global_ready`/`global_readiness_ratio` now have NO live readers; kept as
+telemetry, re-evaluated in M64.6/M65.)
 """
 
 from __future__ import annotations

@@ -214,6 +214,11 @@ class TauConfig(nn.Module):
 
     @property
     def gate_tau(self) -> torch.Tensor:
+        # M64.5: NO LIVE CONSUMER since the LayerBridgeGate removal (it was the
+        # only reader of this ladder). Kept as a τ-field diagnostic + for
+        # ckpt-compat (the persistent buffer loads fine); `gate_tau_mean` in
+        # get_diagnostics() reports it. Re-evaluate in M64.6/M65 (the
+        # 'health-gated bridge routing' candidate would need it again).
         return self._gate_tau_cache
 
     @property
