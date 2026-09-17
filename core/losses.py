@@ -199,6 +199,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         if n_it > 0:
             intent_tau_loss = intent_tau_loss / n_it
     branch_loss = 0.0
+    _br_conv = _br_bind = _br_mirror = None   # M64.8r3: defined even when the term is off
     n_branch = 0
     if getattr(stack.cfg, 'branch_balance_weight', 0.0) > 0:
         # M51 (the 2970 explosion post-mortem): the three terms below are
@@ -238,12 +239,17 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         if n_branch > 0:
             branch_loss = branch_loss / n_branch
         # M64.8r2 (M63-E): the per-branch RMS telemetry — the loss balances the
-        # log-VARIANCES, the RMS is what the stream actually carries.
-        _cl = getattr(stack, '_cached_losses', None)
-        if _rms['conv'] and isinstance(_cl, dict):
-            _cl['branch_r_conv'] = sum(_rms['conv']) / len(_rms['conv'])
-            _cl['branch_r_bind'] = sum(_rms['bind']) / len(_rms['bind'])
-            _cl['branch_r_mirror'] = sum(_rms['mirror']) / len(_rms['mirror'])
+        # log-VARIANCES, the RMS is what the stream actually carries. NOTE: this
+        # runs BEFORE the `stack._cached_losses = {...}` reassignment below, so
+        # the values ride in locals and are attached after it (the first landing
+        # wrote them into the dict that was then overwritten — the round-3
+        # verifier caught the loss).
+        if _rms['conv']:
+            _br_conv = sum(_rms['conv']) / len(_rms['conv'])
+            _br_bind = sum(_rms['bind']) / len(_rms['bind'])
+            _br_mirror = sum(_rms['mirror']) / len(_rms['mirror'])
+        else:
+            _br_conv = _br_bind = _br_mirror = None
         if _anchor_w > 0.0 and _ref is not None:
             with torch.no_grad():
                 _cm = torch.stack(_seen).mean() if _seen else _ref
@@ -359,6 +365,10 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         'ls_reg': log_scale_reg.item() if isinstance(log_scale_reg, torch.Tensor) else log_scale_reg,
         'decorr': decorr_loss.item() if isinstance(decorr_loss, torch.Tensor) else decorr_loss,
     }
+    if _br_conv is not None:                      # M64.8r2: per-branch RMS
+        stack._cached_losses['branch_r_conv'] = _br_conv
+        stack._cached_losses['branch_r_bind'] = _br_bind
+        stack._cached_losses['branch_r_mirror'] = _br_mirror
     # (M64.5 TOMBSTONE: the Layer Bridge Gate block stood here — the per-layer
     # SpectrumGate telemetry (lbg_*) + the lbg_diversity aux term. Removed with
     # the dead channel: the gate was computed and discarded, the term measured

@@ -41,28 +41,31 @@ def test_role_mult_override_reaches_the_readout():
 
 
 def test_scheduler_resume_does_not_erase_the_flag():
-    """M64.7r2 (the review's blocker): the count-only orig_lrs guard accepted a
-    STALE snapshot when the flag changed the group keys (8==8 groups) — the arm
-    was silently erased. The set-comparison guard keeps the fresh snapshot."""
-    import torch as _t
+    """M64.7r3 (the round-3 verifier's blocker): on the PRODUCTION eva_proj path
+    the readout flag changes the group COMPOSITION while the multiset of base
+    LRs is invariant — a sorted/count guard accepted the stale snapshot and the
+    A/B was erased (embed.basis got 1.77e-4*mult instead of 6e-4*mult). The
+    ordered comparison keeps the fresh snapshot on a flag flip; a same-flag
+    resume still restores exactly. (This test uses eva_proj deliberately: on
+    adamw the flip leaves the group list identical, so nothing discriminates.)"""
     from core.lr_scheduler import MirrorLRScheduler
     torch.manual_seed(0)
     m = EVAStack(EVAConfig(**SMALL))
     lam = 1.8393
-    o0 = build_optimizer(m, 1e-3, llrd_decay=1.0, lam=lam, readout_lr_mult=0.0)
+    o0 = build_optimizer(m, 1e-3, llrd_decay=1.0, lam=lam,
+                         optimizer='eva_proj', readout_lr_mult=0.0)
     s0 = MirrorLRScheduler(m, o0, 1e-3, warmup=1)
     sd = s0.state_dict()
-    o1 = build_optimizer(m, 1e-3, llrd_decay=1.0, lam=lam, readout_lr_mult=1.0)
+    o1 = build_optimizer(m, 1e-3, llrd_decay=1.0, lam=lam,
+                         optimizer='eva_proj', readout_lr_mult=1.0)
     s1 = MirrorLRScheduler(m, o1, 1e-3, warmup=1)
+    fresh = list(s1._orig_lrs)
     s1.load_state_dict(sd)          # a checkpoint saved with the OTHER flag
-    # the fresh snapshot must survive: the readout group keeps the unfrozen lr
-    def _readout_lr(opt):
-        for g in opt.param_groups:
-            names = [n for n, p in m.named_parameters() if any(p is q for q in g['params'])]
-            if any(n == 'embed.basis' for n in names):
-                return g['lr']
-        raise AssertionError('no readout group')
-    assert abs(_readout_lr(o1) - 1e-3) < 1e-12, 'the stale snapshot erased the flag'
+    assert list(s1._orig_lrs) == fresh, 'the stale snapshot erased the flag'
+    # the same-flag resume still restores exactly
+    s2 = MirrorLRScheduler(m, o1, 1e-3, warmup=1)
+    s2.load_state_dict(s1.state_dict())
+    assert list(s2._orig_lrs) == fresh
 
 
 def test_build_optimizer_applies_the_override():
