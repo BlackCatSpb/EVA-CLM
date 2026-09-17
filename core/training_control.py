@@ -8,9 +8,12 @@ balance; that interconnection is the τ numbers).
 
 Outer loop
 ----------
-``LossBalancer`` (spectral alignment / PCGrad) — the aux-gradient is bounded by
-``‖g_CE‖`` *by construction* (cos ∈ [0,1]), so the old ``align_cap`` multiplier
-was an unnecessary knob and is gone.
+``LossBalancer`` (spectral alignment / PCGrad) — on the align steps the
+aux-gradient is bounded by ``‖g_CE‖`` *by construction* (cos ∈ [0,1]), so the
+old ``align_cap`` multiplier was an unnecessary knob and is gone. The M64.4
+cadence's cheap path (``align_every=k>1``) is only APPROXIMATELY bounded — it
+applies the align-measured scale ``s`` to the aux sum (see the class
+docstring); the by-construction bound holds on the align steps.
 
 Per-layer gains
 ---------------
@@ -244,13 +247,15 @@ class LossBalancer:
         # later drift.
         self.scale_min_ratio: float = float(scale_min_ratio)
         self.scale_max: float = float(scale_max)
+        # 0.99 = tau ~100 align steps (~800 train steps at k=8) — fast enough to
+        # track regime changes, slow enough to reject a single noisy align pass.
         self.scale_ema_decay: float = float(scale_ema_decay)
         self.ema_ce: Optional[float] = None
         self.ema_aux: Dict[str, float] = {}
         self.ema_A: Optional[float] = None
         self.last_cos: Optional[float] = None   # cos of the LAST call (None on cheap)
         self.last_align_cos: Optional[float] = None  # M64.4r3: survives cheap steps
-        self.last_scale: Optional[float] = None      # M64.4r3: the raw measurement
+        self.last_scale: Optional[float] = None      # M64.4r3: the capped measurement
         self.last_path: str = 'align'           # 'align' | 'balance' (M64.4)
         self.scale_ema: Optional[float] = None  # M64.4: the measured align scale
         self.n_align: int = 0                   # M64.4: telemetry counters
@@ -282,7 +287,8 @@ class LossBalancer:
         self.ema_ce = sd.get('ema_ce', self.ema_ce)
         self.ema_A = sd.get('ema_A', self.ema_A)
         if sd.get('scale_ema') is not None:     # M64.4: warm-start the cheap path
-            self.scale_ema = float(sd['scale_ema'])
+            # round-4 nit: clamp a legacy/foreign seed to the safety bound
+            self.scale_ema = min(float(sd['scale_ema']), self.scale_max)
         if sd.get('ema_aux') is not None:
             self.ema_aux = dict(sd['ema_aux'])
 

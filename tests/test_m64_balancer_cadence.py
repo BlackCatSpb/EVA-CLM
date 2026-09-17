@@ -103,8 +103,9 @@ def test_the_cheap_path_cannot_explode_on_zero_crossing_terms():
 
 def test_the_cheap_path_cannot_explode_on_sign_cancellation():
     """R1's exact P3a: aux terms that cancel in the value sum must not blow up.
-    The value-EMA path gave 2e6x here (ema_A -> 1e-8); the measured-scale path
-    is independent of the loss values."""
+    The value-EMA path gave ~1e6x here (ema_A -> 1e-8, measured 1.0e6 by the
+    round-4 verifier); the measured-scale path is independent of the loss
+    values."""
     lb = LossBalancer(align=True, align_every=0, eval_interval=100)
     a, b = _toy()
     lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)  # seed
