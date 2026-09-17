@@ -341,6 +341,12 @@ class WideBindConfig:
     # output actually changes the CE loss. Aligns per-expert mlp_mod to
     # g_target = ||∂CE/∂mlp_out|| (detached). 0 = disabled (default).
     gradalign_weight: float = 0.0
+    # M64.7 (M63-A): the readout/embedding LR multiplier override. 0 = the
+    # historical λ⁻² damp (0.296 at λ_d=3; measured: the head's readout moved
+    # -1.9% in 7315 steps while the head was the LM bottleneck). 1.0 = the
+    # unfreeze A/B arm (readout at the base LR). The A/B is pre-registered in
+    # docs/WHITEBOARD.md; the notebook does NOT enable it by default.
+    readout_lr_mult: float = 0.0
     # M64.4 (M63-F): the LossBalancer align cadence. The align path costs THREE
     # graph traversals (CE/aux/bypass; ~3 recomputes with checkpointing) — the
     # largest structural cost of the run. k>1 = align every k-th step, the

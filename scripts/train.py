@@ -255,7 +255,8 @@ def train(cfg=None, resume_path=None):
     def _make_opt(lr):
         return build_optimizer(model, lr, llrd_decay=cfg.llrd,
                                weight_decay=cfg.weight_decay, betas=(0.9, 0.95),
-                               optimizer=getattr(cfg, 'optimizer', 'adamw'))
+                               optimizer=getattr(cfg, 'optimizer', 'adamw'),
+                               readout_lr_mult=float(getattr(cfg, 'readout_lr_mult', 0.0) or 0.0))
 
     optimizer = _make_opt(cfg.lr)
     # LR controller: linear warmup + mirror-adaptive multiplier + plateau damping.

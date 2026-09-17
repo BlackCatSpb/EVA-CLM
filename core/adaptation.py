@@ -197,13 +197,18 @@ _GATE_PARTS = frozenset({'w_gate', 'b_gate', 'w_delta_gate', 'b_delta_gate',
                          'w_intent', 'b_intent', 'w_sal'})
 
 
-def _role_lr_mult(name: str, lam: Any) -> float:
+def _role_lr_mult(name: str, lam: Any, readout_mult: float = 0.0) -> float:
     parts = frozenset(name.split('.'))
     if parts & _VSA_PARTS:
         return lam ** (-2)            # vsa scales
     if name.startswith('embed.') or name.startswith('lm_head.readout') \
             or name.startswith('lm_head.proj'):
-        return lam ** (-2)            # embeddings / readout
+        # M64.7 (M63-A): the λ⁻² damp (0.296 at λ_d=3) left the head's probes
+        # nearly frozen — measured std -1.9% in 7315 steps while the head was
+        # the LM bottleneck (CE code-only 12.84 > bias-only 8.65). A positive
+        # `readout_mult` overrides it (1.0 = the unfreeze A/B arm; default 0
+        # keeps the historical behaviour exactly).
+        return float(readout_mult) if float(readout_mult) > 0.0 else lam ** (-2)
     if (parts & _MIRROR_PARTS) or (('W_proj' in parts or 'W_out' in parts)
                                    and 'mirror' in parts):
         return lam ** (1)             # mirror projections / gates
@@ -221,7 +226,8 @@ def build_optimizer(model: torch.nn.Module, base_lr: float,
                     llrd_decay: float = 0.9, weight_decay: float = 0.01,
                     betas: Tuple[float, float] = (0.9, 0.95),
                     lam: Any = None, optimizer: str = "adamw",
-                    eva_kwargs: Optional[Dict] = None) -> torch.optim.Optimizer:
+                    eva_kwargs: Optional[Dict] = None,
+                    readout_lr_mult: float = 0.0) -> torch.optim.Optimizer:
     """AdamW or EVA-AdamW with Layer-wise LR Decay (LLRD).
 
     LLRD (Devlin et al., 2019) damps the residual-stream growth of deep blocks,
@@ -241,7 +247,7 @@ def build_optimizer(model: torch.nn.Module, base_lr: float,
         if name.endswith('._vsa_tau_log'):
             continue  # stack overrides the VSA ladder via tau_s (audit M7)
         li = _layer_index_of(name)
-        role_mult = _role_lr_mult(name, lam)
+        role_mult = _role_lr_mult(name, lam, readout_lr_mult)
         depth_mult = llrd_decay ** max(li, 0)
         lr = base_lr * role_mult * depth_mult
         wd = weight_decay if p.ndim >= 2 else 0.0
@@ -269,7 +275,7 @@ def build_optimizer(model: torch.nn.Module, base_lr: float,
                 continue  # stack overrides the VSA ladder via tau_s (audit M7)
             r = _resolve_role(name, p.dim())
             li = _layer_index_of(name)
-            role_mult = _role_lr_mult(name, lam)
+            role_mult = _role_lr_mult(name, lam, readout_lr_mult)
             depth_mult = llrd_decay ** max(li, 0)
             lr = base_lr * role_mult * depth_mult
             wd = weight_decay if r["wd"] else 0.0
