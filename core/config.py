@@ -335,6 +335,12 @@ class WideBindConfig:
     # output actually changes the CE loss. Aligns per-expert mlp_mod to
     # g_target = ||∂CE/∂mlp_out|| (detached). 0 = disabled (default).
     gradalign_weight: float = 0.0
+    # M64.4 (M63-F): the LossBalancer align cadence. The align path costs THREE
+    # graph traversals (CE/aux/bypass; ~3 recomputes with checkpointing) — the
+    # largest structural cost of the run. k>1 = align every k-th step, the
+    # cheap one-backward normalized total otherwise; 0 = never align.
+    # Default 1 = every step (historical behaviour).
+    balancer_align_every: int = 1
     # Cognitive MLP gate opening (fix for "MLP asleep"): init mlp_gate_b > 0 so the
     # mirror-gated MLP modulation (mlp_mod) actually scales the SwiGLU gate and
     # mod_scale_mlp receives a CE-gradient path (can open/close). 0 disables.

@@ -202,14 +202,23 @@ class LossBalancer:
     BYPASS_AUX = ('gradalign',)
 
     def __init__(self, align: bool = True, align_cap: Optional[float] = None,
-                 eval_interval: int = 1000) -> None:
+                 eval_interval: int = 1000, align_every: int = 1) -> None:
         self.align: bool = bool(align)
         self.align_cap = align_cap  # accepted for config compatibility, NOT used
         self.eval_interval: int = int(eval_interval)
+        # M64.4 (M63-F): the align path costs THREE graph traversals (CE, aux,
+        # bypass) — with gradient checkpointing that is ~3 recomputes per step,
+        # the single largest structural cost of the run (the step is
+        # latency-bound at ~0.3% of the TF32 peak). `align_every=k>1` runs the
+        # alignment on every k-th step and the cheap ONE-backward normalized
+        # total otherwise; 0 = never align (pure balance mode). Default 1
+        # keeps the historical behaviour exactly.
+        self.align_every: int = int(align_every)
         self.ema_ce: Optional[float] = None
         self.ema_aux: Dict[str, float] = {}
         self.ema_A: Optional[float] = None
         self.last_cos: Optional[float] = None   # cos(g_CE, g_aux) of last backward
+        self.last_path: str = 'align'           # 'align' | 'balance' (M64.4)
 
     def set_stats(self, eval_interval: int = 1000) -> None:
         self.eval_interval = int(eval_interval)
@@ -222,6 +231,7 @@ class LossBalancer:
             'ema_A': self.ema_A,
             'ema_aux': dict(self.ema_aux),
             'align': bool(self.align),
+            'align_every': int(self.align_every),   # M64.4
         }
 
     def load_state_dict(self, sd: Optional[Dict[str, Any]]) -> None:
@@ -253,6 +263,23 @@ class LossBalancer:
             A += val / e
         A = abs(A) + 1e-8
         self.ema_A = A if self.ema_A is None else d * self.ema_A + (1 - d) * A
+
+    def _balance_loss(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any]) -> torch.Tensor:
+        """M64.4: the cheap path's total — one scalar for a single backward.
+
+        Kendall & Gal style: each aux term is normalized by its own running EMA
+        and the block is scaled to track |CE| (beta = ema_ce / ema_A), so the
+        aux cannot dominate the update even without the per-parameter
+        sign-mask+bound of the align path.
+        """
+        self._update_balance(ce_loss, aux_dict)
+        beta = (self.ema_ce or 1.0) / max(self.ema_A or 1.0, 1e-8)
+        total = ce_loss
+        for k, v in aux_dict.items():
+            if not isinstance(v, torch.Tensor):
+                continue
+            total = total + beta * (v / self.ema_aux.get(k, 1e-8))
+        return total
 
     def loss(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any]) -> torch.Tensor:
         self._update_balance(ce_loss, aux_dict)
@@ -331,7 +358,29 @@ class LossBalancer:
     def backward(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any],
                  parameters: Iterable[torch.nn.Parameter],
                  retain_graph: bool = False,
-                 phase_model: Any = None) -> None:
+                 phase_model: Any = None,
+                 step: Optional[int] = None) -> None:
+        # M64.4 (M63-F): the align cadence. `align_every=k>1` runs the full
+        # three-traversal alignment only on the steps where `step % k == 0`
+        # and the cheap one-backward normalized total on the rest; 0 disables
+        # the alignment entirely. Default 1 = every step (historical).
+        params = [p for p in parameters if p.requires_grad]
+        _cheap = (not self.align) or (self.align_every <= 0) or (
+            self.align_every > 1 and step is not None
+            and int(step) % self.align_every != 0)
+        if _cheap and params:
+            self.last_path = 'balance'
+            self.last_cos = None
+            # NOTE (for the M64.4 review): the gradalign hook (block.py:751)
+            # records during this single backward, so on the cheap steps its
+            # target is the COMBINED (CE+aux) gradient norm, not the CE-only
+            # one the align path freezes for. The contamination is bounded by
+            # the balance normalization (the aux block tracks |CE|) and the
+            # target is a relative signal — documented, not silently fixed.
+            self._balance_loss(ce_loss, aux_dict).backward()
+            return
+        self.last_path = 'align'
+        self.last_cos = None
         # B2 (audit C): (i) the single GLOBAL cosine gate zeroed every aligned
         # aux term whenever the SUM ⊥ CE (measured: final grad = pure CE, and
         # on the orthogonality toy per-term beats sum-gate 8.000 vs 2.000);
@@ -343,7 +392,6 @@ class LossBalancer:
         # the AUX gradient, rel-err 1.0).
         # (iii) bypass terms are added under the same sign-mask+bound (was:
         # raw .backward(), measured 100×‖g_CE‖ — the bound claim was false).
-        params = [p for p in parameters if p.requires_grad]
         bypass: Dict[str, Any] = {}
         aux_dict = dict(aux_dict)   # never mutate the caller's dict (logging)
         for _k in self.BYPASS_AUX:

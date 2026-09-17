@@ -264,7 +264,8 @@ def train(cfg=None, resume_path=None):
     depth = DepthController(model, n_layers=cfg.n_layers, init_k=cfg.init_active_layers,
                             unfreeze_inc=4, eval_interval=cfg.eval_interval)
     # Aux-loss balancer: spectral alignment (bounds aux grad by ||g_CE||).
-    balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval)
+    balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval,
+                            align_every=int(getattr(cfg, 'balancer_align_every', 1) or 0))
     # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
@@ -559,7 +560,8 @@ def train(cfg=None, resume_path=None):
             # M22: backward freeze-wrap removed (recompute must replay the
             # forward path-identically); CheckpointError self-heals.
             try:
-                balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model)
+                balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model,
+                                  step=step)
             except _CEr as _ce15:
                 print('  [ckpt-fallback]', str(_ce15)[:120], '- checkpointing OFF for the run')
                 cfg.gradient_checkpointing = False
