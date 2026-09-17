@@ -117,27 +117,31 @@ class WideBindConfig:
     head_temper_after: int = 1045  # M55a: warmup (the memory is noise at init)
     head_phantom_slots: int = 16  # M54: the phantom-concept bank slots
     head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
-    head_phantom_merge_lo: float = 0.25  # M64 (M63-C): the soft route — cosine
+    head_phantom_merge_lo: float = 0.2  # M64 (M63-C): the soft route — cosine
                                          # >= merge_lo takes a similarity-weighted
                                          # EMA + a partial confidence bump. The
                                          # hard merge=0.7 is unreachable on
                                          # D=2560 residuals (measured: zero merges
                                          # in the whole run) -> the confirmation
-                                         # path was dead by arithmetic and every
-                                         # unmatched observation evicted a slot.
+                                         # path was dead by arithmetic. R1/R3: the
+                                         # null best-cos is ~0.06 mean / 0.09 max,
+                                         # the recurring-structure mode ~0.3 ->
+                                         # 0.2 sits between; stats() reports the
+                                         # percentiles for the real calibration.
     head_phantom_thr: float = 1.1  # M55b: RELATIVE lacuna (ell/EMA) above which a
                                    # position is observed (the absolute ell is ~0.97
                                    # for ANY realistic state: the readout spans K of D)
     head_lacuna_ema: float = 0.99  # M55b: the self-calibration EMA decay
     head_phantom_every: int = 25  # M54: observe cadence (steps)
-    head_phantom_decay: float = 0.999  # M62: the bank's per-forward confidence
-                                       # decay (0.999 = the M54 value). The switch
-                                       # interval (~1200 steps) exceeded the decay
-                                       # time constant (~1000 steps), so confirmations
-                                       # could not accumulate; with the M62 chunk
-                                       # rotation (stream_chunk_steps) the interval
-                                       # drops, and this knob lets us slow the fade
-                                       # if confirmations still die too fast.
+    head_phantom_decay: float = 0.99  # M62/M64: the bank's per-OBSERVE confidence
+                                       # decay (0.999 = the old per-forward value).
+                                       # R1/R2 calibration: at the observed ~0.24
+                                       # observes/step 0.99 gives the 0.5 -> 0.25
+                                       # transition in ~69 observes ~ 287 steps —
+                                       # the confirmation window ballpark; the
+                                       # switch interval (~1200 steps, now 250 via
+                                       # stream_chunk_steps) and this fade must be
+                                       # compared whenever the cadence changes.
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)

@@ -37,7 +37,9 @@ def _pick_stream_src():
 def test_config_knobs_default_to_the_legacy_behaviour():
     cfg = EVAConfig(**SMALL)
     assert cfg.stream_chunk_steps == 0, 'rotation must be opt-in'
-    assert abs(cfg.head_phantom_decay - 0.999) < 1e-12, 'the M54 decay is the default'
+    # M64 (R1/R2 calibration): 0.99 per OBSERVE (~69 observes ~ 287 steps to
+    # fade 0.5 -> 0.25 at the measured ~0.24 observes/step), not the old 0.999
+    assert abs(cfg.head_phantom_decay - 0.99) < 1e-12, 'the M64 decay default'
 
 
 def test_pick_stream_never_repeats_the_current_genre():

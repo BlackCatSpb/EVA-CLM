@@ -272,23 +272,30 @@ class L2Bank(nn.Module):
                     slot = int(self.slot_age.argmax().item())
 
         # M64: live projections — the CE gradient flows through the read's
-        # attention into W_k/W_v (and, via the value scale, into novelty_gate).
+        # attention into W_k/W_v. (R1/R2/R3 review: the novelty multiplier on
+        # the value was removed — val_norm (LayerNorm) annihilated a per-slot
+        # positive scalar to ~1e-4 of the W_k gradient, so it was inert by
+        # construction and beyond the M63-D audit. The gate's fate is M64.6.)
         raw_key = self.W_k(embedding)
         new_key = F.normalize(raw_key, dim=-1) * torch.sigmoid(self.key_log_scale)
         raw_val = self.W_v(embedding)
         new_val = F.normalize(raw_val, dim=-1) * torch.sigmoid(self.val_log_scale)
-        # the novelty gate was a dead diagnostic (no gradient path at all);
-        # it now scales the written value, so the CE teaches it WHICH writes
-        # are worth keeping (its intended semantics).
-        new_val = new_val * novelty_score.to(new_val.dtype)
+        # AMP safety (R1): the buffer is fp32 while autocast may hand us bf16
+        new_key = new_key.to(self.keys.dtype)
+        new_val = new_val.to(self.vals.dtype)
 
         # out-of-place row replacement (index_copy, the UCL pattern): an
         # in-place `keys_eff[slot] = ...` on a non-grad constant silently
         # DETACHES the new row (autograd does not track in-place ops on
         # tensors that do not require grad) — measured: W_k.grad stayed None.
+        # R2: chain from the CURRENT effective store, not from the detached
+        # buffer — a forward writes once per SEP position, and each commit
+        # detaches, so only the LAST write's graph survived before.
+        _base_k = self._keys_eff if self._keys_eff is not None else self.keys
+        _base_v = self._vals_eff if self._vals_eff is not None else self.vals
         _slot_t = torch.tensor([slot], device=self.keys.device, dtype=torch.long)
-        keys_eff = self.keys.index_copy(0, _slot_t, new_key.unsqueeze(0))
-        vals_eff = self.vals.index_copy(0, _slot_t, new_val.unsqueeze(0))
+        keys_eff = _base_k.index_copy(0, _slot_t, new_key.unsqueeze(0))
+        vals_eff = _base_v.index_copy(0, _slot_t, new_val.unsqueeze(0))
         self._keys_eff = keys_eff          # per-forward, consumed by read()
         self._vals_eff = vals_eff
 
@@ -309,6 +316,17 @@ class L2Bank(nn.Module):
         """Mark slot as consumed (e.g. by concept promotion)."""
         if 0 <= slot < self.n_slots:
             self.slot_consumed.data[slot] = True
+
+    def clear_effective(self) -> None:
+        """M64 (R1/R2): drop the per-forward effective store.
+
+        The stash carries the forward's graph; it must not survive into a
+        context that did not write (eval snapshot/restore, reset_cache, a
+        low-maturation forward with no write). The bank's forward clears it
+        on every `write=True` call, and this hook covers the external flushes.
+        """
+        self._keys_eff = None
+        self._vals_eff = None
 
     def read(self, query: torch.Tensor, temp_k: float = 1.0) -> torch.Tensor:
         """Read from bank using hybrid attention.
@@ -457,23 +475,33 @@ class StreamingMemoryBank(nn.Module):
         # Detect boundaries and write to all levels (M58b: the stack passes
         # write=False after the first active layer — one sentence is written
         # ONCE per forward, not once per layer).
-        with torch.no_grad():
-            for b in range(B if write else 0):
-                sent_start = 0
-                for t in range(L):
-                    if is_sep[b, t]:
-                        summary = h[b, sent_start:t+1].mean(0)  # (D,)
+        # M64 (R1/R2): NO outer no_grad — it made the L2 write projections dead
+        # in the only production call-site (the unit tests called L2Bank.write
+        # directly and missed it: W_k.grad was None through the stack while the
+        # method-level test was green). L1Buffer.write is @torch.no_grad itself
+        # (its content is state, its projection lives on the read side).
+        if write:
+            # R1/R2: the effective store is per-FORWARD. The first bank call of
+            # a forward clears the previous stash, so a forward without a write
+            # (low maturation) or an eval after training falls back to the
+            # committed buffer instead of consuming yesterday's graph.
+            self.l2.clear_effective()
+        for b in range(B if write else 0):
+            sent_start = 0
+            for t in range(L):
+                if is_sep[b, t]:
+                    summary = h[b, sent_start:t+1].mean(0)  # (D,)
 
-                        # Write to L1 (always when allowed)
-                        if _can_write:
-                            self.l1.write(summary)
+                    # Write to L1 (always when allowed)
+                    if _can_write:
+                        self.l1.write(summary)
 
-                        # Write to L2 (only when allowed)
-                        l2_slot = -1
-                        if _can_write:
-                            l2_slot = self.l2.write(summary)
+                    # Write to L2 (only when allowed)
+                    l2_slot = -1
+                    if _can_write:
+                        l2_slot = self.l2.write(summary)
 
-                        sent_start = t + 1
+                    sent_start = t + 1
 
         # Read from all levels (M55a: a big lacuna widens the search)
         _tk = 1.0 + self.lacuna_k * max(0.0, float(lacuna or 0.0))

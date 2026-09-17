@@ -211,12 +211,17 @@ def run_mech(model, cfg):
         warn = '  ⚠ не рождал концептов за 5k+ шагов — novelty ниже порога?' if (nb == 0 and step > 5000) else ''
         # M59: the read scale — the chain measured the model self-closing the UCL
         # (read_scale -4.0 = 0.018 within 120 steps). Print it, with the floor.
+        # M64 (R3): the EFFECTIVE scale is fl + (1-fl)*sigmoid(w) while the floor
+        # holds — the raw sigma(w) is not the channel's strength then (the old
+        # warning fired on a closed-looking sigma while the floor kept it open).
         _rs = float(torch.sigmoid(ucl.read_scale.detach()))
+        _eff = float(getattr(ucl, '_last_scale', _rs))
+        _fl = float(getattr(ucl, '_scale_floor', 0.0) or 0.0)
         _mature = float(ucl._mature)
-        _warn2 = '  ⚠ read_scale закрыт моделью — UCL выключен' if _rs < 0.05 else ''
+        _warn2 = '  ⚠ read_scale закрыт моделью — UCL выключен' if _eff < 0.05 else ''
         print(f'  UCL: births={nb} updates={nu} skipped={ns} занято={used}/{S} '
               f'step={step}; thr σ(birth)={thr:.3f} σ(novelty)={nov:.3f} max_conf={conf:.3f}{warn}')
-        print(f'       read_scale σ={_rs:.4f} (floor cfg={getattr(cfg, "ucl_read_scale_floor", 0.0)} '
+        print(f'       read_scale σ={_rs:.4f} effective={_eff:.4f} (floor cfg={getattr(cfg, "ucl_read_scale_floor", 0.0)} '
               f'until={getattr(cfg, "ucl_read_scale_floor_until", 0)}) mature={_mature:.3f}{_warn2}')
         out['ucl'] = {'births': nb, 'updates': nu, 'used': used, 'step': step}
     n_sig = int(model.layers[0].mirror._signal_log_weights.numel())

@@ -1198,6 +1198,11 @@ class EVAStack(nn.Module):
         _bank = getattr(self, 'memory_bank', None)
         if _bank is not None and hasattr(_bank, '_last_read'):
             _bank._last_read = None
+        # M64 (R1/R2): the L2 bank's per-forward effective store carries the
+        # forward's graph — flush it with the rest of the runtime state.
+        _l2 = getattr(_bank, 'l2', None)
+        if _l2 is not None and hasattr(_l2, 'clear_effective'):
+            _l2.clear_effective()
         # Restore = a fresh healthy state: the mlp-scale observer must re-warm
         # from the restored weights, not carry a pre-rollback baseline.
         for l in self.layers:

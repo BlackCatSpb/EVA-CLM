@@ -24,17 +24,26 @@ class PhantomBank(nn.Module):
         n_slots: int = 16,
         D: int = 2560,
         merge: float = 0.7,        # cosine >= merge -> the same phantom (EVA-Ai dedup 0.7)
-        merge_lo: float = 0.25,    # M64 (M63-C): the soft route — cosine >= merge_lo
+        merge_lo: float = 0.2,     # M64 (M63-C): the soft route — cosine >= merge_lo
                                    # takes a similarity-weighted EMA + a partial
-                                   # confidence bump. The hard merge alone is
+                                   # confidence bump. The hard merge=0.7 alone is
                                    # unreachable on D=2560 residuals (measured:
-                                   # zero merges in the whole run), which made
-                                   # the confirmation path dead by arithmetic.
+                                   # zero merges in the whole run). R1/R3 review:
+                                   # the null best-cos on D=2560 is ~0.06 mean /
+                                   # 0.09 max (4e8 pairs) — 0.2 sits between the
+                                   # null and the recurring-structure mode (~0.3).
+                                   # The real calibration needs the measured
+                                   # histogram (stats() now reports the percentiles).
         conf_init: float = 0.5,    # EVA-Ai ConceptMiner hypothesis init
         conf_step: float = 0.05,   # per re-observation
         confirm: float = 0.75,     # EVA-Ai: confirmed
         archive: float = 0.25,     # EVA-Ai: archived
-        decay: float = 0.999,      # per-OBSERVE confidence decay (M64: was per-forward)
+        decay: float = 0.99,       # per-OBSERVE confidence decay (M64: was per-forward).
+                                   # Calibrated (R1/R2 review): at the observed
+                                   # ~0.24 observes/step the 0.5 -> 0.25 transition
+                                   # takes ~69 observes ~ 287 steps — the right
+                                   # ballpark for the confirmation window (~200-300
+                                   # steps); the old 0.999 gave ~2900 steps.
         ema: float = 0.05,         # direction EMA toward the observed residual
         max_observe: int = 32,     # per-call position budget (the Python loop)
     ) -> None:
@@ -56,7 +65,11 @@ class PhantomBank(nn.Module):
         self.register_buffer('filled', torch.zeros(self.n_slots, dtype=torch.bool))
         self.register_buffer('_births', torch.zeros(1, dtype=torch.long))
         self.register_buffer('_obs', torch.zeros(1, dtype=torch.long))
-        self.register_buffer('_merged', torch.zeros(1, dtype=torch.long))  # M64
+        self.register_buffer('_merged', torch.zeros(1, dtype=torch.long))    # M64
+        self.register_buffer('_dropped', torch.zeros(1, dtype=torch.long))   # M64
+        self.register_buffer('_archived', torch.zeros(1, dtype=torch.long))  # M64
+        self.register_buffer('_cos_ring', torch.zeros(64))                   # M64: telemetry
+        self.register_buffer('_cos_ptr', torch.zeros(1, dtype=torch.long))
 
     @torch.no_grad()
     def decay(self) -> None:
@@ -123,16 +136,29 @@ class PhantomBank(nn.Module):
                     self.count[i] = 1
                     self.filled[i] = True
                     self._births += 1
-                # M64: no free slot and no close match -> DROP. The old
-                # `confidence.argmin()` eviction turned a full bank into a
-                # churn (births ~= observations); a slot now dies only by
-                # fading below `archive` (its own neglected lifecycle), not by
-                # being overwritten by an arbitrary residual.
+                else:
+                    # M64: no free slot and no close match -> DROP (the old
+                    # `confidence.argmin()` eviction turned a full bank into a
+                    # churn: births ~= observations). R1/R2 review: the drop is
+                    # only safe because the archival below is REACHABLE — the
+                    # old `count > 3` grace combined with the drop froze the
+                    # bank on its first <=16 residuals forever (12/16 slots of
+                    # the live checkpoint had count=1 and could never archive).
+                    self._dropped += 1
             accepted += 1
+        # the observed best-cos telemetry (R3): the merge_lo calibration needs
+        # the real histogram, not a guess — a 64-wide ring of per-observe maxes
+        _k = int(self._cos_ptr.item()) % self._cos_ring.numel()
+        self._cos_ring[_k] = float(best.max())
+        self._cos_ptr += 1
         self._obs += 1
-        # EVA-Ai lifecycle: archive the faded (after a grace period)
-        dead = self.filled & (self.confidence < self.archive) & (self.count > 3)
+        # EVA-Ai lifecycle: archive the faded. M64/R1/R2: no `count > 3` grace —
+        # conf_init (0.5) is above `archive` (0.25), so a fresh slot can never
+        # trigger this immediately, and the grace was exactly what made the
+        # never-recurring slots immortal (the freeze the review caught).
+        dead = self.filled & (self.confidence < self.archive)
         if bool(dead.any()):
+            self._archived += int(dead.sum())
             self.filled[dead] = False
             self.confidence[dead] = 0.0
             self.directions[dead] = 0.0
@@ -144,6 +170,14 @@ class PhantomBank(nn.Module):
         f = self.filled
         n = int(f.sum())
         conf = float(self.confidence[f].mean()) if n else 0.0
+        # the best-cos telemetry (R3): p50/p90/p99 over the last <=64 observes
+        _cnt = int(min(self._cos_ptr.item(), self._cos_ring.numel()))
+        if _cnt > 0:
+            _h = self._cos_ring[:_cnt]
+            _q = torch.quantile(_h, torch.tensor([0.5, 0.9, 0.99]))
+            cos_p50, cos_p90, cos_p99 = (float(_q[0]), float(_q[1]), float(_q[2]))
+        else:
+            cos_p50 = cos_p90 = cos_p99 = 0.0
         return {
             'phantoms': n,
             'confirmed': int((f & (self.confidence >= self.confirm)).sum()),
@@ -151,6 +185,11 @@ class PhantomBank(nn.Module):
             'births': int(self._births),
             'obs': int(self._obs),
             'merged': int(self._merged),
+            'dropped': int(self._dropped),
+            'archived': int(self._archived),
+            'cos_p50': cos_p50,
+            'cos_p90': cos_p90,
+            'cos_p99': cos_p99,
         }
 
     @torch.no_grad()

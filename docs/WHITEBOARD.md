@@ -53,4 +53,44 @@
 
 ## Журнал голосований
 
-(заполняется по мере ревью; каждая строка: ID | R1 | R2 | R3 | вердикт | действие)
+### Раунд 1 (M64.1–M64.3, ревьюеры R1/R2/R3)
+
+| ID | R1 | R2 | R3 | Итог | Действие |
+|---|---|---|---|---|---|
+| M64.1 UCL floor | ACCEPT | ACCEPT | REVISE | **ACCEPT** | условия R3: анализатор по effective-шкале (сделано), релиз-по-UCB → M65, логировать grad/w при релизе |
+| M64.2 Phantom | REVISE | REVISE | REJECT | **REJECT → переработан** | см. ниже |
+| M64.3 Memory | REVISE | REJECT | REJECT | **REJECT → переработан** | см. ниже |
+
+**Находки ревью (мои ошибки, все подтверждены пробами):**
+- M64.3: правка **инертна в проде** — запись под `with torch.no_grad()` вызывающего
+  (`memory_bank.py:460`); тест звал `L2Bank.write` напрямую → ложнозелёный.
+- M64.3: novelty-множитель **аннигилируется `val_norm`** (LayerNorm масштабно-инвариантен;
+  градиент гейта ~1e-4 от градиента W_k) — удалён (судьба гейта → M64.6).
+- M64.3: stash не покрыт snapshot/restore/reset (утечка eval→train класса M33/M45);
+  при нескольких записях за форвард граф выживал только у последней; AMP dtype.
+- M64.2: `count > 3` + drop = **вечная заморозка** (в боевом ckpt 12/16 слотов `count=1`);
+  `merge_lo=0.25` не откалиброван (null max-cos ≈0.06/0.09); decay оставался per-forward.
+- M64.1: на резюме (step 7315, floor уже снят) эффект правки нулевой; релиз — по часам
+  (UCB → M65); анализатор ложно кричал «закрыт» по σ(w).
+
+### Переработка (раунд 2)
+
+| Что | Как исправлено | Тесты |
+|---|---|---|
+| M64.3 call-site | снят внешний `no_grad` в `StreamingMemoryBank.forward`; L1 остаётся no_grad (его proj живёт на чтении) | `test_stack_path_write_is_live` — **через стек** |
+| M64.3 stash | `clear_effective()` на каждом `write=True` (per-forward жизненный цикл), чейнинг через `_keys_eff` (все записи форварда в графе), вызов в `reset_cache`, каст dtype | `test_the_effective_store_chains_across_writes`, `test_clear_effective_drops_the_stash` |
+| M64.3 novelty | множитель убран (инертен by construction) | `test_write_projections_get_gradients` (без novelty) |
+| M64.3 cold start | задокументирован: `fusion[-1]` zero-init → read-путь ровно 0 на шаге 1, но W2 получает градиент (пробуждение) | `test_the_cold_start_wakes_through_the_fusion` |
+| M64.2 архив | снят grace `count > 3` (conf_init 0.5 > archive 0.25 — свежий слот не может архивироваться сразу) | `test_immortal_slots_archive_after_neglect` |
+| M64.2 merge_lo | 0.25 → **0.2** (null ≈0.06/0.09, повторяющаяся структура ~0.3); телеметрия перцентилей best-cos | `test_no_churn_on_random_residuals` (D=512: null не мержится) |
+| M64.2 decay | 0.999 → **0.99 per-observe** (0.5→0.25 за ~69 наблюдений ≈ 287 шагов при наблюдённых ~0.24/шаг) | `test_decay_is_per_observe_not_per_forward` |
+| M64.2 тесты | F4-спека: предзаполненный банк + поздний повтор (архив → рождение → подтверждение) | `test_late_recurrence_confirms_after_prefill` |
+| M64.1 телеметрия | анализатор печатает `effective` и предупреждает по нему, не по σ(w) | — |
+
+**Итог раунда 2:** 434 passed. M64.1 — ACCEPT (условия выполнены частично, UCB → M65);
+M64.2/M64.3 — переработаны, ожидают верификационного ревью (раунд 3).
+
+### Раунд 3 (верификация переработки)
+
+(ожидается)
+

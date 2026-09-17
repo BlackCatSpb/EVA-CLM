@@ -9,9 +9,16 @@ Two structural defects were measured on the live run:
    knowledge/reasoning passes), so the slot life (~100 steps) sat below the
    confirmation time (~200 steps) by arithmetic.
 
-M64 adds the soft route (merge_lo, a similarity-weighted EMA + partial bump),
-drops unmatched observations when the bank is full (no eviction churn), and
-moves the decay to the observe cadence.
+The first landing (soft route + drop + per-observe decay) was REJECTED by the
+R1/R2 review: `count > 3` in the archive condition + drop froze the bank on
+its first <=16 residuals FOREVER (12/16 slots of the live checkpoint had
+count=1), `merge_lo=0.25` was uncalibrated (the null best-cos on D=2560 is
+~0.06 mean / 0.09 max), and the decay was still tied to the forward count.
+This version: no archive grace (conf_init > archive, so a fresh slot can never
+archive immediately), merge_lo=0.2 (between the null and the recurring mode),
+decay 0.99 per observe (~69 observes ~ 287 steps at the observed cadence),
+telemetry (dropped/archived/cos percentiles), and the tests cover the freeze
+regression and the late-recurrence spec.
 """
 import os
 import sys
@@ -33,14 +40,38 @@ def _unit(D, seed):
 
 
 def test_no_churn_on_random_residuals():
-    """F3 (M63-C): independent random residuals must NOT churn the bank."""
-    b = PhantomBank(n_slots=4, D=64)
+    """F3 (M63-C): independent random residuals must not churn the bank.
+
+    D=512 is used deliberately: the null best-cos scales as ~1/sqrt(D), so the
+    D=64 geometry of a naive test has a ~0.125 std and false-merges random
+    noise through the soft route (the R1 review measured 4/4 false confirms).
+    The production geometry is D=2560 (null max ~0.09).
+    """
+    b = PhantomBank(n_slots=4, D=512)
     torch.manual_seed(0)
     for _ in range(200):
-        b.observe(torch.randn(8, 64), torch.full((8,), 5.0), 0.1)
+        b.observe(torch.randn(8, 512), torch.full((8,), 5.0), 0.1)
     st = b.stats()
     assert st['obs'] == 200
-    assert st['births'] <= 4, f'the bank churned: {st}'
+    assert st['births'] <= 12, f'the bank churned: {st}'
+    assert st['merged'] == 0, f'random noise was merged (merge_lo too low): {st}'
+    assert st['archived'] >= 1, 'the neglected slots never archived (the freeze)'
+
+
+def test_immortal_slots_archive_after_neglect():
+    """R2/R3 regression: the old `count > 3` grace made never-recurring slots
+    (count=1) immortal — the live checkpoint had 12/16 of them."""
+    b = PhantomBank(n_slots=4, D=512)
+    d = _unit(512, 1)
+    b.observe(d, torch.tensor([5.0]), 0.1)          # one birth, count=1
+    assert b.stats()['phantoms'] == 1
+    # orthogonal (random) observations must eventually retire it
+    torch.manual_seed(3)
+    for _ in range(300):
+        b.observe(torch.randn(4, 512), torch.full((4,), 5.0), 0.1)
+    st = b.stats()
+    assert st['archived'] >= 1, f'the count=1 slot is immortal: {st}'
+    assert st['births'] > 1, 'no recycling after the archive'
 
 
 def test_recurring_direction_reaches_confirmation():
@@ -55,13 +86,31 @@ def test_recurring_direction_reaches_confirmation():
     assert st['merged'] >= 5, f'the recurrence was not merged: {st}'
 
 
+def test_late_recurrence_confirms_after_prefill():
+    """The M63-C F4 spec: a PREFILLED bank + a recurrence arriving later must
+    still confirm (the first landing failed this: the prefilled slots blocked
+    the new direction forever — drop with no reachable archival)."""
+    b = PhantomBank(n_slots=4, D=512)
+    torch.manual_seed(7)
+    for _ in range(8):                               # prefill with random
+        b.observe(torch.randn(4, 512), torch.full((4,), 5.0), 0.1)
+    torch.manual_seed(9)
+    for _ in range(90):                              # the prefilled fade out
+        b.observe(torch.randn(4, 512), torch.full((4,), 5.0), 0.1)
+    assert b.stats()['archived'] >= 1, 'the prefilled slots never retired'
+    d = _unit(512, 11)
+    for _ in range(60):                              # the late recurrence
+        b.observe(d + 0.005 * torch.randn(4, 512), torch.full((4,), 5.0), 0.1)
+    st = b.stats()
+    assert st['confirmed'] >= 1, f'the late recurrence never confirmed: {st}'
+
+
 def test_soft_route_accumulates_partial_confidence():
     """A moderately similar direction (cos in [merge_lo, merge)) bumps conf."""
     b = PhantomBank(n_slots=4, D=64, merge_lo=0.2, merge=0.9)
     d = _unit(64, 2)
     b.observe(d, torch.tensor([5.0]), 0.1)          # birth, conf = conf_init
     c0 = float(b.confidence[0])
-    # a direction at ~cos 0.5: mix d with an orthogonal unit vector
     o = _unit(64, 3)
     o = o - (o @ d.T) * d
     o = o / o.norm()
