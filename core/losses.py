@@ -383,59 +383,6 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         'ls_reg': log_scale_reg.item() if isinstance(log_scale_reg, torch.Tensor) else log_scale_reg,
         'decorr': decorr_loss.item() if isinstance(decorr_loss, torch.Tensor) else decorr_loss,
     }
-    # ─── Layer Bridge Gate: log per-layer gate weights (SpectrumGate) ───
-    # Also compute a differentiable diversity aux loss so log_tau gets gradient.
-    _lbg_aux = {}
-    _lbg_diversity_loss = 0.0
-    if stack.layer_bridge_gate is not None and stack._layer_diagnostics:
-        _gr = False
-        if getattr(stack, 'maturation', None) is not None:
-            _gr = stack.maturation.global_ready
-        _gates_items = []
-        _taus_items = []
-        _gate_outputs = []  # differentiable — diversity loss needs grad through LBG params
-        for l in range(len(stack.layers)):
-            if l in stack._layer_diagnostics:
-                _mat = stack.maturation.gate[l] if getattr(stack, 'maturation', None) is not None else torch.ones(1)
-                if _gr:
-                    _mat_tau = stack.layer_bridge_gate._effective_tau(_mat)
-                    # Clone diagnostics with grad so gate output carries grad through log_tau
-                    _diag_grad = stack._layer_diagnostics[l].clone().detach().requires_grad_(True)
-                    _gated = stack.layer_bridge_gate.gates[l](_diag_grad, tau_external=_mat_tau)
-                    _gate_outputs.append(_gated.mean())
-                    _gates_items.append(_gated.mean().item())
-                    _taus_items.append(_mat_tau.item())
-                else:
-                    _gates_items.append(_mat.item())
-                    _taus_items.append(stack.layer_bridge_gate.tau_max)
-            else:
-                _gates_items.append(0.5)
-                _taus_items.append(1.0)
-        with torch.no_grad():
-            _gates_t = torch.tensor(_gates_items)
-            _gates_std = (_gates_t.std().item() if _gates_t.numel() > 1 else 0.0)
-            stack._cached_losses['lbg_mean'] = _gates_t.mean().item()
-            stack._cached_losses['lbg_std'] = _gates_std
-            stack._cached_losses['lbg_min'] = _gates_t.min().item()
-            stack._cached_losses['lbg_max'] = _gates_t.max().item()
-            stack._cached_losses['lbg_tau'] = sum(_taus_items) / len(_taus_items) if _taus_items else 0.0
-            stack._cached_losses['lbg_global_ready'] = 1.0 if _gr else 0.0
-            _lbg_aux = {
-                'layer_gate_mean': _gates_t.mean().item(),
-                'layer_gate_std': _gates_std,
-                'layer_gate_min': _gates_t.min().item(),
-                'layer_gate_max': _gates_t.max().item(),
-                'lbg_global_ready': 1.0 if _gr else 0.0,
-            }
-        # Diversity loss: encourage gate weights to spread across layers
-        # (negative entropy = collapse to one layer = bad)
-        if _gate_outputs and _gr:
-            _gate_stack = torch.stack(_gate_outputs)
-            _gate_p = torch.softmax(_gate_stack, dim=0)
-            _gate_entropy = -(_gate_p * (_gate_p + 1e-8).log()).sum()
-            _max_ent = math.log(len(_gate_outputs))
-            _lbg_diversity_loss = (_max_ent - _gate_entropy).clamp(min=0) / _max_ent
-        stack._layer_diagnostics = {}  # reset for next step
     # ─── Memory Bank diagnostics (consolidation stats) ───
     if stack.memory_bank is not None:
         try:
@@ -469,7 +416,6 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     # double-weighting bug (weights were baked here AND reapplied in the
     # training loop).
     aux_dict = {}
-    aux_dict.update(_lbg_aux)
     if pred_w_loss != 0:
         aux_dict['pred_w'] = pred_w_loss
     if pred_loss != 0:
@@ -565,6 +511,4 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             # L2 penalty toward zero (uniform ladder)
             _tau_dev_reg = dev.pow(2).mean() * 0.01
             aux_dict['tau_dev_reg'] = _tau_dev_reg
-    if _lbg_diversity_loss != 0:
-        aux_dict['lbg_diversity'] = _lbg_diversity_loss
     return ce_loss, aux_dict

@@ -631,45 +631,7 @@ def test_gradient_grouping_demonstrable():
             assert grad > 0
 
 
-# ─── LayerBridgeGate ───────────────────────────────────────────────
-
-def test_layer_bridge_gate_shape():
-    from core.layer_bridge_gate import LayerBridgeGate
-    n_layers = 2
-    D = 512
-    gate = LayerBridgeGate(n_layers=n_layers)
-    layer_outputs = torch.randn(n_layers, 2, D)
-    diagnostics = torch.randn(n_layers, 6)
-    tau = torch.tensor([0.5, 0.8])
-    bridge_input, gate_weights, gate_info = gate(layer_outputs, diagnostics, tau)
-    assert bridge_input.shape == (2, D)
-    assert gate_weights.shape[0] == n_layers
-    assert isinstance(gate_info, dict)
-
-
-def test_layer_bridge_gate_nan_control():
-    from core.layer_bridge_gate import LayerBridgeGate
-    n_layers = 2
-    D = 512
-    gate = LayerBridgeGate(n_layers=n_layers)
-    layer_outputs = torch.randn(n_layers, 2, D)
-    diagnostics = torch.randn(n_layers, 6)
-    diagnostics[0, :3] = float('nan')
-    tau = torch.tensor([0.5, 0.8])
-    bridge_input, gate_weights, health_scores = gate(layer_outputs, diagnostics, tau)
-    assert not torch.isnan(bridge_input).any(), 'NaN in bridge_input'
-
-
-def test_layer_bridge_gate_explosion_control():
-    from core.layer_bridge_gate import LayerBridgeGate
-    n_layers = 2
-    D = 512
-    gate = LayerBridgeGate(n_layers=n_layers)
-    layer_outputs = torch.randn(n_layers, 2, D)
-    diagnostics = torch.full((n_layers, 6), 1e6)
-    tau = torch.tensor([0.5, 0.8])
-    bridge_input, gate_weights, health_scores = gate(layer_outputs, diagnostics, tau)
-    assert not torch.isnan(bridge_input).any()
+# ─── LayerBridgeGate: REMOVED (M64.5 — the dead channel, see docs/WHITEBOARD.md) ───
 
 
 def test_maturation_no_warmup():

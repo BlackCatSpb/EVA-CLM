@@ -9,7 +9,6 @@ from .config import EVAConfig
 from .block import EVABlock, PrecisionGate, ExactSequenceMemory, _stream_cap
 from .bridge import SemanticBridge
 from .maturation import MaturationController
-from .layer_bridge_gate import LayerBridgeGate
 from .embedding import PartitionedEmbedding, LmHead, PartitionedHead, SigmoidCodedHead, CognitiveCodedHead
 from .reasoning import ReasoningMemory, ReasoningGate
 from .vsa_utils import dct_basis, zeckendorf_codes, sparse_block_codes, vsa_prefix_scan
@@ -125,15 +124,12 @@ class EVAStack(nn.Module):
             depth=getattr(cfg, 'bridge_depth', True),
             cfg=cfg,
         ) if getattr(cfg, 'bridge_conn', 0.0) > 0.0 else None
-        # ─── Layer Bridge Gate (intelligent per-layer gating to bridge) ───
-        # Каждый слой получает per-layer health MLP, gate = sigmoid(health) * tau.
-        # Управляет вкладом каждого слоя в SemanticBridge на основе diagnostics.
-        self.layer_bridge_gate = LayerBridgeGate(
-            cfg.n_layers,
-            health_features=6,
-            tau_min=getattr(cfg, 'gate_tau_min', 0.3),
-            tau_max=getattr(cfg, 'gate_tau_max', 5.0),
-        ) if getattr(cfg, 'bridge_conn', 0.0) > 0.0 else None
+        # ─── Layer Bridge Gate: REMOVED (M64.5) ───
+        # The M63-B audit + the B3 parity incident: the gate was computed and
+        # discarded, its log_tau had no gradient path, and its stale-diagnostics
+        # wiring broke the bridge's train/eval parity (0.26 vs 3.69). The module
+        # (core/layer_bridge_gate.py) and its loss/telemetry are gone; the
+        # 'health-gated bridge routing' idea is an M65 design candidate.
         # ─── Unified τ-field (TauConfig) ───
         # (already created above, before layers, for U1/U3 block initialization)
         self._vsa_log_param = nn.Parameter(torch.tensor([1.7918, 1.2321, 1.1304, 1.1065]))
@@ -178,8 +174,6 @@ class EVAStack(nn.Module):
         self.register_buffer('_expl_ema', torch.zeros(1), persistent=False)
         # Триада: сколько ре-циркуляций сделал Рассудок на последнем проходе (диагностика)
         self._triad_passes = 0
-        # ─── Layer Bridge Gate diagnostics cache ───
-        self._layer_diagnostics = {}  # filled during forward
         # U2: τ-norm for reasoning budget (mean across layers)
         self._tau_norm_reasoning = self.tau_config.tau_norm.mean().item()
         # ─── Logit Cache with Attention (long-context memory) ───
@@ -461,13 +455,11 @@ class EVAStack(nn.Module):
         # not known yet). M_l gates live BridgeGLU, memory write, bridge injection
         # and the intent bus. At M_l~0 only the frozen base MLP (~0.667) is active.
         mat_gate = None
-        _global_ready = False
         if self.maturation is not None:
             if step is None:
                 # Inference/eval: reuse the LAST training gate (never force-open, which
                 # would scramble eval vs train — the bug that produced ppl 485M).
                 mat_gate = self.maturation.gate
-                _global_ready = self.maturation.global_ready
             else:
                 # Maturation gate: time ramp (deep-first) raised by the
                 # per-layer readiness EMA — competence can only OPEN EARLIER
@@ -477,7 +469,6 @@ class EVAStack(nn.Module):
                 # maturation.readiness is per-layer (n_layers) and safe.
                 mat_gate = self.maturation.step_gate(step, self._tau_l_dev.detach())
                 mat_gate = torch.maximum(mat_gate, self.maturation.readiness.detach().clone())  # clone: update() writes readiness in-place; detach shares storage
-                _global_ready = self.maturation.global_ready
                 # M11 (audit 02b F2B-04): step-None (eval/inference) reuses
                 # self.maturation.gate — publish the COMBINED gate there, or
                 # eval trains on max(ramp,readiness) while validating on the
@@ -582,27 +573,17 @@ class EVAStack(nn.Module):
                 # detaching keeps the bridge's
                 # forward signal (stream injection) while removing the diverging
                 # gradient path. The gate still gets its gradient from the main CE.
-                # ─── Layer Bridge Gate: scale probe input by per-layer health ───
-                # Before global_ready: simple maturation gating (no SpectrumGate).
-                # After global_ready: full per-layer SpectrumGate with tau-driven
-                # diversity. Single source: LayerBridgeGate.layer_gate, fed by the
-                # LIVE τ-field gate ladder (audit M2: the stack's inline copy
-                # diverged and re-derived tau from its own literals).
-                if self.layer_bridge_gate is not None and i in self._layer_diagnostics:
-                    _tau_i = mat_gate[i] if mat_gate is not None else torch.ones((), device=h.device)
-                    _gate_i = self.layer_bridge_gate.layer_gate(
-                        i, self._layer_diagnostics[i], _tau_i, _global_ready,
-                        tau_external=self.tau_config.gate_tau[i])
-                    # B3 parity (agent E + bridge probe): the health-gate was
-                    # fed by _layer_diagnostics of the PREVIOUS forward, so
-                    # the probe input changed with cache freshness — train/eval
-                    # features diverged (measured s_l maxdiff 1.3 at layer 1,
-                    # bridge loss 0.26 train vs 3.69 eval < chance). The probe
-                    # reads the raw detached state; the gate stays computed
-                    # for the diagnostics dashboard only.
-                    _s_l = self.bridge.probe_layer(h.detach())
-                else:
-                    _s_l = self.bridge.probe_layer(h.detach())
+                # ─── Layer Bridge Gate: REMOVED (M64.5) ───
+                # The M63-B audit: the gate was computed and then DISCARDED —
+                # the stream read the raw detached state — its only consumer
+                # (lbg_diversity) sat at exactly 0.0 with no gradient path
+                # (log_tau frozen), and the B3 parity incident measured the
+                # stale-diagnostics wiring breaking the bridge (probe loss
+                # 0.26 train vs 3.69 eval < chance). A learned gate without a
+                # CE path is dead by construction -> removed, not wired (the
+                # 'health-gated bridge routing' idea stays an M65 design
+                # candidate with an A/B, per the whiteboard).
+                _s_l = self.bridge.probe_layer(h.detach())
                 self.bridge.record(_s_l)
                 self.bridge.update_stream(i, _s_l)
 
@@ -675,34 +656,8 @@ class EVAStack(nn.Module):
                 _pe = layer.mirror._cached_pred_error_norm
                 if _pe is not None:
                     pred_errs.append(_pe.detach().mean())
-            # ─── Layer Bridge Gate: collect per-layer diagnostics ───
-            if self.layer_bridge_gate is not None:
-                with torch.no_grad():
-                    mir = layer.mirror
-                    _diag = torch.zeros(6, device=h.device, dtype=h.dtype)
-                    _pe = getattr(mir, '_cached_pred_error_norm', None)
-                    if _pe is not None:
-                        _diag[0] = _pe.detach().mean().clamp(0.0, 1.0)
-                    _gl = getattr(mir, '_cached_gate_l1', None)
-                    if _gl is not None:
-                        _diag[1] = _gl.detach().clamp(0.0, 1.0)
-                    _mp = getattr(mir, '_cached_pred_k', None)
-                    if _mp is not None:
-                        _mn = _mp.detach().norm()
-                        _diag[2] = (_mn / 1000.0).clamp(0.0, 1.0)
-                    _diag[3] = 0.5
-                    _hp = getattr(mir, '_cached_hp', None)
-                    if _hp is not None:
-                        _hp_det = _hp.detach()
-                        _hp_norm = torch.sigmoid(_hp_det)
-                        _hp_norm = _hp_norm / _hp_norm.sum(dim=-1, keepdim=True).clamp(min=1e-6)
-                        _entropy = -(_hp_norm * _hp_norm.clamp_min(1e-9).log()).sum()
-                        _max_entropy = math.log(_hp_det.shape[-1])
-                        _diag[4] = (_entropy / _max_entropy).clamp(0.0, 1.0)
-                    _gl2 = getattr(mir, '_cached_gate_l1', None)
-                    if _gl2 is not None:
-                        _diag[5] = (1.0 - _gl2).clamp(0.0, 1.0)
-                    self._layer_diagnostics[i] = _diag
+            # (M64.5: the per-layer LBG diagnostics block was removed with the
+            # dead LayerBridgeGate — see the probe comment above.)
             if s_out is not None:
                 mem_state_out = s_out[0]  # (B, S*D) — multi-scale memory state
                 B = h.shape[0]
@@ -1477,8 +1432,7 @@ class EVAStack(nn.Module):
                     groups['tau_dev']['params'].append(p)
                 # Bridge params: bridge.*, bridge_glu_net.*, intent_probe, bus_head_proj
                 elif ('bridge.' in name or 'bridge_glu_net' in name
-                      or 'intent_probe' in name or 'bus_head_proj' in name
-                      or 'layer_bridge_gate.' in name):
+                      or 'intent_probe' in name or 'bus_head_proj' in name):
                     k = 'bridge' if p.ndim >= 2 else 'bridge_nd'
                     groups[k]['params'].append(p)
                 elif frozenset(name.split('.')) & _VSA_PARTS:
@@ -1529,8 +1483,7 @@ class EVAStack(nn.Module):
                 continue
             # Bridge params: bridge.*, bridge_glu_net.*, intent_probe, bus_head_proj
             is_bridge = ('bridge.' in name or 'bridge_glu_net' in name
-                         or 'intent_probe' in name or 'bus_head_proj' in name
-                         or 'layer_bridge_gate.' in name)
+                         or 'intent_probe' in name or 'bus_head_proj' in name)
             if is_bridge:
                 if p.ndim < 2:
                     bridge_no_decay.append(p)
