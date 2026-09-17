@@ -54,7 +54,9 @@ print('Scheduler: MirrorLRScheduler')
 
 # ---- cell 9 balancer ----
 set_active_depth(model, 8)
-balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval)
+balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval,
+                        align_every=int(1 if getattr(cfg, 'balancer_align_every', 1) is None
+                                        else getattr(cfg, 'balancer_align_every', 1)))  # M64.4
 clipper = GradientClipper(c=0.01)
 cfg.gradalign_weight = 0.3
 
@@ -81,7 +83,7 @@ for step in range(10):
             _g = torch.autograd.grad(ce_loss, _outs, retain_graph=True, allow_unused=True)
             _ga = sum(o.norm() for o in _g) / max(1, len(_g))
             aux_dict['gradalign'] = _ga
-    balancer.backward(ce_loss, aux_dict, model.parameters())
+    balancer.backward(ce_loss, aux_dict, model.parameters(), step=step)  # M64.4
     clipper.clip(model.parameters())
     optimizer.step()
     scheduler.step()

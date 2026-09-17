@@ -265,7 +265,8 @@ def train(cfg=None, resume_path=None):
                             unfreeze_inc=4, eval_interval=cfg.eval_interval)
     # Aux-loss balancer: spectral alignment (bounds aux grad by ||g_CE||).
     balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval,
-                            align_every=int(getattr(cfg, 'balancer_align_every', 1) or 0))
+                            align_every=int(1 if getattr(cfg, 'balancer_align_every', 1) is None
+                                            else getattr(cfg, 'balancer_align_every', 1)))
     # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
@@ -567,6 +568,11 @@ def train(cfg=None, resume_path=None):
                 cfg.gradient_checkpointing = False
                 ce_s = aux_s = ce_loss = aux_dict = None
                 optimizer.zero_grad(set_to_none=True)
+                # M64.4 (R2 review): an exception inside the align path can leave
+                # the gradalign hook frozen — restore it on the fallback.
+                for _l in getattr(model, 'layers', []):
+                    if hasattr(_l, '_ga_record'):
+                        _l._ga_record = True
                 model.release_step_graph()   # M47: drop stale graph-pinned attrs
                 if device == 'cuda':
                     torch.cuda.empty_cache()
@@ -637,8 +643,14 @@ def train(cfg=None, resume_path=None):
                 _tel = model.head_telemetry() if hasattr(model, 'head_telemetry') else {}
                 _tel_str = ' '.join(f'{k}={v:.4f}' if isinstance(v, float) else f'{k}={v}'
                                     for k, v in _tel.items())
+                # M64.4 (R3 review): the balancer's cadence telemetry — without
+                # it the A/B (align_every=8 vs 1) is indistinguishable in the log.
+                _bal = (f'bal_a={getattr(balancer, "n_align", 0)} '
+                        f'bal_b={getattr(balancer, "n_balance", 0)} '
+                        f'bal_s={getattr(balancer, "scale_ema", None) if getattr(balancer, "scale_ema", None) is None else round(float(balancer.scale_ema), 5)} '
+                        f'bal_cos={getattr(balancer, "last_cos", None) if getattr(balancer, "last_cos", None) is None else round(float(balancer.last_cos), 4)}')
                 print(f'  step={step:>6} loss={ce_loss.item():.4f} mod_mlp={mod_scl:.3f} lr={current_lr:.2e} '
-                      f'tok/s={tok_s:.0f} stream={stream_idx} '
+                      f'tok/s={tok_s:.0f} stream={stream_idx} {_bal} '
                       f'{aux_str}{gate_str}')
                 if _tel_str:
                     print(f'  head: {_tel_str}')

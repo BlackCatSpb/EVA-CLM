@@ -45,23 +45,85 @@ def test_cadence_selects_the_paths():
                      'align', 'balance', 'balance', 'balance']
 
 
-def test_align_every_zero_is_pure_balance():
+def test_align_every_zero_is_balance_after_the_seed():
+    """k=0: the first call still aligns (the scale seed), the rest are cheap."""
     lb = LossBalancer(align=True, align_every=0, eval_interval=100)
     a, b = _toy()
     lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)
+    assert lb.last_path == 'align' and lb.scale_ema is not None
+    a.grad = b.grad = None
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=1)
     assert lb.last_path == 'balance'
     assert lb.last_cos is None
 
 
-def test_the_cheap_path_is_the_normalized_single_backward():
-    """The balance path: one backward of ce + beta * sum(v/ema_v)."""
+def test_the_cheap_path_is_the_measured_scale_single_backward():
+    """The balance path: one backward of ce + s * sum(aux), s = the EMA of the
+    scale measured by the last align pass."""
     lb = LossBalancer(align=True, align_every=0, eval_interval=100)
     a, b = _toy()
+    # the first step always aligns (seeds scale_ema) even with align_every=0?
+    # no: align=False-style never-align has no measurement -> the first call
+    # runs the align path (the seeding rule), then the cheap ones follow.
     lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)
-    # first call: ema_ce = |ce| = 2, ema_aux = 0.1, A = 0.1/0.1 = 1, beta = 2
-    # b.grad = d(ce)/db + beta * d(aux)/db / ema_aux = 2 + 2*0.2/0.1 = 6
-    assert abs(float(a.grad) - 2.0) < 1e-3
-    assert abs(float(b.grad) - 6.0) < 1e-2
+    assert lb.last_path == 'align', 'the first call must seed scale_ema'
+    assert lb.scale_ema is not None
+    s = float(lb.scale_ema)
+    a.grad = b.grad = None
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=1)
+    assert lb.last_path == 'balance'
+    # d(ce)/db = 2; d(aux)/db = 0.2; the aux enters with the measured s
+    assert abs(float(b.grad) - (2.0 + s * 0.2)) < 1e-3
+
+
+def test_the_cheap_path_cannot_explode_on_zero_crossing_terms():
+    """R1's P12/P3b adversarial case: an aux term passing through zero (value
+    exactly 0, or sign-cancelling) must NOT blow up the gradient. The rejected
+    value-EMA normalization gave 1e8x the CE gradient through the 1e-8 floors;
+    the measured-scale path is gradient-geometry based."""
+    lb = LossBalancer(align=True, align_every=0, eval_interval=100)
+    a, b = _toy()
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)  # seed
+    a.grad = b.grad = None
+    # an aux term that is EXACTLY zero at b=1 but has a live gradient
+    lb.backward(a ** 2 + b ** 2, {'z': (b - 1.0) * 0.0 + (b - 1.0)},
+                [a, b], step=1)
+    assert lb.last_path == 'balance'
+    ratio = abs(float(b.grad)) / 2.0
+    assert ratio < 10.0, f'the cheap path exploded: {float(b.grad)} vs CE 2.0'
+
+
+def test_the_cheap_path_cannot_explode_on_sign_cancellation():
+    """R1's P3a: aux terms that cancel in the value sum must not blow up."""
+    lb = LossBalancer(align=True, align_every=0, eval_interval=100)
+    a, b = _toy()
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)  # seed
+    a.grad = b.grad = None
+    lb.backward(a ** 2 + b ** 2, {'p': b - 1.0, 'n': -(b - 1.0)}, [a, b], step=1)
+    assert lb.last_path == 'balance'
+    ratio = abs(float(b.grad)) / 2.0
+    assert ratio < 10.0, f'the cheap path exploded: {float(b.grad)} vs CE 2.0'
+
+
+def test_the_cheap_path_freezes_the_gradalign_target():
+    """R3: the gradalign hook must not overwrite its CE-only target with the
+    combined gradient on the cheap steps."""
+    lb = LossBalancer(align=True, align_every=2, eval_interval=100)
+
+    class _L:
+        _ga_record = True
+
+    class _M:
+        layers = [_L()]
+
+    m = _M()
+    a, b = _toy()
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0, phase_model=m)
+    assert m.layers[0]._ga_record is True, 'the align path must restore the flag'
+    a.grad = b.grad = None
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=1, phase_model=m)
+    assert lb.last_path == 'balance'
+    assert m.layers[0]._ga_record is True, 'the cheap path must restore the flag'
 
 
 def test_the_align_path_keeps_the_per_parameter_bound():
@@ -82,14 +144,14 @@ def test_config_knob_defaults_to_one():
     assert cfg.balancer_align_every == 1
 
 
-def test_state_dict_roundtrips_the_emas():
-    lb = LossBalancer(align=True, align_every=0, eval_interval=100)
+def test_state_dict_roundtrips_the_scale_seed():
+    lb = LossBalancer(align=True, align_every=8, eval_interval=100)
     a, b = _toy()
-    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)  # fills EMAs
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)  # align: seeds
+    assert lb.scale_ema is not None
     sd = lb.state_dict()
-    assert sd.get('align_every') == 0
-    assert sd['ema_ce'] is not None and sd['ema_aux']
+    assert sd.get('align_every') == 8
+    assert sd.get('scale_ema') is not None
     lb2 = LossBalancer(align=True, eval_interval=100)
     lb2.load_state_dict(sd)
-    assert lb2.ema_ce == sd['ema_ce']
-    assert lb2.ema_aux == sd['ema_aux']
+    assert abs(lb2.scale_ema - sd['scale_ema']) < 1e-12

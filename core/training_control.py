@@ -197,6 +197,16 @@ class LossBalancer:
     cos-gate would otherwise zero the whole aux block (including them) on
     steps where the summed aux gradient happens orthogonal to CE. The cos
     value itself is now logged on ``self.last_cos`` (was invisible).
+
+    M64.4 cadence (M63-F): the align path costs THREE graph traversals per
+    step (CE / aux / bypass) — the largest structural cost of the run.
+    ``align_every=k>1`` aligns on every k-th step and uses a cheap ONE-backward
+    total ``ce + s * sum(aux)`` otherwise, where ``s`` is the EMA of the scale
+    MEASURED by the last align pass (gradient geometry, not loss values — see
+    the R1 rejection note in ``_balance_loss``). The cheap steps are therefore
+    approximately bounded, not bounded by construction; the per-parameter
+    sign-mask applies on the align steps only. ``align_every=0`` = never align;
+    default 1 = every step (historical, bit-identical).
     """
 
     BYPASS_AUX = ('gradalign',)
@@ -219,17 +229,26 @@ class LossBalancer:
         self.ema_A: Optional[float] = None
         self.last_cos: Optional[float] = None   # cos(g_CE, g_aux) of last backward
         self.last_path: str = 'align'           # 'align' | 'balance' (M64.4)
+        self.scale_ema: Optional[float] = None  # M64.4: the measured align scale
+        self.n_align: int = 0                   # M64.4: telemetry counters
+        self.n_balance: int = 0
 
     def set_stats(self, eval_interval: int = 1000) -> None:
         self.eval_interval = int(eval_interval)
 
     def state_dict(self) -> Dict[str, Any]:
         """Persist the balance EMAs so a resumed run does not re-anneal the
-        aux scaling from scratch (audit M12 single-best.pt)."""
+        aux scaling from scratch (audit M12 single-best.pt).
+
+        Convention (R2 review): the checkpoint is PROVENANCE, the config is
+        the source of truth — `align`/`align_every` ride here for diagnostics,
+        `load_state_dict` does not restore them (the constructor's values win).
+        """
         return {
             'ema_ce': self.ema_ce,
             'ema_A': self.ema_A,
             'ema_aux': dict(self.ema_aux),
+            'scale_ema': self.scale_ema,        # M64.4: seed for the cheap path
             'align': bool(self.align),
             'align_every': int(self.align_every),   # M64.4
         }
@@ -239,6 +258,8 @@ class LossBalancer:
             return
         self.ema_ce = sd.get('ema_ce', self.ema_ce)
         self.ema_A = sd.get('ema_A', self.ema_A)
+        if sd.get('scale_ema') is not None:     # M64.4: warm-start the cheap path
+            self.scale_ema = float(sd['scale_ema'])
         if sd.get('ema_aux') is not None:
             self.ema_aux = dict(sd['ema_aux'])
 
@@ -265,12 +286,14 @@ class LossBalancer:
         self.ema_A = A if self.ema_A is None else d * self.ema_A + (1 - d) * A
 
     def _balance_loss(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any]) -> torch.Tensor:
-        """M64.4: the cheap path's total — one scalar for a single backward.
+        """Legacy value-EMA normalization (the Kendall & Gal style total).
 
-        Kendall & Gal style: each aux term is normalized by its own running EMA
-        and the block is scaled to track |CE| (beta = ema_ce / ema_A), so the
-        aux cannot dominate the update even without the per-parameter
-        sign-mask+bound of the align path.
+        M64.4 (R1 review): NOT used by the cheap path any more — normalizing by
+        the aux VALUE amplifies the gradient as 1/|v_i| (measured: a term
+        crossing zero produced 1e8x the CE gradient through the 1e-8 floors,
+        and sign cancellation in ema_A gave 2e6x). Kept only as the legacy
+        ``loss()`` helper for the align=False mode; the cheap path uses the
+        measured gradient-geometry scale instead.
         """
         self._update_balance(ce_loss, aux_dict)
         beta = (self.ema_ce or 1.0) / max(self.ema_A or 1.0, 1e-8)
@@ -362,24 +385,44 @@ class LossBalancer:
                  step: Optional[int] = None) -> None:
         # M64.4 (M63-F): the align cadence. `align_every=k>1` runs the full
         # three-traversal alignment only on the steps where `step % k == 0`
-        # and the cheap one-backward normalized total on the rest; 0 disables
-        # the alignment entirely. Default 1 = every step (historical).
+        # and a cheap ONE-backward total on the rest; 0 disables the alignment
+        # entirely. Default 1 = every step (historical, bit-identical).
+        #
+        # The cheap total is `ce + s * sum(aux)`, where `s` is the EMA of the
+        # gradient-geometry scale MEASURED by the last align pass
+        # (cos+ * ||g_CE||/||g_aux||). R1 review: the value-EMA normalization
+        # was rejected — normalizing by the aux VALUE amplifies the gradient
+        # as 1/|v_i| (a zero-crossing term gave 1e8x the CE gradient through
+        # the 1e-8 floors; sign cancellation in ema_A gave 2e6x). `s` comes
+        # from the gradient geometry, so those adversarial cases cannot touch
+        # it; the first step always aligns to seed `s`.
         params = [p for p in parameters if p.requires_grad]
         _cheap = (not self.align) or (self.align_every <= 0) or (
             self.align_every > 1 and step is not None
             and int(step) % self.align_every != 0)
-        if _cheap and params:
+        if _cheap and params and (not self.align or self.scale_ema is not None):
             self.last_path = 'balance'
             self.last_cos = None
-            # NOTE (for the M64.4 review): the gradalign hook (block.py:751)
-            # records during this single backward, so on the cheap steps its
-            # target is the COMBINED (CE+aux) gradient norm, not the CE-only
-            # one the align path freezes for. The contamination is bounded by
-            # the balance normalization (the aux block tracks |CE|) and the
-            # target is a relative signal — documented, not silently fixed.
-            self._balance_loss(ce_loss, aux_dict).backward()
+            self.n_balance += 1
+            # R3 review: the gradalign hook must not overwrite its CE-only
+            # target with the combined gradient on the cheap steps — freeze it
+            # (the target stays from the last align pass, stale <= k-1 steps;
+            # the hook is one-step-stale by design, this extends it mildly).
+            if phase_model is not None:
+                for _l in getattr(phase_model, 'layers', []):
+                    _l._ga_record = False
+            try:
+                _s = 1.0 if not self.align else float(self.scale_ema)
+                _at = [v for v in aux_dict.values() if isinstance(v, torch.Tensor)]
+                total = ce_loss + (_s * sum(_at) if _at else 0.0)
+                total.backward()
+            finally:
+                if phase_model is not None:
+                    for _l in getattr(phase_model, 'layers', []):
+                        _l._ga_record = True
             return
         self.last_path = 'align'
+        self.n_align += 1
         self.last_cos = None
         # B2 (audit C): (i) the single GLOBAL cosine gate zeroed every aligned
         # aux term whenever the SUM ⊥ CE (measured: final grad = pure CE, and
@@ -469,6 +512,15 @@ class LossBalancer:
             cos = float(num) / (na * nb + 1e-8)
             self.last_cos = cos          # raw alignment diagnostic (audit M5)
             scale = min(1.0, max(0.0, cos)) * na / nb
+            # M64.4 (R1 review): the cheap path applies THIS measured scale to
+            # the aux sum — the value-EMA normalization was rejected (it
+            # amplified gradients as 1/|v_i|: a zero-crossing aux term gave
+            # 1e8x the CE gradient through the 1e-8 floors). The scale here is
+            # gradient-geometry based, so the adversarial cases (v=0, sign
+            # cancellation) cannot touch it. Fast EMA (tau ~ 100 align steps).
+            _d = 0.99
+            self.scale_ema = (scale if self.scale_ema is None
+                              else _d * self.scale_ema + (1.0 - _d) * scale)
 
         with torch.no_grad():
             for p, gce, gau in zip(params, ce_grads, aux_grads):
