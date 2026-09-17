@@ -416,7 +416,10 @@ class EVAStack(nn.Module):
                             _ucl.concept_keys.detach(), dim=-1)
                         _dk = torch.nn.functional.normalize(
                             _ucl.q_proj(_d.detach()).reshape(-1), dim=-1)
-                        _sim = float((_kn @ _dk).abs().max())
+                        # the scalar only gates the Python branch below; detach
+                        # so the q_proj graph is not built (the M59d sweep
+                        # missed this call site: it warned on every fire)
+                        _sim = float((_kn @ _dk.detach()).abs().max())
                         if _sim < 0.9:
                             _ucl.birth_from_direction(_d, confidence=0.6)
                 # (C) the phantom channel grows from the UCL's active concepts
