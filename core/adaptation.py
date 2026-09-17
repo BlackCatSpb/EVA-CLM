@@ -206,9 +206,16 @@ def _role_lr_mult(name: str, lam: Any, readout_mult: float = 0.0) -> float:
         # M64.7 (M63-A): the λ⁻² damp (0.296 at λ_d=3) left the head's probes
         # nearly frozen — measured std -1.9% in 7315 steps while the head was
         # the LM bottleneck (CE code-only 12.84 > bias-only 8.65). A positive
-        # `readout_mult` overrides it (1.0 = the unfreeze A/B arm; default 0
-        # keeps the historical behaviour exactly).
-        return float(readout_mult) if float(readout_mult) > 0.0 else lam ** (-2)
+        # `readout_mult` overrides it for the A/B arm. M64.7r2 (the review):
+        # the override applies to the READOUT itself (embed.basis, the tied
+        # parameter, and the legacy lm_head.readout/proj names) — NOT to the
+        # whole embed block (embed.embed_mix is the codebook mixer; unfreezing
+        # it too would widen the arm beyond the F1-B spec).
+        if float(readout_mult) > 0.0 and (
+                name == 'embed.basis' or name.startswith('lm_head.readout')
+                or name.startswith('lm_head.proj')):
+            return float(readout_mult)
+        return lam ** (-2)
     if (parts & _MIRROR_PARTS) or (('W_proj' in parts or 'W_out' in parts)
                                    and 'mirror' in parts):
         return lam ** (1)             # mirror projections / gates

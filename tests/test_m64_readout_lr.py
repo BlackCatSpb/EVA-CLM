@@ -27,13 +27,42 @@ def test_role_mult_default_keeps_the_lambda_damp():
 
 def test_role_mult_override_reaches_the_readout():
     lam = 1.8393
-    for name in ('lm_head.readout', 'lm_head.proj', 'embed.basis', 'embed.weight'):
+    # the override covers the READOUT only (M64.7r2 review: the first version
+    # also unfroze embed.embed_mix, the codebook mixer — wider than the F1-B arm)
+    for name in ('lm_head.readout', 'lm_head.proj', 'embed.basis'):
         assert abs(_role_lr_mult(name, lam, 1.0) - 1.0) < 1e-9, name
+    for name in ('embed.embed_mix', 'embed.weight'):
+        assert abs(_role_lr_mult(name, lam, 1.0) - lam ** -2) < 1e-9, name
     # a non-readout name is untouched by the override (its own role applies)
     for name in ('layers.0.mlp.W_gate', 'layers.0.mirror.W_proj'):
         a = _role_lr_mult(name, lam, 1.0)
         b = _role_lr_mult(name, lam, 0.0)
         assert abs(a - b) < 1e-12, f'{name}: the override leaked ({a} vs {b})'
+
+
+def test_scheduler_resume_does_not_erase_the_flag():
+    """M64.7r2 (the review's blocker): the count-only orig_lrs guard accepted a
+    STALE snapshot when the flag changed the group keys (8==8 groups) — the arm
+    was silently erased. The set-comparison guard keeps the fresh snapshot."""
+    import torch as _t
+    from core.lr_scheduler import MirrorLRScheduler
+    torch.manual_seed(0)
+    m = EVAStack(EVAConfig(**SMALL))
+    lam = 1.8393
+    o0 = build_optimizer(m, 1e-3, llrd_decay=1.0, lam=lam, readout_lr_mult=0.0)
+    s0 = MirrorLRScheduler(m, o0, 1e-3, warmup=1)
+    sd = s0.state_dict()
+    o1 = build_optimizer(m, 1e-3, llrd_decay=1.0, lam=lam, readout_lr_mult=1.0)
+    s1 = MirrorLRScheduler(m, o1, 1e-3, warmup=1)
+    s1.load_state_dict(sd)          # a checkpoint saved with the OTHER flag
+    # the fresh snapshot must survive: the readout group keeps the unfrozen lr
+    def _readout_lr(opt):
+        for g in opt.param_groups:
+            names = [n for n, p in m.named_parameters() if any(p is q for q in g['params'])]
+            if any(n == 'embed.basis' for n in names):
+                return g['lr']
+        raise AssertionError('no readout group')
+    assert abs(_readout_lr(o1) - 1e-3) < 1e-12, 'the stale snapshot erased the flag'
 
 
 def test_build_optimizer_applies_the_override():

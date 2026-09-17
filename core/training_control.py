@@ -586,7 +586,9 @@ def grad_census(model) -> dict:
     audits had to guess at ('live' is not 'effective' — the M64.3 review found
     W_k's gradient ~400x weaker than W_v's). Call AFTER backward, BEFORE
     zero_grad (the caller's job). Missing/None grads are reported as None —
-    an absent key here is itself the signal (a dead channel)."""
+    an absent key here is itself the signal (a dead channel). Under AMP the
+    norms carry the GradScaler's loss scale (call before unscale_ to change
+    that)."""
     out = {}
     probes = {
         'g_readout': ('embed', 'basis'),
@@ -594,7 +596,11 @@ def grad_census(model) -> dict:
         'g_bit_bias': ('lm_head', 'bit_bias'),
         'g_emphasis': ('lm_head', 'emphasis_gain'),
         'g_log_temp': ('lm_head', 'log_temp'),
+        'g_phantom_basis': ('lm_head', 'phantom_basis'),   # M64.8r2 (the review)
         'g_phantom_mix': ('lm_head', 'phantom_mix'),
+        'g_lacuna_w': ('lm_head', 'lacuna_w'),
+        'g_lacuna_b': ('lm_head', 'lacuna_b'),
+        'g_log_eta': ('lm_head', 'log_eta'),
         'g_ucl_scale': ('concept_layer', 'read_scale'),
         'g_wk': ('memory_bank.l2', 'W_k.weight'),
         'g_wv': ('memory_bank.l2', 'W_v.weight'),

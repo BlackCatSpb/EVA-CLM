@@ -30,9 +30,9 @@
 | M64.4 | LossBalancer: 3 backward → 1 (align=False / раз в k) + A/B | план | — | — | — |
 | M64.5 | LBG: подключить привод (`probe(gate·h)`) или удалить | ✅ удалён | ревью R1/R2+R3: градиенты бит-идентичны 234/234, resume PASS | cae0ebd |
 | M64.6 | Aux-гигиена: удалить `nuc`/`gate_repulse`, метрика `usef` (std), novelty_gate | ✅ (раунд 2) | R1/R2+R3 ревью → parser-фикс, CRLF-restore, nuc-тумбстоун | b3fbdd5 + фикс |
-| M64.7 | Readout: флаг разморозки (λ⁻²→1) для A/B | план | — | — | — |
-| M64.8 | Телеметрия: per-branch `r_i`, невидимые термы, live-захват `_last_u`; + **stable-rank W_proj** (замена nuc); + **std(alpha)**; + H(usage) рядом с HHI | план | M63-E + ревью M64.6 | — | — |
-| M64.9 | Ноутбук: `stream_chunk_steps` 250→1000 (решение F: CE-стабильность) | план | — | — | — |
+| M64.7 | Readout: флаг разморозки (λ⁻²→1) для A/B | ✅ (раунд 2) | R1/R2+R3 → сужение до readout, scheduler-guard, A/B-спека | 061f6b2 + фикс |
+| M64.8 | Телеметрия: per-branch `r_i`, невидимые термы, live-захват `_last_u`; + **stable-rank W_proj** (замена nuc); + **std(alpha)**; + H(usage) рядом с HHI | ✅ (раунд 2) | R1/R2+R3 → порядок census в ноутбуке, spike-счётчик, parser, покрытие | 6c24db8 + фикс |
+| M64.9 | Ноутбук: `stream_chunk_steps` 250→1000 (решение F: CE-стабильность) | ✅ (раунд 2) | R1/R2 ACCEPT; R3 → запись F-vs-C конфликта + фальсификатор | 6c24db8 + фикс |
 | M64.10 | Liveness-census (T5/T6) + **T13 (on/off-семантика весов)** + снять мёртвые поля (`nuclear_weight`, `gate_repulse_weight`) | план | M63-B/E + ревью M64.6 | — | — |
 | M64.11 | **bridge_conn: судьба** (chance-floor 6.15 vs ln446=6.10 — удалить/переобучить/фальсификатор) | план | M63-E §3 | — | — |
 | M64.12 | **Kill-switch** aux-термов (round-robin grad_geometry + Шмитт) | план | M63-E §7 (восстановлен из ревью) | — | — |
@@ -152,6 +152,20 @@ M64.2/M64.3 — переработаны, ожидают верификацио�
 
 **Подтверждено:** удаления корректны (0 живых читателей, 439 passed, resume старого ckpt PASS: unexpected=5/missing=0; aux-состав до/после: ровно {gate_repulse, nuc} исчезли, 14 общих ключей бит-идентичны); `gate_repulse` — вес в align-режиме только on/off, обе цели (balance/repulse) читали один `_cached_gate_usage`, balance сильнее (HHI имеет восстанавливающий градиент у оптимума); `nuc` — радиальный градиент при detached σ̂max; alpha-push держал std(alpha) ×4 при G=4 (в проде G=32 → слабее ~8×/шаг) — эффект снятия задокументирован.
 **Блокеры (закрыто):** (1) `_MAIN_RE` не парсил РЕАЛЬНУЮ строку (bal_*/live=/d=/usef=m/s) — молча терял всю строку; исправлено: named-optional-groups под оба формата (notebook + CLI), `main['usef_std']`, health-check по std, тест переписан на реальную строку; (2) тумбстоун nuc врал («penalty 0») — исправлено: penalty ≈0.28 в среднем по боевому ckpt (rank_ub=32; число модельно-зависимо — 0.52 было из rank-64 модели), инертность от веса 1e-5 и радиального градиента (cos(g,W)=−1.0000); (3) CRLF→LF churn memory_bank.py (1322 строки диффа) — восстановлен CRLF отдельным коммитом; (4) ниты: `_np`-ветка аннотирована, README/MATHEMATICAL_ANALYSIS помечены, реестр дополнен (bridge_conn/kill-switch/stable-rank/T13).
+
+### M64.7–M64.9 — раунд 1
+
+| ID | R1/R2 | R3 | Итог |
+|---|---|---|---|
+| M64.7 | **REVISE** | **REVISE** | блокер: A/B стирается на резюме → фикс + сужение + A/B-спека |
+| M64.8 | **REVISE** | **REVISE** | блокер: census в ноутбуке ДО backward (все нули) → фикс + покрытие |
+| M64.9 | ACCEPT | **REVISE** | 1000 ок; записать F-vs-C конфликт + фальсификатор |
+
+**Закрыто (раунд 2):**
+- M64.7: `_role_lr_mult` сужен до самого readout (`embed.basis` + legacy `lm_head.readout/proj`) — `embed.embed_mix` больше не размораживается (шире F1-B); `MirrorLRScheduler.load_state_dict` — guard по МНОЖЕСТВУ orig_lrs, не по count (флип флага на резюме больше не стирает A/B и не сдвигает соседние группы); тест резюма с флипом.
+- **A/B-спека readout (перенесена из M63-A F1-B):** руки `readout_lr_mult ∈ {0.0, 1.0}`, один ckpt/сид/стримы, ≥2 канонических окна (2090 шагов); метрики: val, CE(code-only)−CE(bias-only), std(readout) vs init, `g_token_bias`, std(token_bias); **откат** при Δval > max(0.1, 2σ) на двух eval; руку запускать СВЕЖЕЙ (FORCE_FRESH) — resume со сменой флага теперь безопасен (guard), но чище с нуля.
+- M64.8: census перенесён ПОСЛЕ `balancer.backward` в ноутбуке (проверено индексами: backward < census < zero_grad); в census добавлены `phantom_basis/lacuna_w/lacuna_b/log_eta` (фантомный канал); per-branch `r_i` (`branch_r_conv/bind/mirror`) в `_cached_losses`; `_spike_stats` получил счётчик `n` (стейл различим); тест спайка переписан на РЕАЛЬНУЮ сатурацию (был ложнозелёный: bus_cap=0 → sat=0); тест census строит memory_bank=True; `tele:` парсится анализатором (`data['tele']`); AMP-оговорка в докстринге.
+- M64.9: записан F-vs-C конфликт: слот живёт ~526 шагов (69 наблюдений) < чанка 1000 → ~47% рождений переживают смену (при 250 — все); фальсификатор по чанкам: `ph_confirmed/ph_births/ph_archived`, `mb_l3_births`, `lacuna_gate` — если `confirmed=0` и `archived` растёт → реверт к 250 или `head_phantom_every` 25→10-15.
 
 ### Раунд 3 (верификация переработки)
 

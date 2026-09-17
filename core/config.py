@@ -138,10 +138,11 @@ class WideBindConfig:
                                        # R1/R2 calibration: at the observed ~0.13
                                        # observes/step (checkpoint counters) 0.99 gives the
                                        # 0.5 -> 0.25 transition in ~69 observes ~ 526 steps —
-                                       # the confirmation window ballpark; the
-                                       # switch interval (~1200 steps, now 250 via
-                                       # stream_chunk_steps) and this fade must be
-                                       # compared whenever the cadence changes.
+                                       # the confirmation window ballpark. M64.9r2: with the
+                                       # notebook's 1000-step chunk a slot born in the first
+                                       # ~470 steps does NOT survive to the next shift (~47%
+                                       # do); the fade and the chunk must be compared
+                                       # whenever either changes (see the whiteboard).
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)
@@ -502,12 +503,14 @@ class WideBindConfig:
     stream_cap: float = 1e3        # M50: per-layer residual-stream magnitude
                                    # cap (scale-invariant fuse); 0 disables
     stream_chunk_steps: int = 0    # M62: rotate the genre stream every N steps
-                                   # (0 = legacy: rotate only on stream exhaustion,
-                                   # measured ~1200 steps per genre). The novelty
-                                   # machinery (lacuna/phantom bank/UCL) fires on
-                                   # DISTRIBUTION SHIFTS: with ~6 shifts per 7.3k
-                                   # steps it had almost nothing to test on.
-                                   # Recommended: 250 (6.9M tokens per chunk).
+                                   # (0 = legacy: rotate only on stream exhaustion).
+                                   # The novelty machinery (lacuna/phantom bank/UCL)
+                                   # fires on DISTRIBUTION SHIFTS. M64.9r2: the notebook
+                                   # uses 1000 (448k tokens/chunk — the M63-F stability
+                                   # compromise; 250 = 112k tokens ~ 30 s was too short
+                                   # for the CE) — see the F-vs-C conflict note in the
+                                   # whiteboard (a 1000-step chunk shortens the phantom
+                                   # slot survival across shifts to ~47%).
     branch_cap: float = 1e4        # M51: per-branch injection cap (conv/bind/
                                    # mirror/VPM/spectral/MLP); 0 disables
     branch_var_anchor: float = 0.5  # M51: absolute-scale anchor in the branch

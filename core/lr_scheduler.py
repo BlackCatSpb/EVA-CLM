@@ -302,7 +302,15 @@ class MirrorLRScheduler:
             # checkpoint saved before an optimizer-group-shaping change would
             # silently map wrong LRs onto new groups -> only accept when the
             # group count still matches, else keep the fresh snapshot.
-            if len(sd['orig_lrs']) == len(self._orig_lrs):
+            # M64.7r2 (the review's blocker): a COUNT-only guard is not enough —
+            # the readout flag changes the group KEYS while the count stays 8,
+            # so a stale orig_lrs was accepted positionally and the A/B arm was
+            # silently erased on resume (embed.basis got 6e-4 instead of
+            # 1.77e-4, neighbouring groups shifted). Accept only when the SET
+            # of base LRs matches the fresh snapshot; a flag flip keeps fresh.
+            _old = sorted(round(float(x), 12) for x in sd['orig_lrs'])
+            _new = sorted(round(float(x), 12) for x in self._orig_lrs)
+            if len(_old) == len(_new) and _old == _new:
                 self._orig_lrs = sd['orig_lrs']
         if 'best_val_loss' in sd:
             self._best_val_loss = sd['best_val_loss']

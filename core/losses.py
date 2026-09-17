@@ -211,6 +211,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         _anchor_w = float(getattr(stack.cfg, 'branch_var_anchor', 0.0))
         _ref = getattr(stack, '_branch_var_ref', None)
         _seen = []
+        _rms = {'conv': [], 'bind': [], 'mirror': []}   # M64.8r2 (M63-E telemetry)
         for layer in stack.layers:
             conv = getattr(layer, '_cache_conv_out', None)
             bnd = getattr(layer, '_cache_bind_out', None)
@@ -219,6 +220,10 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
                 vc = conv.norm(dim=-1).var() + 1e-10
                 vb = bnd.norm(dim=-1).var() + 1e-10
                 vm = mir.norm(dim=-1).var() + 1e-10
+                with torch.no_grad():
+                    _rms['conv'].append(float(vc.sqrt()))
+                    _rms['bind'].append(float(vb.sqrt()))
+                    _rms['mirror'].append(float(vm.sqrt()))
                 branch_loss = branch_loss + (torch.log(vc) - torch.log(vb)).pow(2)
                 branch_loss = branch_loss + (torch.log(vc) - torch.log(vm)).pow(2)
                 branch_loss = branch_loss + (torch.log(vb) - torch.log(vm)).pow(2)
@@ -232,6 +237,13 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
                     _seen.append(_vs.detach().mean())
         if n_branch > 0:
             branch_loss = branch_loss / n_branch
+        # M64.8r2 (M63-E): the per-branch RMS telemetry — the loss balances the
+        # log-VARIANCES, the RMS is what the stream actually carries.
+        _cl = getattr(stack, '_cached_losses', None)
+        if _rms['conv'] and isinstance(_cl, dict):
+            _cl['branch_r_conv'] = sum(_rms['conv']) / len(_rms['conv'])
+            _cl['branch_r_bind'] = sum(_rms['bind']) / len(_rms['bind'])
+            _cl['branch_r_mirror'] = sum(_rms['mirror']) / len(_rms['mirror'])
         if _anchor_w > 0.0 and _ref is not None:
             with torch.no_grad():
                 _cm = torch.stack(_seen).mean() if _seen else _ref

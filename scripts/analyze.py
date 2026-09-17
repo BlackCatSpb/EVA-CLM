@@ -1493,6 +1493,7 @@ _MAIN_KEYS = ('loss', 'ce', 'mod_mlp', 'mod_std', 'lr', 'tok_s', 'mem',
               'live', 'depth_act', 'intent_w', 'mlp_out', 'usef', 'usef_std',
               'mat', 'mat_min', 'mat_max')
 _AUX_RE = _re.compile(r'aux:\s+(.*)')
+_TELE_RE = _re.compile(r'^\s*tele:\s+(.*)')   # M64.8: the telemetry batch line
 _AUX_KV = _re.compile(r'(\w+)=([-\d.eE+]+)')
 _EVAL_RE = _re.compile(r'EVAL step=(\d+):\s*val_loss=([-\d.eE+]+)\s*val_ppl=([-\d.eE+]+)')
 _DEPTH_RE = _re.compile(r'\[DepthController\].*?->\s*active_depth=(\d+)/(\d+)')
@@ -1520,7 +1521,7 @@ def parse_training_log(path):
       bridge: str | None                      — строка In-core SemanticBridge active (...)
       saves : [(kind, step), ...]
     """
-    data = {'steps': [], 'main': {}, 'aux': {}, 'eval': [], 'depth': [],
+    data = {'steps': [], 'main': {}, 'aux': {}, 'tele': {}, 'eval': [], 'depth': [],
             'bridge': None, 'saves': []}
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
@@ -1534,6 +1535,14 @@ def parse_training_log(path):
                     v = gd.get(k)
                     if v is not None:
                         data['main'].setdefault(k, []).append(float(v))
+                continue
+            t = _TELE_RE.search(line)
+            if t:
+                for k, v in _AUX_KV.findall(t.group(1)):
+                    try:
+                        data['tele'].setdefault(k, []).append(float(v))
+                    except ValueError:
+                        pass
                 continue
             a = _AUX_RE.search(line)
             if a:

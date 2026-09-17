@@ -415,7 +415,13 @@ class SigmoidCodedHead(nn.Module):
             # geometrically impossible for the current head — this settles it.
             if float(self._last_sat) > 0.0:
                 with torch.no_grad():
+                    # M64.8r2 (the review): a monotonic counter so a STALE
+                    # snapshot (kept until the next spike) is distinguishable
+                    # from a fresh one in the log.
+                    _sn = int(getattr(self, '_spike_n', 0)) + 1
+                    self._spike_n = _sn
                     self._spike_stats = {
+                        'n': _sn,
                         'u_max': float(u.detach().abs().max()),
                         'u_std': float(u.detach().std()),
                         'h_norm': float(h_norm) if h_norm is not None else -1.0,
