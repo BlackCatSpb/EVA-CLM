@@ -249,7 +249,7 @@ def run_mech(model, cfg):
 
 # ──────────────────────────── HEALTH (log rules) ───────────────────────────
 
-def run_health(data):
+def run_health(data, nq=None):
     """Детерминированные вердикты по логам — то, что при разборе смотрели
     глазами (наклон branch/bridge_conn, направление signal_ent, жизнь intent,
     healthy-band diversity, ползучесть mem)."""
@@ -279,8 +279,14 @@ def run_health(data):
         # probe does not learn the next-embedding prediction at all; the bridge
         # injection was also off (readiness ~0). The M65 A/B: bridge_conn=0.
         import math as _m
-        _floor = _m.log(2 * 224)
-        res.append((f'bridge_conn выше chance (>{_floor:.2f})',
+        # M64.11r2 (the review): the floor comes from the RUN's query count
+        # (Nq = B*(L-1)); the notebook default is 2*223=446 -> ln=6.100, the CLI
+        # 2*255=510 -> 6.234, the OOM/T4 variants lower. A hard-coded 2*224 was
+        # false-green on the CLI and false-red elsewhere. (KNOWN until the M65
+        # bridge_conn=0 A/B: a permanent warning on a known defect.)
+        _nq = int(nq) if nq else 2 * 223
+        _floor = _m.log(max(_nq, 2))
+        res.append((f'bridge_conn выше chance (>{_floor:.2f}, Nq={_nq}; KNOWN - ждёт M65 A/B)',
                     med(bc[-q:]) > _floor + 0.1))
     se = aux.get('signal_ent', [])
     if se:
@@ -1502,6 +1508,8 @@ _MAIN_KEYS = ('loss', 'ce', 'mod_mlp', 'mod_std', 'lr', 'tok_s', 'mem',
               'mat', 'mat_min', 'mat_max')
 _AUX_RE = _re.compile(r'aux:\s+(.*)')
 _TELE_RE = _re.compile(r'^\s*tele:\s+(.*)')   # M64.8: the telemetry batch line
+_HEAD_RE = _re.compile(r'^\s*head:\s+(.*)')   # M64.10r2: the head telemetry line
+_KS_RE = _re.compile(r'^\s*ks:\s+(.*)')       # M64.12: the kill-switch line
 _AUX_KV = _re.compile(r'(\w+)=([-\d.eE+]+)')
 _EVAL_RE = _re.compile(r'EVAL step=(\d+):\s*val_loss=([-\d.eE+]+)\s*val_ppl=([-\d.eE+]+)')
 _DEPTH_RE = _re.compile(r'\[DepthController\].*?->\s*active_depth=(\d+)/(\d+)')
@@ -1529,8 +1537,8 @@ def parse_training_log(path):
       bridge: str | None                      — строка In-core SemanticBridge active (...)
       saves : [(kind, step), ...]
     """
-    data = {'steps': [], 'main': {}, 'aux': {}, 'tele': {}, 'eval': [], 'depth': [],
-            'bridge': None, 'saves': []}
+    data = {'steps': [], 'main': {}, 'aux': {}, 'tele': {}, 'head': {}, 'ks': {},
+            'eval': [], 'depth': [], 'bridge': None, 'saves': []}
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             m = _MAIN_RE.search(line)
@@ -1549,6 +1557,22 @@ def parse_training_log(path):
                 for k, v in _AUX_KV.findall(t.group(1)):
                     try:
                         data['tele'].setdefault(k, []).append(float(v))
+                    except ValueError:
+                        pass
+                continue
+            hd = _HEAD_RE.search(line)          # M64.10r2: ph_sat etc. were log-only
+            if hd:
+                for k, v in _AUX_KV.findall(hd.group(1)):
+                    try:
+                        data['head'].setdefault(k, []).append(float(v))
+                    except ValueError:
+                        pass
+                continue
+            ks = _KS_RE.search(line)            # M64.12: the kill-switch proj values
+            if ks:
+                for k, v in _AUX_KV.findall(ks.group(1)):
+                    try:
+                        data['ks'].setdefault(k, []).append(float(v))
                     except ValueError:
                         pass
                 continue
@@ -2331,7 +2355,13 @@ def main():
             n = len(log_data['steps'])
             print(f'  parsed steps={n}  aux_metrics={len(log_data["aux"])}  '
                   f'eval={len(log_data["eval"])}  depth={len(log_data["depth"])}')
-            run_health(log_data)
+            _nq = None
+            try:
+                if model is not None and getattr(model, 'cfg', None) is not None:
+                    _nq = int(model.cfg.batch_size) * max(int(model.cfg.seq_len) - 1, 1)
+            except Exception:
+                _nq = None
+            run_health(log_data, nq=_nq)
             if n == 0:
                 print('[warn] основные строки step= не найдены — проверьте формат лога')
             out = os.path.splitext(args.log)[0] + '_log_report.html'

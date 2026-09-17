@@ -569,7 +569,7 @@ def train(cfg=None, resume_path=None):
             # before the backward (a no-op when aux_kill_switch is off)
             _ks = {}
             if balancer.kill is not None and step % max(cfg.log_interval, 1) == 0:
-                _ks = balancer.measure_kill(ce_s, aux_s, model.parameters())
+                _ks = balancer.measure_kill(ce_s, aux_s, model.parameters(), phase_model=model)
             try:
                 balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model,
                                   step=step)
@@ -669,7 +669,8 @@ def train(cfg=None, resume_path=None):
                 if _tel_str:
                     print(f'  head: {_tel_str}')
                 if _ks:
-                    print('  ks: ' + ' '.join(f'{k}={v:.4g}' for k, v in _ks.items()))
+                    print('  ks: ' + ' '.join(f'{k}={v:.4g}' for k, v in _ks.items())
+                          + ' | ' + ' '.join(f'{k}={v}' for k, v in balancer.kill.stats().items()))
                 # M64.8: the telemetry batch (stable rank / alpha std / usage H
                 # / the spike snapshot) + the grad census (live != effective)
                 try:

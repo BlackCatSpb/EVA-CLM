@@ -770,11 +770,15 @@ def test_log_analyzer_tracks_live_format():
     # were captured by the regex but dropped by _MAIN_KEYS — the silent-loss class)
     import tempfile, pathlib
     _f = pathlib.Path(tempfile.mkdtemp()) / 'log.txt'
-    _f.write_text(line, encoding='utf-8')
+    _f.write_text(line + '  head: lacuna=0.9 ph_sat=0.31\n'
+                   '  ks: branch=0.001 div=1e-7 | ks_off=0 ks_low=5 ks_err=0\n',
+                  encoding='utf-8')
     _d = az.parse_training_log(str(_f))
     assert _d['steps'] == [8415]
     for _k in ('ce', 'usef', 'usef_std', 'mem', 'live', 'depth_act', 'mat'):
         assert _k in _d['main'], f'{_k} lost by _MAIN_KEYS'
+    assert 'ph_sat' in _d['head'], 'the head telemetry line is not parsed'
+    assert 'branch' in _d['ks'], 'the ks line is not parsed'
     # the CLI format (train.py) must still parse too (no ce/mem/usef fields)
     cli = ('  step=   100 loss=8.1234 mod_mlp=0.44 lr=6.00e-04 tok/s=55 stream=6 '
            'bal_a=1 bal_b=0 bal_s=None bal_sc=None bal_cos=None')

@@ -65,3 +65,45 @@ def test_the_switch_state_roundtrips():
 def test_config_defaults_off():
     cfg = EVAConfig(**SMALL)
     assert cfg.aux_kill_switch is False and cfg.aux_kill_disable is False
+
+
+def test_measure_kill_freezes_the_gradalign_hook():
+    """R1/R2 round-1 blocker: the measurement's aux traversals fired the
+    gradalign hook and overwrote its CE-only target (the M64.4 defect class)."""
+    import torch.nn.functional as F
+    torch.manual_seed(0)
+    m = EVAStack(EVAConfig(**{**SMALL, 'gradalign_weight': 0.3,
+                              'maturation_enabled': False})).train()
+    lb = LossBalancer(eval_interval=100, kill_terms=['a'], kill_disable=False)
+    x = torch.randint(1, SMALL['vocab'], (1, 8))
+    h = m.embed_tokens(x)
+    out, *_ = m(h, None, step=1, tokens=x)
+    ce, aux = m.compute_losses(out, x, h_emb=h)
+    # a real backward first: the hook records the CE-only target
+    ce.backward(retain_graph=True)
+    tgt_before = [getattr(l, '_gradalign_tgt', None) for l in m.layers]
+    tgt_before = [None if t is None else t.clone() for t in tgt_before]
+    # the measurement must NOT touch the target (the hook is frozen)
+    lb.measure_kill(ce, {'a': (aux.get('pred') if isinstance(aux.get('pred'), torch.Tensor)
+                               else sum(v for v in aux.values() if isinstance(v, torch.Tensor)))},
+                    m.parameters(), phase_model=m)
+    for i, (b, a) in enumerate(zip(tgt_before, [getattr(l, '_gradalign_tgt', None) for l in m.layers])):
+        if b is None or a is None:
+            continue
+        assert torch.equal(b, a), f'layer {i}: the measurement overwrote the target'
+    assert all(getattr(l, '_ga_record', True) for l in m.layers), 'the flag was not restored'
+
+
+def test_t12_hysteresis_does_not_oscillate():
+    """R3 round-1 (T12): a proj hovering at the threshold must not flap."""
+    ks = AuxKillSwitch(['a'], eps_off=0.5, eps_on=0.9, dwell=2, per_call=1, disable=True)
+    lb = LossBalancer(eval_interval=100)
+    p = torch.nn.Parameter(torch.tensor(1.0))
+    q = torch.nn.Parameter(torch.tensor(1.0))
+    # alternate a hostile and a friendly aux: the Schmitt band (0.5..0.9) must
+    # keep it off once tripped (no oscillation)
+    for i in range(6):
+        aux = -(p ** 2) if i % 2 == 0 else 0.5 * (p ** 2)
+        ks.measure(lb, p ** 2, {'a': aux}, [p])
+    sw = ks.state['a']['switches']
+    assert sw <= 2, f'the switch oscillated: {sw} switches'

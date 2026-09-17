@@ -308,12 +308,29 @@ class LossBalancer:
         if self.kill is not None:               # M64.12
             self.kill.load_state_dict(sd.get('kill'))
 
-    def measure_kill(self, ce_loss, aux_dict, parameters) -> dict:
+    def measure_kill(self, ce_loss, aux_dict, parameters, phase_model=None) -> dict:
         """M64.12: feed the kill-switch at the log cadence (the LIVE graph is
-        required — call BEFORE `backward`). Returns the measured proj values."""
+        required — call BEFORE `backward`). Returns the measured proj values.
+
+        R1/R2 round-1 blocker: the gradalign hook records DURING any backward,
+        so the measurement's aux traversals overwrote its CE-only target (the
+        same defect class fixed in M64.4). The hook is frozen around the
+        measurement (the align pass restores it)."""
         if self.kill is None:
             return {}
-        return self.kill.measure(self, ce_loss, aux_dict, parameters)
+        if phase_model is not None:
+            for _l in getattr(phase_model, 'layers', []):
+                # NOTE: set unconditionally — the hook reads
+                # getattr(block, '_ga_record', True), so a hasattr-guard would
+                # skip the layers that never created the flag (the round-2
+                # probe: flags were None -> the freeze silently did nothing).
+                _l._ga_record = False
+        try:
+            return self.kill.measure(self, ce_loss, aux_dict, parameters)
+        finally:
+            if phase_model is not None:
+                for _l in getattr(phase_model, 'layers', []):
+                    _l._ga_record = True
 
     def _ema_decay(self) -> float:
         return 1.0 - 1.0 / max(self.eval_interval, 100)
@@ -623,17 +640,24 @@ class AuxKillSwitch:
     """
     def __init__(self, terms, eps_off: float = 1e-3, eps_on: float = 1e-2,
                  dwell: int = 2, per_call: int = 3, disable: bool = False) -> None:
+        # NOTE (R3 round-1): eps_off/eps_on/dwell are PROVISIONAL — a live probe
+        # measured 12/14 terms below eps_off and 0 above eps_on, so the disable
+        # mode must NOT be enabled before the measure-only calibration (see the
+        # whiteboard's M64.12 procedure). `max_off` is the safety budget: the
+        # switch never disables more than a third of its watch list.
         self.terms = list(terms)
         self.eps_off = float(eps_off)
         self.eps_on = float(eps_on)
         self.dwell = int(dwell)
         self.per_call = int(per_call)
         self.disable = bool(disable)
+        self.max_off = max(1, len(self.terms) // 3)
         self.cursor = 0
         self.n_disabled = 0
+        self.n_errors = 0
         self.last: Dict[str, float] = {}
         self.state: Dict[str, Dict[str, Any]] = {
-            t: {'proj': None, 'low': 0, 'off': False} for t in self.terms}
+            t: {'proj': None, 'low': 0, 'off': False, 'switches': 0} for t in self.terms}
 
     def measure(self, balancer, ce_loss, aux_dict, params) -> Dict[str, float]:
         present = [t for t in self.terms if isinstance(aux_dict.get(t), torch.Tensor)]
@@ -646,6 +670,7 @@ class AuxKillSwitch:
         try:
             geo = balancer.grad_geometry(ce_loss, {t: aux_dict[t] for t in batch}, params)
         except Exception:
+            self.n_errors += 1          # R3: silent swallowing hid breakage
             return {}
         out: Dict[str, float] = {}
         for t in batch:
@@ -659,13 +684,17 @@ class AuxKillSwitch:
             out[t] = proj
             if proj < self.eps_off:
                 st['low'] += 1
-                if self.disable and st['low'] >= self.dwell and not st['off']:
+                if (self.disable and st['low'] >= self.dwell and not st['off']
+                        and self.n_disabled < self.max_off):
                     st['off'] = True
+                    st['switches'] += 1
                     self.n_disabled += 1
             else:
                 st['low'] = 0
                 if st['off'] and proj > self.eps_on:
                     st['off'] = False
+                    st['switches'] += 1
+                    self.n_disabled = max(0, self.n_disabled - 1)
         self.last = out
         return out
 
@@ -681,7 +710,7 @@ class AuxKillSwitch:
     def stats(self) -> dict:
         return {'ks_off': len(self.disabled()), 'ks_low': sum(
             1 for st in self.state.values() if st['proj'] is not None
-            and st['proj'] < self.eps_off)}
+            and st['proj'] < self.eps_off), 'ks_err': int(self.n_errors)}
 
     def state_dict(self) -> dict:
         return {'state': {t: dict(s) for t, s in self.state.items()},

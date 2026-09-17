@@ -99,3 +99,41 @@ def test_t13_align_mode_weights_are_on_off_only():
         vals.append(float(aux['div'].detach()))
     assert abs(vals[0] - vals[1]) < 1e-9, \
         f'the div aux value depends on div_weight in the align mode: {vals}'
+
+
+def test_t13_zero_weight_removes_the_term_and_bypass_is_pinned():
+    """The other half of T13 (R3): weight=0 must REMOVE the term, and the
+    bypass set is exactly ('gradalign',) — the docs' old claim that div/
+    gate_repulse bypassed the alignment was false."""
+    from core.training_control import LossBalancer
+    assert LossBalancer.BYPASS_AUX == ('gradalign',), 'the bypass set drifted'
+    torch.manual_seed(0)
+    m = EVAStack(EVAConfig(**{**SMALL, 'div_weight': 0.0})).train()
+    x = torch.randint(1, SMALL['vocab'], (1, 8))
+    h = m.embed_tokens(x)
+    out, *_ = m(h, None, step=1, tokens=x)
+    _, aux = m.compute_losses(out, x, h_emb=h)
+    assert 'div' not in aux, 'div_weight=0 must remove the div term'
+
+
+def test_t6_the_key_params_move_under_optimization():
+    """T6-lite (the R3 condition): a live gradient must translate into actual
+    parameter motion over a few steps (a 'live but ineffective' channel would
+    not move)."""
+    m = _live_model()
+    opt = torch.optim.SGD([p for p in m.parameters() if p.requires_grad], lr=1e-3)
+    x = torch.randint(1, SMALL['vocab'], (1, 8))
+    x[0, 3] = 2
+    names = ('embed.basis', 'lm_head.phantom_mix', 'lm_head.phantom_basis',
+             'lm_head.lacuna_b', 'memory_bank.l2.W_k.weight')
+    before = {n: p.detach().clone() for n, p in m.named_parameters() if n in names}
+    for _ in range(3):
+        opt.zero_grad()
+        h = m.embed_tokens(x)
+        out, *_ = m(h, None, step=1, tokens=x)
+        ce = F.cross_entropy(m.lm_head(out).reshape(-1, m.cfg.vocab), x.reshape(-1))
+        ce.backward()
+        opt.step()
+    now = dict(m.named_parameters())
+    for n, b in before.items():
+        assert float((now[n].detach() - b).abs().max()) > 0.0, f'{n} never moved (T6)'

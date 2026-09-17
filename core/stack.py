@@ -1104,10 +1104,12 @@ class EVAStack(nn.Module):
         sat = getattr(h, '_last_sat', None)
         if sat is not None:
             out['sat'] = float(sat)
-        # M64.10: the phantom-basis tanh saturation (1 - tanh^2 averaged) — the
-        # liveness census found the basis/lacuna params dead BY SATURATION
-        # (un-normalized lacuna), not by construction; the metric makes it
-        # visible until the M65 normalization A/B.
+        # M64.10: ph_sat = mean(tanh^2) of the phantom-basis projection — -> 1
+        # when saturated, -> 0 when linear. The liveness census found the
+        # phantom channel at a COLD START (phantom_mix is zero-init, so
+        # dL/d(basis) = dL/dp @ mix = 0 until the mix wakes; its own gradient
+        # is the wake-up path). The metric tracks the separate saturation risk
+        # (the un-normalized lacuna, ~0.31 at init).
         ph_sat = getattr(h, '_last_ph_sat', None)
         if ph_sat is not None:
             out['ph_sat'] = float(ph_sat)
