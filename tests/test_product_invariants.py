@@ -741,18 +741,36 @@ def test_log_analyzer_tracks_live_format():
     """analyze.py's log parser must keep matching the notebook's live line
     format — it already drifted once (intent_w vs intent_eff) and died
     silently (empty dashboard, no error). Lock the exact format the run
-    prints, plus the M12-era save lines and the short-aux-series render."""
+    prints, plus the M12-era save lines and the short-aux-series render.
+
+    M64.6r2: the previous version of this test used a SYNTHETIC line without
+    the bal_*/live=/d= fields — it stayed green while the real line parsed to
+    nothing (the reviewer's catch). The line below is the notebook's current
+    print, including the M64.4 balancer telemetry and the M64.6 usef=mean/std.
+    """
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         'az', os.path.join(os.path.dirname(__file__), '..', 'scripts', 'analyze.py'))
     az = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(az)
-    line = ('step=    55  loss=54.4124  ce=5.9117  mod_mlp=0.504 mod_std=0.079 '
-            'lr=1.40e-05  tok/s=69  mem=14.7GB  intent_eff=0.0010  mlp_out=1006.1 '
-            'usef=0.500  mat=0.060[0.020,0.121]\n')
+    line = ('step=  8415  loss=73.4718  ce=4.3835  mod_mlp=0.439 mod_std=0.075 '
+            'lr=6.09e-04  tok/s=57  bal_a=3 bal_b=1 bal_s=0.51 bal_sc=0.51 bal_cos=0.07  '
+            'mem=32.6GB live=28.9 d=12  intent_eff=0.4820  mlp_out=414.5 '
+            'usef=0.502/0.032  mat=0.637[0.267,0.923]\n')
     m = az._MAIN_RE.search(line)
     assert m, 'main log format drifted from _MAIN_RE'
-    assert m.group(1) == '55' and float(m.group(9)) == 0.0010  # step…, mem(8), intent_eff(9)
+    gd = m.groupdict()
+    assert gd['step'] == '8415'
+    assert abs(float(gd['ce']) - 4.3835) < 1e-9
+    assert abs(float(gd['intent_w']) - 0.4820) < 1e-9
+    assert abs(float(gd['usef_std']) - 0.032) < 1e-9
+    assert abs(float(gd['mem']) - 32.6) < 1e-9
+    assert gd['depth_act'] == '12'
+    # the CLI format (train.py) must still parse too (no ce/mem/usef fields)
+    cli = ('  step=   100 loss=8.1234 mod_mlp=0.44 lr=6.00e-04 tok/s=55 stream=6 '
+           'bal_a=1 bal_b=0 bal_s=None bal_sc=None bal_cos=None')
+    mc = az._MAIN_RE.search(cli)
+    assert mc and mc.groupdict()['step'] == '100' and abs(float(mc.groupdict()['loss']) - 8.1234) < 1e-9
     e = az._EVAL_RE.search('  EVAL step=1045: val_loss=6.8123 val_ppl=9.08e+02 (n=99)')
     assert e and int(e.group(1)) == 1045
     s1 = az._SAVE_RE.search('  EVAL saved best.pt (val_loss=6.8123) step=1045')

@@ -37,7 +37,7 @@ EVA-CLM — это **продвинутая исследовательская �
 - **τ-лестница** нормализована и корректно укладывается в `tau_max`.
 - **Intent-шина** использует `1 - 1/τ` вместо насыщающейся экспоненты.
 - **Матuration** переписана с log-time reparameterization.
-- **Losses** переработаны: stable rank для nuc, корреляционная матрица для diversity, исправлены dead gradients.
+- **Losses** переработаны: корреляционная матрица для diversity, исправлены dead gradients. (M64.6: термы nuc и gate_repulse удалены как инертный/дублирующий — тумбстоуны в core/losses.py.)
 - **VSA prefix scan** векторизован с правильным memory layout.
 
 Тем не менее, **ряд декларируемых в README свойств не воспроизводится в коде в чистом виде**, и стабильность во многом всё ещё опирается на обширную систему aux-потерь и регуляризаторов.
@@ -446,7 +446,7 @@ g_final = g_CE + s_p · b
 | `reinforce` | MSE(usefulness, gate) |
 | `balance` | Нормализованный HHI |
 | `diversity` | Корреляционная матрица норм групп MLP |
-| `nuc` | Stable-rank penalty для Bind W_proj |
+| ~~`nuc`~~ | УДАЛЁН (M64.6): инертен (радиальный градиент при detached sigma-max) |
 | `orth` | MSE(W^T·W, I) |
 | `w_m2v` | Иерархия w_mem2v по τ |
 | `intent_tau` | Регуляризация intent_alpha |
@@ -455,7 +455,7 @@ g_final = g_CE + s_p · b
 | `gradalign` | Выравнивание mlp_mod с ‖∂CE/∂mlp_out‖ |
 | `ls_reg` | L2 на log_scale > 2.3 |
 | `div` | Дивергенция sigmoid(log_scale) |
-| `gate_repulse` | Максимизация энтропии usage |
+| ~~`gate_repulse`~~ | УДАЛЁН (M64.6): насыщен у своего оптимума, дублировал `balance` |
 | `alpha_novelty` | Разнообразие α_diag |
 | `decorr` | Кэшированная декорреляция зеркала |
 | `lbg_diversity` | Энтропия layer-bridge gates |

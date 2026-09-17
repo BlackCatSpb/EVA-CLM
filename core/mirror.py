@@ -397,8 +397,8 @@ class GroupedCognitiveMirror(nn.Module):
         _at, _np = _p
         with torch.no_grad():
             self.alpha_diag.data.lerp_(_at, 0.01)
-            if _np is not None:
-                self.alpha_diag.data.add_(_np)
+            if _np is not None:   # M64.6: always None now (the push was removed);
+                self.alpha_diag.data.add_(_np)   # kept for old pickled pendings
                 self.alpha_diag.data.clamp_(0.01, 0.99)
         self._alpha_pending = None
 

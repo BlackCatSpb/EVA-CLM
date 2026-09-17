@@ -29,11 +29,13 @@
 | M64.3 | Memory L2: запись в графе (`W_k/W_v/novelty_gate` живые; `index_copy`; commit detached; stash `_keys_eff/_vals_eff`) | ревью | `test_m64_memory_write.py` (4) | — | (тек.) |
 | M64.4 | LossBalancer: 3 backward → 1 (align=False / раз в k) + A/B | план | — | — | — |
 | M64.5 | LBG: подключить привод (`probe(gate·h)`) или удалить | ✅ удалён | ревью R1/R2+R3: градиенты бит-идентичны 234/234, resume PASS | cae0ebd |
-| M64.6 | Aux-гигиена: удалить `nuc`/`gate_repulse`, метрика `usef` (std вместо mean) | план | — | — | — |
+| M64.6 | Aux-гигиена: удалить `nuc`/`gate_repulse`, метрика `usef` (std), novelty_gate | ✅ (раунд 2) | R1/R2+R3 ревью → parser-фикс, CRLF-restore, nuc-тумбстоун | b3fbdd5 + фикс |
 | M64.7 | Readout: флаг разморозки (λ⁻²→1) для A/B | план | — | — | — |
-| M64.8 | Телеметрия: per-branch `r_i`, невидимые термы, live-захват `_last_u` при спайке | план | — | — | — |
+| M64.8 | Телеметрия: per-branch `r_i`, невидимые термы, live-захват `_last_u`; + **stable-rank W_proj** (замена nuc); + **std(alpha)**; + H(usage) рядом с HHI | план | M63-E + ревью M64.6 | — | — |
 | M64.9 | Ноутбук: `stream_chunk_steps` 250→1000 (решение F: CE-стабильность) | план | — | — | — |
-| M64.10 | Liveness-census тесты (T5/T6) на каждый канал | план | — | — | — |
+| M64.10 | Liveness-census (T5/T6) + **T13 (on/off-семантика весов)** + снять мёртвые поля (`nuclear_weight`, `gate_repulse_weight`) | план | M63-B/E + ревью M64.6 | — | — |
+| M64.11 | **bridge_conn: судьба** (chance-floor 6.15 vs ln446=6.10 — удалить/переобучить/фальсификатор) | план | M63-E §3 | — | — |
+| M64.12 | **Kill-switch** aux-термов (round-robin grad_geometry + Шмитт) | план | M63-E §7 (восстановлен из ревью) | — | — |
 | M65.x | С A/B: шина доказательств, валютный lifecycle, predictive memory, per-bit emphasis, reasoning | отложено | M63 отчёты | — | — |
 | M65.x | **health-gated bridge routing (ex-LBG)** — A/B против сырого probe (учесть B3: диагностики текущего форварда, не кэш) | отложено | M63_zone_B_gates §1, B3 | — | — |
 
@@ -141,6 +143,15 @@ M64.2/M64.3 — переработаны, ожидают верификацио�
 **Подтверждено независимо:** forward/gradients **бит-идентичны** до/после (S1/S2/S3: out SHA совпал, max_abs_diff=0.0 на 234 общих параметрах — гейт действительно ничего не масштабировал); реальный `best.pt`: 24 LBG-ключа → missing=0/unexpected=24, resume PASS, optimizer 258/2 skipped; 440 passed; `lbg_diversity` измерен 2.75e-6 (не ровно 0 — «dead by measurement», поправка к формулировке коммита); **бонус-улика: M2-метод `layer_diagnostics` был сиротой** (`get_diagnostics()` — 0 вызовов), т.е. удалён дубль-ловушка, а не рабочий инструмент. Ложная находка ревьюера: `core/spectrum_gate.py` в репо отсутствует (`git ls-files` — пусто).
 
 **Закрыто (docs/cleanup):** тумбстоуны в losses.py/bridge.py/block.py/config.py/stack.py; `gate_tau` помечен «no live consumer since M64.5» (не удалён — ckpt-compat + M65-кандидат); `maturation.global_ready` аннотирован (0 читателей); запись в доске + M65-кандидат «health-gated bridge routing (ex-LBG) — A/B vs raw probe»; изменение контракта логов (`lbg_*`/`layer_gate_*` исчезли) отмечено (внешние дашборды вне репо сломаются молча).
+
+### M64.6 (aux-гигиена) — раунд 1
+
+| ID | R1/R2 | R3 | Итог |
+|---|---|---|---|
+| M64.6 | **REVISE** | **REVISE** | код ACCEPT-эквивалент; условия закрыты |
+
+**Подтверждено:** удаления корректны (0 живых читателей, 439 passed, resume старого ckpt PASS: unexpected=5/missing=0; aux-состав до/после: ровно {gate_repulse, nuc} исчезли, 14 общих ключей бит-идентичны); `gate_repulse` — вес в align-режиме только on/off, обе цели (balance/repulse) читали один `_cached_gate_usage`, balance сильнее (HHI имеет восстанавливающий градиент у оптимума); `nuc` — радиальный градиент при detached σ̂max; alpha-push держал std(alpha) ×4 при G=4 (в проде G=32 → слабее ~8×/шаг) — эффект снятия задокументирован.
+**Блокеры (закрыто):** (1) `_MAIN_RE` не парсил РЕАЛЬНУЮ строку (bal_*/live=/d=/usef=m/s) — молча терял всю строку; исправлено: named-optional-groups под оба формата (notebook + CLI), `main['usef_std']`, health-check по std, тест переписан на реальную строку; (2) тумбстоун nuc врал («penalty 0») — исправлено: penalty ≈0.52 (sr=30.5/64), инертность от веса 1e-5 и радиального градиента; (3) CRLF→LF churn memory_bank.py (1322 строки диффа) — восстановлен CRLF отдельным коммитом; (4) ниты: `_np`-ветка аннотирована, README/MATHEMATICAL_ANALYSIS помечены, реестр дополнен (bridge_conn/kill-switch/stable-rank/T13).
 
 ### Раунд 3 (верификация переработки)
 

@@ -295,6 +295,12 @@ def run_health(data):
     us = main.get('usef', [])
     if steps[-1] > 5000 and len(us) > q:
         res.append(('usef разошёлся после 5k', _stt.pstdev(us[-q:]) > 1e-3))
+    # M64.6: the usef MEAN is structurally ~0.5 (median-centered sigmoid) — the
+    # collapse detector must read the STD that the notebook now logs.
+    _us_std = main.get('usef_std', [])
+    if steps[-1] > 5000 and len(_us_std) > q:
+        res.append((f'usef_std живой (>{1e-3:.0e}) после 5k',
+                    med(_us_std[-q:]) > 1e-3))
     ok_all = True
     for name, ok in res:
         ok_all = ok_all and ok
@@ -1462,11 +1468,29 @@ def run_bridge(model, cfg, batch=1, seq=128):
 
 import re as _re
 
+# M64.6r2: the old fixed-order regex silently DROPPED the whole main line of
+# the real notebook format (the `bal_*` block, `live=`, `d=` and the new
+# `usef=mean/std` were unmatchable — measured: 0/3 synthetic real lines
+# parsed). Named optional groups now cover BOTH the notebook line and the CLI
+# line (which lacks ce/mod_std/mem/live/d/usef/mat).
 _MAIN_RE = _re.compile(
-    r'step=\s*(\d+)\s+loss=([-\d.eE+]+)\s+ce=([-\d.eE+]+)\s+'
-    r'mod_mlp=([-\d.eE+]+)\s+mod_std=([-\d.eE+]+)\s+lr=([-\d.eE+]+)\s+'
-    r'tok/s=(\d+)\s+mem=([\d.]+)GB\s+intent_eff=([-\d.eE+]+)\s+'
-    r'mlp_out=([-\d.eE+]+)\s+usef=([-\d.eE+]+)\s+mat=([\d.]+)\[([\d.]+),([\d.]+)\]')
+    r'step=\s*(?P<step>\d+)\s+loss=(?P<loss>[-\d.eE+]+)'
+    r'(?:\s+ce=(?P<ce>[-\d.eE+]+))?'
+    r'(?:\s+mod_mlp=(?P<mod_mlp>[-\d.eE+]+))?'
+    r'(?:\s+mod_std=(?P<mod_std>[-\d.eE+]+))?'
+    r'(?:\s+lr=(?P<lr>[-\d.eE+]+))?'
+    r'(?:\s+tok/s=(?P<tok_s>\d+))?'
+    r'(?:\s+stream=(?P<stream>\d+))?'
+    r'(?:.*?mem=(?P<mem>[\d.]+)GB)?'
+    r'(?:\s+live=(?P<live>[\d.]+))?'
+    r'(?:\s+d=(?P<depth_act>\d+))?'
+    r'(?:\s+intent_eff=(?P<intent_w>[-\d.eE+]+))?'
+    r'(?:\s+mlp_out=(?P<mlp_out>[-\d.eE+]+))?'
+    r'(?:\s+usef=(?P<usef>[-\d.eE+]+)(?:/(?P<usef_std>[-\d.eE+]+))?)?'
+    r'(?:\s+mat=(?P<mat>[\d.]+)\[(?P<mat_min>[\d.]+),(?P<mat_max>[\d.]+)\])?'
+)
+_MAIN_KEYS = ('loss', 'ce', 'mod_mlp', 'mod_std', 'lr', 'tok_s', 'mem',
+              'intent_w', 'mlp_out', 'usef', 'usef_std', 'mat', 'mat_min', 'mat_max')
 _AUX_RE = _re.compile(r'aux:\s+(.*)')
 _AUX_KV = _re.compile(r'(\w+)=([-\d.eE+]+)')
 _EVAL_RE = _re.compile(r'EVAL step=(\d+):\s*val_loss=([-\d.eE+]+)\s*val_ppl=([-\d.eE+]+)')
@@ -1497,19 +1521,18 @@ def parse_training_log(path):
     """
     data = {'steps': [], 'main': {}, 'aux': {}, 'eval': [], 'depth': [],
             'bridge': None, 'saves': []}
-    MAIN_KEYS = ['loss', 'ce', 'mod_mlp', 'mod_std', 'lr', 'tok_s', 'mem',
-                 'intent_w', 'mlp_out', 'usef', 'mat', 'mat_min', 'mat_max']  # internal key; log prints intent_eff
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             m = _MAIN_RE.search(line)
             if m:
-                step = int(m.group(1))
-                vals = [float(x) for x in m.groups()[1:]]
-                # vals order: loss, ce, mod_mlp, mod_std, lr, tok_s, mem, intent_w,
-                #             mlp_out, usef, mat, mat_min, mat_max  (13 чисел)
-                data['steps'].append(step)
-                for k, v in zip(MAIN_KEYS, vals):
-                    data['main'].setdefault(k, []).append(v)
+                gd = m.groupdict()
+                if gd.get('step') is None:
+                    continue
+                data['steps'].append(int(gd['step']))
+                for k in _MAIN_KEYS:
+                    v = gd.get(k)
+                    if v is not None:
+                        data['main'].setdefault(k, []).append(float(v))
                 continue
             a = _AUX_RE.search(line)
             if a:
