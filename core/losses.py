@@ -136,14 +136,15 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         diversity_loss = diversity_loss / n_div
     
     # (M64.6 TOMBSTONE: the `nuc` term stood here — a stable-rank regularizer.
-    # Removed: the M63-E audit + the round-2 reviewer measured the GRADIENT
+    # Removed: the M63-E audit + the round-2/3 reviewers measured the GRADIENT
     # inert (4.9e-8 of the CE gradient — the 1e-5 weight times a RADIAL
-    # direction: the detached sigma-max made d penalty/dW parallel to W, i.e.
-    # ||W|| growth, not rank recovery). Correction to the first landing's note:
-    # the penalty itself was NOT zero (sr_true = 30.5/64 -> penalty ~0.52) —
-    # the term was inert because of its weight and its radial gradient.
-    # `nuclear_weight` is marked REMOVED in the config; a stable-rank METRIC
-    # (no loss) is queued for the M64.8 telemetry.)
+    # direction: cos(g_nuc, W) = -1.0000, the detached sigma-max made
+    # d penalty/dW parallel to W, i.e. ||W|| growth, not rank recovery).
+    # The penalty itself was NOT zero: on the production checkpoint the mean
+    # is ~0.28 (rank_ub=min(32,2560)=32; deep layers ~0.05-0.12, early
+    # 0.57-0.83) — the reviewer's 0.52 came from a rank-64 model (rank_ub=64),
+    # so the number is model-dependent. `nuclear_weight` is marked REMOVED in
+    # the config; a stable-rank METRIC (no loss) is queued for M64.8.)
 
     orth_loss = 0.0
     n_orth = 0

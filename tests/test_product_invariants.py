@@ -766,6 +766,15 @@ def test_log_analyzer_tracks_live_format():
     assert abs(float(gd['usef_std']) - 0.032) < 1e-9
     assert abs(float(gd['mem']) - 32.6) < 1e-9
     assert gd['depth_act'] == '12'
+    # round-3: the parsed keys must actually reach the store (live/depth_act
+    # were captured by the regex but dropped by _MAIN_KEYS — the silent-loss class)
+    import tempfile, pathlib
+    _f = pathlib.Path(tempfile.mkdtemp()) / 'log.txt'
+    _f.write_text(line, encoding='utf-8')
+    _d = az.parse_training_log(str(_f))
+    assert _d['steps'] == [8415]
+    for _k in ('ce', 'usef', 'usef_std', 'mem', 'live', 'depth_act', 'mat'):
+        assert _k in _d['main'], f'{_k} lost by _MAIN_KEYS'
     # the CLI format (train.py) must still parse too (no ce/mem/usef fields)
     cli = ('  step=   100 loss=8.1234 mod_mlp=0.44 lr=6.00e-04 tok/s=55 stream=6 '
            'bal_a=1 bal_b=0 bal_s=None bal_sc=None bal_cos=None')

@@ -1490,7 +1490,8 @@ _MAIN_RE = _re.compile(
     r'(?:\s+mat=(?P<mat>[\d.]+)\[(?P<mat_min>[\d.]+),(?P<mat_max>[\d.]+)\])?'
 )
 _MAIN_KEYS = ('loss', 'ce', 'mod_mlp', 'mod_std', 'lr', 'tok_s', 'mem',
-              'intent_w', 'mlp_out', 'usef', 'usef_std', 'mat', 'mat_min', 'mat_max')
+              'live', 'depth_act', 'intent_w', 'mlp_out', 'usef', 'usef_std',
+              'mat', 'mat_min', 'mat_max')
 _AUX_RE = _re.compile(r'aux:\s+(.*)')
 _AUX_KV = _re.compile(r'(\w+)=([-\d.eE+]+)')
 _EVAL_RE = _re.compile(r'EVAL step=(\d+):\s*val_loss=([-\d.eE+]+)\s*val_ppl=([-\d.eE+]+)')
