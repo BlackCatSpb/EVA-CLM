@@ -167,6 +167,16 @@ M64.2/M64.3 — переработаны, ожидают верификацио�
 - M64.8: census перенесён ПОСЛЕ `balancer.backward` в ноутбуке (проверено индексами: backward < census < zero_grad); в census добавлены `phantom_basis/lacuna_w/lacuna_b/log_eta` (фантомный канал); per-branch `r_i` (`branch_r_conv/bind/mirror`) в `_cached_losses`; `_spike_stats` получил счётчик `n` (стейл различим); тест спайка переписан на РЕАЛЬНУЮ сатурацию (был ложнозелёный: bus_cap=0 → sat=0); тест census строит memory_bank=True; `tele:` парсится анализатором (`data['tele']`); AMP-оговорка в докстринге.
 - M64.9: записан F-vs-C конфликт: слот живёт ~526 шагов (69 наблюдений) < чанка 1000 → ~47% рождений переживают смену (при 250 — все); фальсификатор по чанкам: `ph_confirmed/ph_births/ph_archived`, `mb_l3_births`, `lacuna_gate` — если `confirmed=0` и `archived` растёт → реверт к 250 или `head_phantom_every` 25→10-15.
 
+### M64.7–M64.9 — раунд 3 (финальная верификация)
+
+| ID | Вердикт | Ключевая улика |
+|---|---|---|
+| M64.7 | **ACCEPT** | eva_proj флип 0→1: readout 6.0e-4 (не 1.77e-4), группы 3/5/6 == контроль; sorted-guard в копии валит тест (фальсифицируем) |
+| M64.8 | **ACCEPT** | все 10 code-клеток компилируются; test_m64_branch_rms PASS, r2-мутант FAIL; ключи доходят до aux_str; w=0 без NameError |
+| M64.9 | **ACCEPT** | без изменений; 449 passed |
+
+**M64.7–M64.9 закрыты.** Осталось: M64.10 (liveness-census/T13), M64.11 (bridge_conn), M64.12 (kill-switch).
+
 ### Раунд 3 (верификация переработки)
 
 | ID | Вердикт | Ключевая улика |
