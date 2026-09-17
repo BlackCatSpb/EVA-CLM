@@ -53,7 +53,9 @@ def test_no_churn_on_random_residuals():
         b.observe(torch.randn(8, 512), torch.full((8,), 5.0), 0.1)
     st = b.stats()
     assert st['obs'] == 200
-    assert st['births'] <= 12, f'the bank churned: {st}'
+    # the recycling is archival-driven; 12 was the measured value with zero
+    # margin (R3 nit) -> a loose bound still catches a churn (births ~= obs)
+    assert st['births'] <= 24, f'the bank churned: {st}'
     assert st['merged'] == 0, f'random noise was merged (merge_lo too low): {st}'
     assert st['archived'] >= 1, 'the neglected slots never archived (the freeze)'
 

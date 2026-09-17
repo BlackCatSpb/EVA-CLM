@@ -135,9 +135,9 @@ class WideBindConfig:
     head_phantom_every: int = 25  # M54: observe cadence (steps)
     head_phantom_decay: float = 0.99  # M62/M64: the bank's per-OBSERVE confidence
                                        # decay (0.999 = the old per-forward value).
-                                       # R1/R2 calibration: at the observed ~0.24
-                                       # observes/step 0.99 gives the 0.5 -> 0.25
-                                       # transition in ~69 observes ~ 287 steps —
+                                       # R1/R2 calibration: at the observed ~0.13
+                                       # observes/step (checkpoint counters) 0.99 gives the
+                                       # 0.5 -> 0.25 transition in ~69 observes ~ 526 steps —
                                        # the confirmation window ballpark; the
                                        # switch interval (~1200 steps, now 250 via
                                        # stream_chunk_steps) and this fade must be

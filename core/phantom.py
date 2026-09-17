@@ -40,8 +40,9 @@ class PhantomBank(nn.Module):
         archive: float = 0.25,     # EVA-Ai: archived
         decay: float = 0.99,       # per-OBSERVE confidence decay (M64: was per-forward).
                                    # Calibrated (R1/R2 review): at the observed
-                                   # ~0.24 observes/step the 0.5 -> 0.25 transition
-                                   # takes ~69 observes ~ 287 steps — the right
+                                   # observed ~0.13 observes/step (checkpoint counters: _obs=822
+                                   # over ~6270 active steps) the 0.5 -> 0.25 transition takes
+                                   # ~69 observes ~ 526 steps — the confirmation-window
                                    # ballpark for the confirmation window (~200-300
                                    # steps); the old 0.999 gave ~2900 steps.
         ema: float = 0.05,         # direction EMA toward the observed residual

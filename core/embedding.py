@@ -319,8 +319,8 @@ class SigmoidCodedHead(nn.Module):
             self.phantom_bank = PhantomBank(
                 n_slots=int(getattr(cfg, 'head_phantom_slots', 16)), D=D,
                 merge=float(getattr(cfg, 'head_phantom_merge', 0.7)),
-                merge_lo=float(getattr(cfg, 'head_phantom_merge_lo', 0.25)),
-                decay=float(getattr(cfg, 'head_phantom_decay', 0.999)))
+                merge_lo=float(getattr(cfg, 'head_phantom_merge_lo', 0.2)),
+                decay=float(getattr(cfg, 'head_phantom_decay', 0.99)))
             self.phantom_thr: float = float(getattr(cfg, 'head_phantom_thr', 0.1))
             self.phantom_every: int = max(1, int(getattr(cfg, 'head_phantom_every', 25)))
             self.register_buffer('_pb_step', torch.zeros(1, dtype=torch.long), persistent=False)
