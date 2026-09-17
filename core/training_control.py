@@ -187,9 +187,13 @@ class LossBalancer:
     cos ∈ [0,1] already caps the aux projection, so no ``align_cap`` knob is
     needed (the former cap was a leftover magic constant).
 
-    ``mode='balance'``: dimensionless per-aux normalisation by a running EMA of
-    |aux_i|, scaled so the aux block tracks |CE| (Kendall & Gal / GradNorm
-    style). Returns a scalar loss for normal backward.
+    ``mode='balance'`` (the ``loss()`` API): dimensionless per-aux
+    normalisation by a running EMA of |aux_i|, scaled so the aux block tracks
+    |CE| (Kendall & Gal / GradNorm style). Returns a scalar loss for a normal
+    backward. NOTE (M64.4r3): this value-EMA normalization was REJECTED for
+    the cheap backward path — it amplifies the gradient as 1/|v_i| (measured:
+    1e8x the CE gradient on a zero-crossing term). The cheap path uses the
+    measured gradient-geometry scale instead.
 
     Bypass (audit M5): terms in BYPASS_AUX (gradalign) are removed from the
     spectral alignment and backwarded DIRECTLY after the align pass — their
@@ -202,17 +206,22 @@ class LossBalancer:
     step (CE / aux / bypass) — the largest structural cost of the run.
     ``align_every=k>1`` aligns on every k-th step and uses a cheap ONE-backward
     total ``ce + s * sum(aux)`` otherwise, where ``s`` is the EMA of the scale
-    MEASURED by the last align pass (gradient geometry, not loss values — see
-    the R1 rejection note in ``_balance_loss``). The cheap steps are therefore
-    approximately bounded, not bounded by construction; the per-parameter
-    sign-mask applies on the align steps only. ``align_every=0`` = never align;
-    default 1 = every step (historical, bit-identical).
+    MEASURED by the last align pass (gradient geometry, not loss values). The
+    cheap steps are therefore APPROXIMATELY bounded (up to the gradient drift
+    between align steps; ``s`` is capped and is not seeded from noise-level
+    measurements), not bounded by construction; the per-parameter sign-mask
+    applies on the align steps only. ``align_every=0`` = never align after the
+    first seeding call; default 1 = every step (historical, bit-identical).
+    ``backward(align=False)`` is a DIFFERENT legacy path: the raw weighted sum
+    (s=1.0, no normalization) — documented, not the ``loss()`` balance mode.
     """
 
     BYPASS_AUX = ('gradalign',)
 
     def __init__(self, align: bool = True, align_cap: Optional[float] = None,
-                 eval_interval: int = 1000, align_every: int = 1) -> None:
+                 eval_interval: int = 1000, align_every: int = 1,
+                 scale_min_ratio: float = 0.05, scale_max: float = 10.0,
+                 scale_ema_decay: float = 0.99) -> None:
         self.align: bool = bool(align)
         self.align_cap = align_cap  # accepted for config compatibility, NOT used
         self.eval_interval: int = int(eval_interval)
@@ -220,14 +229,28 @@ class LossBalancer:
         # bypass) — with gradient checkpointing that is ~3 recomputes per step,
         # the single largest structural cost of the run (the step is
         # latency-bound at ~0.3% of the TF32 peak). `align_every=k>1` runs the
-        # alignment on every k-th step and the cheap ONE-backward normalized
-        # total otherwise; 0 = never align (pure balance mode). Default 1
-        # keeps the historical behaviour exactly.
+        # alignment on every k-th step and the cheap ONE-backward total
+        # otherwise; 0 = never align. Default 1 = the historical behaviour.
+        # NOTE: "never align" still aligns on the first call — the cheap path
+        # needs the measured scale seed.
         self.align_every: int = int(align_every)
+        # M64.4 round-3 (R1-verify): the measured scale is only meaningful when
+        # the aux gradient is a non-negligible fraction of the CE one. Below
+        # `scale_min_ratio` the ratio na/nb is noise (nb -> 0 => s -> inf) and
+        # the seed/EMA are NOT updated; `scale_max` hard-caps the measurement
+        # (both the seed and the EMA). These are safety bounds, not tuned
+        # constants: the reviewer's measured counterexample was s=9.9e5 from a
+        # single nb/na~1e-6 align step, giving 6.98e4x the CE gradient on a
+        # later drift.
+        self.scale_min_ratio: float = float(scale_min_ratio)
+        self.scale_max: float = float(scale_max)
+        self.scale_ema_decay: float = float(scale_ema_decay)
         self.ema_ce: Optional[float] = None
         self.ema_aux: Dict[str, float] = {}
         self.ema_A: Optional[float] = None
-        self.last_cos: Optional[float] = None   # cos(g_CE, g_aux) of last backward
+        self.last_cos: Optional[float] = None   # cos of the LAST call (None on cheap)
+        self.last_align_cos: Optional[float] = None  # M64.4r3: survives cheap steps
+        self.last_scale: Optional[float] = None      # M64.4r3: the raw measurement
         self.last_path: str = 'align'           # 'align' | 'balance' (M64.4)
         self.scale_ema: Optional[float] = None  # M64.4: the measured align scale
         self.n_align: int = 0                   # M64.4: telemetry counters
@@ -285,26 +308,13 @@ class LossBalancer:
         A = abs(A) + 1e-8
         self.ema_A = A if self.ema_A is None else d * self.ema_A + (1 - d) * A
 
-    def _balance_loss(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any]) -> torch.Tensor:
-        """Legacy value-EMA normalization (the Kendall & Gal style total).
-
-        M64.4 (R1 review): NOT used by the cheap path any more — normalizing by
-        the aux VALUE amplifies the gradient as 1/|v_i| (measured: a term
-        crossing zero produced 1e8x the CE gradient through the 1e-8 floors,
-        and sign cancellation in ema_A gave 2e6x). Kept only as the legacy
-        ``loss()`` helper for the align=False mode; the cheap path uses the
-        measured gradient-geometry scale instead.
-        """
-        self._update_balance(ce_loss, aux_dict)
-        beta = (self.ema_ce or 1.0) / max(self.ema_A or 1.0, 1e-8)
-        total = ce_loss
-        for k, v in aux_dict.items():
-            if not isinstance(v, torch.Tensor):
-                continue
-            total = total + beta * (v / self.ema_aux.get(k, 1e-8))
-        return total
-
     def loss(self, ce_loss: torch.Tensor, aux_dict: Dict[str, Any]) -> torch.Tensor:
+        """The legacy scalar-loss API (used by the align=False balance mode).
+
+        M64.4r3 (R1/R3 review): the value-EMA normalization below is NOT the
+        cheap backward path — it amplifies the gradient as 1/|v_i| (measured:
+        1e8x on a zero-crossing term). Kept for API compatibility only.
+        """
         self._update_balance(ce_loss, aux_dict)
         total = ce_loss
         if self.align:
@@ -412,9 +422,17 @@ class LossBalancer:
                 for _l in getattr(phase_model, 'layers', []):
                     _l._ga_record = False
             try:
-                _s = 1.0 if not self.align else float(self.scale_ema)
+                # M64.4r3 (R1-verify): s comes from the measured align scale;
+                # without a valid measurement the cheap step is CE-ONLY (the
+                # aux still trains on the align steps). align=False is the
+                # documented raw-sum legacy path (s=1.0, no normalization).
+                _s = 0.0
+                if not self.align:
+                    _s = 1.0
+                elif self.scale_ema is not None:
+                    _s = float(self.scale_ema)
                 _at = [v for v in aux_dict.values() if isinstance(v, torch.Tensor)]
-                total = ce_loss + (_s * sum(_at) if _at else 0.0)
+                total = ce_loss + (_s * sum(_at) if _at and _s > 0.0 else 0.0)
                 total.backward()
             finally:
                 if phase_model is not None:
@@ -511,16 +529,19 @@ class LossBalancer:
             nb = float(den_b.sqrt()) + 1e-8
             cos = float(num) / (na * nb + 1e-8)
             self.last_cos = cos          # raw alignment diagnostic (audit M5)
-            scale = min(1.0, max(0.0, cos)) * na / nb
-            # M64.4 (R1 review): the cheap path applies THIS measured scale to
-            # the aux sum — the value-EMA normalization was rejected (it
-            # amplified gradients as 1/|v_i|: a zero-crossing aux term gave
-            # 1e8x the CE gradient through the 1e-8 floors). The scale here is
-            # gradient-geometry based, so the adversarial cases (v=0, sign
-            # cancellation) cannot touch it. Fast EMA (tau ~ 100 align steps).
-            _d = 0.99
-            self.scale_ema = (scale if self.scale_ema is None
-                              else _d * self.scale_ema + (1.0 - _d) * scale)
+            self.last_align_cos = cos    # M64.4r3: survives the cheap steps
+            # M64.4r3 (R1-verify): seed/update ONLY when the aux gradient is a
+            # non-negligible fraction of the CE one — below scale_min_ratio the
+            # ratio na/nb is noise (nb -> 0 => s -> inf; measured counterexample:
+            # a single nb/na~1e-6 step seeded s=9.9e5 and a later drift gave
+            # 6.98e4x the CE gradient). The scale is hard-capped at scale_max.
+            if nb >= self.scale_min_ratio * na:
+                scale = min(1.0, max(0.0, cos)) * na / nb
+                scale = min(scale, self.scale_max)
+                self.last_scale = scale
+                _d = self.scale_ema_decay
+                self.scale_ema = (scale if self.scale_ema is None
+                                  else _d * self.scale_ema + (1.0 - _d) * scale)
 
         with torch.no_grad():
             for p, gce, gau in zip(params, ce_grads, aux_grads):

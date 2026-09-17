@@ -648,7 +648,8 @@ def train(cfg=None, resume_path=None):
                 _bal = (f'bal_a={getattr(balancer, "n_align", 0)} '
                         f'bal_b={getattr(balancer, "n_balance", 0)} '
                         f'bal_s={getattr(balancer, "scale_ema", None) if getattr(balancer, "scale_ema", None) is None else round(float(balancer.scale_ema), 5)} '
-                        f'bal_cos={getattr(balancer, "last_cos", None) if getattr(balancer, "last_cos", None) is None else round(float(balancer.last_cos), 4)}')
+                        f'bal_sc={getattr(balancer, "last_scale", None) if getattr(balancer, "last_scale", None) is None else round(float(balancer.last_scale), 5)} '
+                        f'bal_cos={getattr(balancer, "last_align_cos", None) if getattr(balancer, "last_align_cos", None) is None else round(float(balancer.last_align_cos), 4)}')
                 print(f'  step={step:>6} loss={ce_loss.item():.4f} mod_mlp={mod_scl:.3f} lr={current_lr:.2e} '
                       f'tok/s={tok_s:.0f} stream={stream_idx} {_bal} '
                       f'{aux_str}{gate_str}')
