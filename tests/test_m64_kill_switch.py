@@ -95,15 +95,24 @@ def test_measure_kill_freezes_the_gradalign_hook():
 
 
 def test_t12_hysteresis_does_not_oscillate():
-    """R3 round-1 (T12): a proj hovering at the threshold must not flap."""
+    """R3 round-1 (T12): once tripped, a proj inside the Schmitt band
+    (eps_off..eps_on) must NOT revive it (the round-3 verifier: the first
+    version never tripped — friendly proj was exactly eps_off — so a
+    no-hysteresis mutant survived)."""
     ks = AuxKillSwitch(['a'], eps_off=0.5, eps_on=0.9, dwell=2, per_call=1, disable=True)
     lb = LossBalancer(eval_interval=100)
     p = torch.nn.Parameter(torch.tensor(1.0))
-    q = torch.nn.Parameter(torch.tensor(1.0))
-    # alternate a hostile and a friendly aux: the Schmitt band (0.5..0.9) must
-    # keep it off once tripped (no oscillation)
-    for i in range(6):
-        aux = -(p ** 2) if i % 2 == 0 else 0.5 * (p ** 2)
-        ks.measure(lb, p ** 2, {'a': aux}, [p])
-    sw = ks.state['a']['switches']
-    assert sw <= 2, f'the switch oscillated: {sw} switches'
+    # trip: two CONSECUTIVE hostile measurements (proj = 0)
+    for _ in range(2):
+        ks.measure(lb, p ** 2, {'a': -(p ** 2)}, [p])
+    assert ks.disabled() == {'a'}, f'the trip failed: {ks.state}'
+    sw0 = ks.state['a']['switches']
+    # band: proj = 0.7 (between eps_off and eps_on) — the hysteresis holds it OFF
+    for _ in range(6):
+        ks.measure(lb, p ** 2, {'a': 0.7 * (p ** 2)}, [p])
+    assert ks.disabled() == {'a'}, 'the band revived it (no hysteresis)'
+    assert ks.state['a']['switches'] == sw0, f'the switch oscillated: {ks.state}'
+    # a clearly friendly aux (> eps_on) DOES revive it
+    for _ in range(2):
+        ks.measure(lb, p ** 2, {'a': (p ** 2)}, [p])
+    assert ks.disabled() == set(), 'the revival above eps_on failed'
