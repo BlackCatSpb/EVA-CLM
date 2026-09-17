@@ -33,9 +33,9 @@
 | M64.7 | Readout: флаг разморозки (λ⁻²→1) для A/B | ✅ (раунд 2) | R1/R2+R3 → сужение до readout, scheduler-guard, A/B-спека | 061f6b2 + фикс |
 | M64.8 | Телеметрия: per-branch `r_i`, невидимые термы, live-захват `_last_u`; + **stable-rank W_proj** (замена nuc); + **std(alpha)**; + H(usage) рядом с HHI | ✅ (раунд 2) | R1/R2+R3 → порядок census в ноутбуке, spike-счётчик, parser, покрытие | 6c24db8 + фикс |
 | M64.9 | Ноутбук: `stream_chunk_steps` 250→1000 (решение F: CE-стабильность) | ✅ (раунд 2) | R1/R2 ACCEPT; R3 → запись F-vs-C конфликта + фальсификатор | 6c24db8 + фикс |
-| M64.10 | Liveness-census (T5/T6) + **T13 (on/off-семантика весов)** + снять мёртвые поля (`nuclear_weight`, `gate_repulse_weight`) | план | M63-B/E + ревью M64.6 | — | — |
-| M64.11 | **bridge_conn: судьба** (chance-floor 6.15 vs ln446=6.10 — удалить/переобучить/фальсификатор) | план | M63-E §3 | — | — |
-| M64.12 | **Kill-switch** aux-термов (round-robin grad_geometry + Шмитт) | план | M63-E §7 (восстановлен из ревью) | — | — |
+| M64.10 | Liveness-census (T5/T6) + **T13** + снять мёртвые поля | ✅ (ревью) | тест T5/T6, находка: фантом — холодный старт (zero-init mix) + `ph_sat` метрика | — |
+| M64.11 | **bridge_conn: судьба** (chance-floor) | ✅ (ревью) | analyze-чек `bridge_conn выше chance (>6.10)`; A/B `bridge_conn=0` → M65 | — |
+| M64.12 | **Kill-switch** aux-термов (round-robin grad_geometry + Шмитт) | ✅ (ревью) | `AuxKillSwitch` (measure-only по умолчанию; disable — opt-in); `ks:` в лог | — | — |
 | M65.x | С A/B: шина доказательств, валютный lifecycle, predictive memory, per-bit emphasis, reasoning | отложено | M63 отчёты | — | — |
 | M65.x | **health-gated bridge routing (ex-LBG)** — A/B против сырого probe (учесть B3: диагностики текущего форварда, не кэш) | отложено | M63_zone_B_gates §1, B3 | — | — |
 
@@ -176,6 +176,13 @@ M64.2/M64.3 — переработаны, ожидают верификацио�
 | M64.9 | **ACCEPT** | без изменений; 449 passed |
 
 **M64.7–M64.9 закрыты.** Осталось: M64.10 (liveness-census/T13), M64.11 (bridge_conn), M64.12 (kill-switch).
+
+### M64.10–M64.12 — раунд 1 (ожидает ревью)
+
+**Сделано:**
+- **M64.10:** `tests/test_m64_liveness.py` — T5/T6-замок: все каналы census'а обязаны получать ненулевой градиент через CE (конфиг активирует каналы: maturation off, phantom_after=0, bank on, wake-и). **Находка census'а:** фантомный канал — **холодный старт** (`phantom_mix` zero-init ⇒ dL/d(basis)=dL/dp@mix=0), путь пробуждения жив (градиент самого mix ненулевой, после wake все фантомные параметры живы); метрика `ph_sat = mean(tanh²)` (~0.31 — умеренно, не блокирует) добавлена в `head_telemetry`. T13-замок: в align-режиме `*_weight` — on/off (значение aux не зависит от веса; `div_weight`-комментарий исправлен). Мёртвые поля `nuclear_weight`/`gate_repulse_weight` сняты.
+- **M64.11:** analyze-чек `bridge_conn выше chance (>ln(B·L)=6.10)` (замер: 6.15 — на полу); запись: инъекция bridge выключена (readiness≈0) при стоимости O(Nq²·24) — A/B `bridge_conn=0` в M65.
+- **M64.12:** `AuxKillSwitch` (round-robin grad_geometry 2-3 терма/лог-интервал; Шмитт eps_off/eps_on + dwell; **measure-only по умолчанию**, disable — opt-in `aux_kill_disable`); фильтр отключённых термов в `LossBalancer.backward`; состояние в state_dict; `ks:`-строка в оба цикла; 5 тестов (Schmitt/revival/filter/roundtrip/defaults).
 
 ### Раунд 3 (верификация переработки)
 

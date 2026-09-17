@@ -274,6 +274,14 @@ def run_health(data):
     bc = aux.get('bridge_conn', [])
     if bc:
         res.append(('bridge_conn падает (мост предсказывает)', med(bc[-q:]) < med(bc[:q])))
+        # M64.11 (M63-E): the InfoNCE chance floor is ln(B*L) — measured 6.15 vs
+        # 6.10 on the live run (448 queries). A value at the floor means the
+        # probe does not learn the next-embedding prediction at all; the bridge
+        # injection was also off (readiness ~0). The M65 A/B: bridge_conn=0.
+        import math as _m
+        _floor = _m.log(2 * 224)
+        res.append((f'bridge_conn выше chance (>{_floor:.2f})',
+                    med(bc[-q:]) > _floor + 0.1))
     se = aux.get('signal_ent', [])
     if se:
         m = med(se)

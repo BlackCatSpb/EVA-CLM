@@ -268,7 +268,10 @@ def train(cfg=None, resume_path=None):
     # Aux-loss balancer: spectral alignment (bounds aux grad by ||g_CE||).
     balancer = LossBalancer(align=True, align_cap=10.0, eval_interval=cfg.eval_interval,
                             align_every=int(1 if getattr(cfg, 'balancer_align_every', 1) is None
-                                            else getattr(cfg, 'balancer_align_every', 1)))
+                                            else getattr(cfg, 'balancer_align_every', 1)),
+                            kill_terms=list(LossBalancer.AUX_TERMS)
+                            if getattr(cfg, 'aux_kill_switch', False) else None,
+                            kill_disable=bool(getattr(cfg, 'aux_kill_disable', False)))
     # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).
@@ -562,6 +565,11 @@ def train(cfg=None, resume_path=None):
             # grad_geometry) for offline diagnostics.
             # M22: backward freeze-wrap removed (recompute must replay the
             # forward path-identically); CheckpointError self-heals.
+            # M64.12: the kill-switch measurement needs the LIVE graph -> here,
+            # before the backward (a no-op when aux_kill_switch is off)
+            _ks = {}
+            if balancer.kill is not None and step % max(cfg.log_interval, 1) == 0:
+                _ks = balancer.measure_kill(ce_s, aux_s, model.parameters())
             try:
                 balancer.backward(ce_s, aux_s, model.parameters(), phase_model=model,
                                   step=step)
@@ -660,6 +668,8 @@ def train(cfg=None, resume_path=None):
                       f'{aux_str}{gate_str}')
                 if _tel_str:
                     print(f'  head: {_tel_str}')
+                if _ks:
+                    print('  ks: ' + ' '.join(f'{k}={v:.4g}' for k, v in _ks.items()))
                 # M64.8: the telemetry batch (stable rank / alpha std / usage H
                 # / the spike snapshot) + the grad census (live != effective)
                 try:

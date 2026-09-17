@@ -240,10 +240,12 @@ class WideBindConfig:
 
     log_scale_l2_weight: float = 0.01  # L2 on exp(log_scale) > 10 to prevent gradient explosion
     orth_weight: float = 0.0  # ortho-gran loss; 0=off (32x D²=4096² gram graphs cost 2GB+ VRAM)
-    div_weight: float = 10.0   # sigmoid-bounded log_scale divergence (bypasses spectral alignment)
-    # gate_repulse_weight: REMOVED (M64.6) — saturated at uniform usage and
-    # duplicated balance (see the losses.py tombstone)
-    gate_repulse_weight: float = 0.0
+    div_weight: float = 10.0   # sigmoid-bounded log_scale divergence. NOTE
+                               # (M64.10/T13): in the align mode every aux term
+                               # (including this one) goes through the spectral
+                               # balancer — only `gradalign` is in BYPASS_AUX.
+                               # The old 'bypasses spectral alignment' comment
+                               # was wrong (the weight is on/off there).
     alpha_novelty_weight: float = 0.05  # push per-expert alpha apart (the LOSS
                                         # term; M64.6: the mirror push was removed —
                                         # it applied the same objective twice,
@@ -329,8 +331,6 @@ class WideBindConfig:
     # Diversity loss: decorrelate per-group MLP outputs
     diversity_weight: float = 0.001  # ||cov - I||² weight (0=disabled)
     # Nuclear norm regularization for bind W_proj
-    # nuclear_weight: REMOVED (M64.6) — the nuc term was inert by construction
-    nuclear_weight: float = 0.0
     orth_weight: float = 0.0  # B2: was 1e-4=ON with 24× D² gram products (multi-GB) — the other dataclass had documented 0; unified off
     # Surprisal-weighted loss: focus on informative tokens
     surprisal_weight: float = 0.0  # γ, 0=disabled, 0.5=mild, 1.0=aggressive
@@ -348,6 +348,13 @@ class WideBindConfig:
     # unfreeze A/B arm (readout at the base LR). The A/B is pre-registered in
     # docs/WHITEBOARD.md; the notebook does NOT enable it by default.
     readout_lr_mult: float = 0.0
+    # M64.12 (M63-E §7): the aux kill-switch. When `aux_kill_switch` is on the
+    # LossBalancer measures 2-3 aux terms per log interval (round-robin
+    # grad-geometry vs CE) and prints the proj values; `aux_kill_disable` opts
+    # into the actual disabling (a term whose CE projection stays below the
+    # Schmitt threshold for `dwell` measurements is dropped from the aux dict).
+    aux_kill_switch: bool = False
+    aux_kill_disable: bool = False
     # M64.4 (M63-F): the LossBalancer align cadence. The align path costs THREE
     # graph traversals (CE/aux/bypass; ~3 recomputes with checkpointing) — the
     # largest structural cost of the run. k>1 = align every k-th step, the

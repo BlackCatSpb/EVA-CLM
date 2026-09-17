@@ -220,11 +220,18 @@ class LossBalancer:
     """
 
     BYPASS_AUX = ('gradalign',)
+    # M64.12: the default kill-switch watch list (the aux keys the loops log)
+    AUX_TERMS = ('branch', 'bridge_conn', 'div', 'decorr', 'diversity', 'balance',
+                 'gate_l1', 'reinforce', 'signal_ent', 'alpha_novelty', 'pred',
+                 'intent_tau', 'w_m2v', 'orth', 'gradalign', 'phantom_l1',
+                 'head_wall', 'tau_dev_reg')
 
     def __init__(self, align: bool = True, align_cap: Optional[float] = None,
                  eval_interval: int = 1000, align_every: int = 1,
                  scale_min_ratio: float = 0.05, scale_max: float = 10.0,
-                 scale_ema_decay: float = 0.99) -> None:
+                 scale_ema_decay: float = 0.99,
+                 kill_terms: Optional[list] = None,
+                 kill_disable: bool = False) -> None:
         self.align: bool = bool(align)
         self.align_cap = align_cap  # accepted for config compatibility, NOT used
         self.eval_interval: int = int(eval_interval)
@@ -260,6 +267,12 @@ class LossBalancer:
         self.scale_ema: Optional[float] = None  # M64.4: the measured align scale
         self.n_align: int = 0                   # M64.4: telemetry counters
         self.n_balance: int = 0
+        # M64.12 (M63-E §7): the optional aux kill-switch (measure-only unless
+        # kill_disable is set). The caller feeds it at the log cadence via
+        # `measure_kill` (it needs the LIVE graph); `backward` filters the OFF
+        # terms out of the aux dict.
+        self.kill = (AuxKillSwitch(kill_terms, disable=kill_disable)
+                     if kill_terms else None)
 
     def set_stats(self, eval_interval: int = 1000) -> None:
         self.eval_interval = int(eval_interval)
@@ -279,6 +292,7 @@ class LossBalancer:
             'scale_ema': self.scale_ema,        # M64.4: seed for the cheap path
             'align': bool(self.align),
             'align_every': int(self.align_every),   # M64.4
+            'kill': self.kill.state_dict() if self.kill is not None else None,  # M64.12
         }
 
     def load_state_dict(self, sd: Optional[Dict[str, Any]]) -> None:
@@ -291,6 +305,15 @@ class LossBalancer:
             self.scale_ema = min(float(sd['scale_ema']), self.scale_max)
         if sd.get('ema_aux') is not None:
             self.ema_aux = dict(sd['ema_aux'])
+        if self.kill is not None:               # M64.12
+            self.kill.load_state_dict(sd.get('kill'))
+
+    def measure_kill(self, ce_loss, aux_dict, parameters) -> dict:
+        """M64.12: feed the kill-switch at the log cadence (the LIVE graph is
+        required — call BEFORE `backward`). Returns the measured proj values."""
+        if self.kill is None:
+            return {}
+        return self.kill.measure(self, ce_loss, aux_dict, parameters)
 
     def _ema_decay(self) -> float:
         return 1.0 - 1.0 / max(self.eval_interval, 100)
@@ -413,6 +436,9 @@ class LossBalancer:
         # from the gradient geometry, so those adversarial cases cannot touch
         # it; the first step always aligns to seed `s`.
         params = [p for p in parameters if p.requires_grad]
+        # M64.12: the kill-switch filter (a no-op when the switch is off)
+        if self.kill is not None:
+            aux_dict = self.kill.filter(aux_dict)
         _cheap = (not self.align) or (self.align_every <= 0) or (
             self.align_every > 1 and step is not None
             and int(step) % self.align_every != 0)
@@ -576,6 +602,99 @@ class LossBalancer:
         if phase_model is not None:
             for _l in getattr(phase_model, 'layers', []):
                 _l._ga_record = True
+
+
+# ───────────────────── M64.12: the aux kill-switch (M63-E §7) ────────────────
+
+class AuxKillSwitch:
+    """The cheap aux kill-switch: round-robin gradient geometry + Schmitt trigger.
+
+    At each `measure()` 2-3 aux terms get their geometry against CE (one
+    `autograd.grad` per term, retained graph — the caller passes the live CE
+    loss). The metric is the normalized CE projection
+    `proj = cos(g_aux, g_CE) * ||g_aux|| / ||g_CE||` — the fraction of the aux
+    gradient that actually points along the CE direction.
+
+    Schmitt trigger with dwell: `dwell` consecutive measurements below
+    `eps_off` mark a term OFF (it is then dropped from the aux dict before the
+    backward); `proj > eps_on` revives it. `disable=False` (the default) is
+    MEASURE-ONLY — the proj values are telemetry until the operator opts in;
+    this is the honest first step of the M63-E design (measure before killing).
+    """
+    def __init__(self, terms, eps_off: float = 1e-3, eps_on: float = 1e-2,
+                 dwell: int = 2, per_call: int = 3, disable: bool = False) -> None:
+        self.terms = list(terms)
+        self.eps_off = float(eps_off)
+        self.eps_on = float(eps_on)
+        self.dwell = int(dwell)
+        self.per_call = int(per_call)
+        self.disable = bool(disable)
+        self.cursor = 0
+        self.n_disabled = 0
+        self.last: Dict[str, float] = {}
+        self.state: Dict[str, Dict[str, Any]] = {
+            t: {'proj': None, 'low': 0, 'off': False} for t in self.terms}
+
+    def measure(self, balancer, ce_loss, aux_dict, params) -> Dict[str, float]:
+        present = [t for t in self.terms if isinstance(aux_dict.get(t), torch.Tensor)]
+        if not present:
+            return {}
+        k = min(self.per_call, len(present))
+        idx = self.cursor % len(present)
+        batch = [present[(idx + j) % len(present)] for j in range(k)]
+        self.cursor += k
+        try:
+            geo = balancer.grad_geometry(ce_loss, {t: aux_dict[t] for t in batch}, params)
+        except Exception:
+            return {}
+        out: Dict[str, float] = {}
+        for t in batch:
+            r = geo.get(t)
+            if r is None:
+                continue
+            ratio, cos = r
+            proj = max(0.0, float(cos)) * float(ratio)
+            st = self.state[t]
+            st['proj'] = proj
+            out[t] = proj
+            if proj < self.eps_off:
+                st['low'] += 1
+                if self.disable and st['low'] >= self.dwell and not st['off']:
+                    st['off'] = True
+                    self.n_disabled += 1
+            else:
+                st['low'] = 0
+                if st['off'] and proj > self.eps_on:
+                    st['off'] = False
+        self.last = out
+        return out
+
+    def disabled(self) -> set:
+        return {t for t, st in self.state.items() if st['off']}
+
+    def filter(self, aux_dict: Dict[str, Any]) -> Dict[str, Any]:
+        off = self.disabled()
+        if not off:
+            return aux_dict
+        return {k: v for k, v in aux_dict.items() if k not in off}
+
+    def stats(self) -> dict:
+        return {'ks_off': len(self.disabled()), 'ks_low': sum(
+            1 for st in self.state.values() if st['proj'] is not None
+            and st['proj'] < self.eps_off)}
+
+    def state_dict(self) -> dict:
+        return {'state': {t: dict(s) for t, s in self.state.items()},
+                'cursor': self.cursor, 'n_disabled': self.n_disabled}
+
+    def load_state_dict(self, sd) -> None:
+        if not sd:
+            return
+        for t, st in (sd.get('state') or {}).items():
+            if t in self.state:
+                self.state[t].update(st)
+        self.cursor = int(sd.get('cursor', 0))
+        self.n_disabled = int(sd.get('n_disabled', 0))
 
 
 # ───────────────────── M64.8: the telemetry batch (M63-A/E requests) ─────────

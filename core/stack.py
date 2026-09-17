@@ -1104,6 +1104,13 @@ class EVAStack(nn.Module):
         sat = getattr(h, '_last_sat', None)
         if sat is not None:
             out['sat'] = float(sat)
+        # M64.10: the phantom-basis tanh saturation (1 - tanh^2 averaged) — the
+        # liveness census found the basis/lacuna params dead BY SATURATION
+        # (un-normalized lacuna), not by construction; the metric makes it
+        # visible until the M65 normalization A/B.
+        ph_sat = getattr(h, '_last_ph_sat', None)
+        if ph_sat is not None:
+            out['ph_sat'] = float(ph_sat)
         cfl = getattr(h, '_last_conflict', None)
         if cfl is not None:
             out['conflict'] = float(cfl)

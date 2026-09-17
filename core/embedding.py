@@ -506,10 +506,17 @@ class SigmoidCodedHead(nn.Module):
         else:
             e_in = e_l
         _kp = int(self._kp_active.item())                    # M59c: the active slice
-        p = torch.tanh(e_in @ self.phantom_basis[:_kp].T)    # (...,Kp_active)
+        _pt = torch.tanh(e_in @ self.phantom_basis[:_kp].T)  # (...,Kp_active)
         g = torch.sigmoid(self.lacuna_w * (ell_rel - 1.0) + self.lacuna_b)
-        p = p * g
+        p = _pt * g
         if self.training:
+            # M64.10 (the liveness census): the phantom basis / lacuna params
+            # sit at a COLD START — phantom_mix is zero-init (identity by
+            # design), so d L/d(basis) = dL/dp @ mix = 0 until the mix leaves
+            # zero (its own gradient is nonzero: the wake-up path, verified).
+            # ph_sat = mean(tanh^2) tracks the OTHER risk (the un-normalized
+            # lacuna, ~0.31 at init — moderate, not blocking).
+            self._last_ph_sat = float(_pt.detach().pow(2).mean())
             self._last_lacuna = ell.detach().mean()
             self._last_lacuna_rel = ell_rel.detach().mean()
             self._last_lacuna_gate = g.detach().mean()
