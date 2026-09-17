@@ -1485,9 +1485,11 @@ def parse_training_log(path):
                                                 mat, mat_min, mat_max (по шагам)
       aux   : {metric: [val,...]}             — ВСЕ aux: ключи (alpha_novelty, balance,
                                                 branch, bridge_conn, decorr, div, diversity,
-                                                gate_l1, gate_repulse, gradalign, intent_tau,
-                                                 ls_reg, nuc, pred, reinforce,
-                                                signal_ent, w_m2v, ...)
+                                                gate_l1, gradalign, intent_tau,
+                                                 ls_reg, pred, reinforce,
+                                                signal_ent, w_m2v, ...; M64.5-M64.6:
+                                                lbg_*/layer_gate_*/gate_repulse/nuc/pred_w
+                                                удалены — парсер их просто не встретит)
       eval  : [(step, val_loss, val_ppl), ...]
       depth : [(step, active, total), ...]
       bridge: str | None                      — строка In-core SemanticBridge active (...)

@@ -271,7 +271,6 @@ class EVABlock(nn.Module):
             expert_asymmetry=getattr(cfg, 'expert_asymmetry', False),
             meta_trust=getattr(cfg, 'meta_trust', False),
             gate_bias_scale=0.5 + 1.5 * layer_idx / max(cfg.n_layers - 1, 1) if getattr(cfg, 'gate_bias_scale_per_layer', False) else cfg.gate_bias_scale,
-            alpha_novelty_weight=getattr(cfg, 'alpha_novelty_weight', 0.0),
             seq_len=cfg.seq_len,
             intent_bridge=getattr(cfg, 'intent_bridge', False),
             bridge_glu=getattr(cfg, 'bridge_glu', False),

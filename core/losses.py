@@ -135,40 +135,13 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     if n_div > 0:
         diversity_loss = diversity_loss / n_div
     
-    nuc_loss = 0.0
-    n_nuc = 0
-    for layer in stack.layers:
-        bind_W = None
-        if hasattr(layer, 'bind') and hasattr(layer.bind, 'W_proj'):
-            bind_W = layer.bind.W_proj.weight
-        if bind_W is not None and bind_W.ndim == 2:
-            # B2 (audit C): the old probe E‖Wv‖·√d ∝ ‖W‖_F — a Frobenius
-            # SHRINKAGE wearing a rank name (same direction as weight decay).
-            # True anti-collapse regularizer: maximize stable rank
-            # SR = ‖W‖_F²/σ̂max² ∈ [1, rank]; penalty = 1 − SR/min(m,n).
-            # σ̂max: one power-iteration step per call (persistent attribute,
-            # no syncs); gradient flows through the Frobenius term only.
-            rank_ub = min(bind_W.shape[0], bind_W.shape[1])
-            v = getattr(layer, '_pi_v', None)
-            if v is None or v.shape[0] != bind_W.shape[1]:
-                vv = torch.randn(bind_W.shape[1], device=bind_W.device)
-                v = layer._pi_v = vv / vv.norm()
-            with torch.no_grad():
-                for _pi4 in range(4):        # B2: a single step from a random v is
-                    Wv = bind_W @ v
-                    s_hat = Wv.norm()
-                    v2 = bind_W.t() @ Wv
-                    v.copy_(v2 / (v2.norm() + 1e-12))
-                Wv = bind_W @ v
-                s_hat = Wv.norm()   # not the final estimate; cheap 4-step
-                pass
-            fro2 = bind_W.pow(2).sum()
-            sr = (fro2 / (s_hat.pow(2) + 1e-12)).clamp(1.0, float(rank_ub))
-            nuc_loss = nuc_loss + (1.0 - (sr / rank_ub).clamp(0.0, 1.0))
-            n_nuc = n_nuc + 1
-    if n_nuc > 0:
-        nuc_loss = nuc_loss / n_nuc
-    
+    # (M64.6 TOMBSTONE: the `nuc` term stood here — a stable-rank regularizer.
+    # Removed: the M63-E audit measured it INERT by construction — sr =
+    # clamp(‖W‖_F²/σ̂max², 1, rank) ≈ rank for Gaussian W_proj, so the penalty
+    # sat at 0 with a zero gradient; and when it did fire, the detached σ̂max
+    # made its gradient purely RADIAL (‖W‖ growth, not rank recovery).
+    # `nuclear_weight` is marked REMOVED in the config.)
+
     orth_loss = 0.0
     n_orth = 0
     if getattr(stack.cfg, 'orth_weight', 1e-4) > 0:
@@ -271,7 +244,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         p = w / (w.sum() + 1e-10)  # normalize for entropy
         # MINIMIZE −H ⇒ MAXIMIZE signal entropy (all mirror signals stay
         # in play). The old sign (+H) actively pushed the 5 learnable signal
-        # weights toward one-hot collapse — opposite to gate_repulse/branch,
+        # weights toward one-hot collapse — opposite to balance/branch,
         # which use the −entropy convention (audit M5).
         signal_entropy = signal_entropy + (p * torch.log(p + 1e-10)).sum()
         n_sig = n_sig + 1
@@ -328,23 +301,11 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             div_loss_raw = div_loss_raw - (ls.sigmoid().var(dim=0).mean() + intra_weight * ls.sigmoid().var(dim=-1).mean())
         div_loss_raw = div_loss_raw / max(len(stack.layers), 1)
 
-    # Gate repulsion: push gate variance up (inverse of balance)
-    gate_repulse_loss = 0.0
-    gate_rp_w = getattr(stack.cfg, 'gate_repulse_weight', 0.0)
-    if gate_rp_w > 0:
-        n_rp = 0
-        for layer in stack.layers:
-            gate_usage = getattr(layer.mirror, '_cached_gate_usage', None)
-            if gate_usage is not None:
-                # P2 FIX: use negative entropy instead of -var
-                # -var pushes all experts to same activation (could be all-zero).
-                # -entropy pushes toward uniform distribution over experts.
-                gate_p = F.softmax(gate_usage, dim=0)
-                gate_entropy = -(gate_p * (gate_p + 1e-8).log()).sum()
-                gate_repulse_loss = gate_repulse_loss - gate_entropy
-                n_rp += 1
-        if n_rp > 0:
-            gate_repulse_loss = gate_repulse_loss / n_rp
+    # (M64.6 TOMBSTONE: the `gate_repulse` term stood here. Removed: the M63-E
+    # audit measured it SATURATED at its own optimum (−3.43 ≈ −ln32, within 1%
+    # of uniform usage) with a ~1e-3 gradient, and it duplicated `balance`
+    # (both target uniform expert usage). `gate_repulse_weight` is REMOVED in
+    # the config.)
 
     # Alpha novelty: push per-expert alpha apart
     alpha_novelty_loss = 0.0
@@ -377,7 +338,6 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         'reinforce': reinforce_loss.item() if isinstance(reinforce_loss, torch.Tensor) else reinforce_loss,
         'balance': balance_loss.item() if isinstance(balance_loss, torch.Tensor) else balance_loss,
         'div': div_loss_raw.item() if isinstance(div_loss_raw, torch.Tensor) else div_loss_raw,
-        'gate_repulse': gate_repulse_loss.item() if isinstance(gate_repulse_loss, torch.Tensor) else gate_repulse_loss,
         'alpha_novelty': alpha_novelty_loss.item() if isinstance(alpha_novelty_loss, torch.Tensor) else alpha_novelty_loss,
         'signal_ent': signal_entropy.item() if isinstance(signal_entropy, torch.Tensor) else signal_entropy,
         'ls_reg': log_scale_reg.item() if isinstance(log_scale_reg, torch.Tensor) else log_scale_reg,
@@ -406,14 +366,9 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             stack._cached_losses['mb_scale'] = _mbd['mem_scale']
         except Exception:
             pass
-    pred_w_loss = 0.0
-    n_pred_w = 0
-    head = getattr(stack, 'lm_head', None)
-    if head is not None and hasattr(head, 'pred_w'):
-        pw = head.pred_w
-        if pw.ndim == 2:
-            pred_w_loss = F.mse_loss(pw, torch.eye(pw.shape[0], device=pw.device))
-            n_pred_w += 1
+    # (M64.6 TOMBSTONE: the `pred_w` branch stood here — it tested
+    # `hasattr(head, 'pred_w')` on the head, which has never had that attribute:
+    # a dead branch. Removed.)
 
     # Raw auxiliary losses — NO per-loss magic weights.  All weighting is
     # done principledly by the training LossBalancer (core.adaptation),
@@ -422,8 +377,6 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     # double-weighting bug (weights were baked here AND reapplied in the
     # training loop).
     aux_dict = {}
-    if pred_w_loss != 0:
-        aux_dict['pred_w'] = pred_w_loss
     if pred_loss != 0:
         aux_dict['pred'] = pred_loss
     if gate_l1 != 0:
@@ -434,8 +387,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         aux_dict['balance'] = balance_loss
     if diversity_loss != 0:
         aux_dict['diversity'] = diversity_loss
-    if n_nuc > 0:
-        aux_dict['nuc'] = nuc_loss * getattr(stack.cfg, 'nuclear_weight', 1e-5)
+    # (M64.6: the `nuc` emission was removed with the inert term.)
     # (B2: always emit when computed — a first-call penalty of exactly 0
     #  from the raw power-iteration estimate silently removed the key.)
     if orth_loss != 0:
@@ -467,8 +419,6 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         aux_dict['branch'] = branch_loss
     if div_loss_raw != 0:
         aux_dict['div'] = div_loss_raw
-    if gate_repulse_loss != 0:
-        aux_dict['gate_repulse'] = gate_repulse_loss
     if alpha_novelty_loss != 0:
         aux_dict['alpha_novelty'] = alpha_novelty_loss
     if n_decorr > 0:

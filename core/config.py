@@ -240,8 +240,13 @@ class WideBindConfig:
     log_scale_l2_weight: float = 0.01  # L2 on exp(log_scale) > 10 to prevent gradient explosion
     orth_weight: float = 0.0  # ortho-gran loss; 0=off (32x D²=4096² gram graphs cost 2GB+ VRAM)
     div_weight: float = 10.0   # sigmoid-bounded log_scale divergence (bypasses spectral alignment)
-    gate_repulse_weight: float = 0.3  # push gate variance up (inverse of balance, bypasses spectral)
-    alpha_novelty_weight: float = 0.05  # push per-expert alpha apart (heuristic, no spectral)
+    # gate_repulse_weight: REMOVED (M64.6) — saturated at uniform usage and
+    # duplicated balance (see the losses.py tombstone)
+    gate_repulse_weight: float = 0.0
+    alpha_novelty_weight: float = 0.05  # push per-expert alpha apart (the LOSS
+                                        # term; M64.6: the mirror push was removed —
+                                        # it applied the same objective twice,
+                                        # bypassing the balancer)
     gate_bias_scale: float = 2.0  # linspace init for gate bias per expert [-scale, scale]
     gate_bias_scale_per_layer: bool = True  # 0.5 (first layer) -> 2.0 (last layer)
 
@@ -323,7 +328,8 @@ class WideBindConfig:
     # Diversity loss: decorrelate per-group MLP outputs
     diversity_weight: float = 0.001  # ||cov - I||² weight (0=disabled)
     # Nuclear norm regularization for bind W_proj
-    nuclear_weight: float = 1e-5  # stochastic ||W||_* weight (0=disabled)
+    # nuclear_weight: REMOVED (M64.6) — the nuc term was inert by construction
+    nuclear_weight: float = 0.0
     orth_weight: float = 0.0  # B2: was 1e-4=ON with 24× D² gram products (multi-GB) — the other dataclass had documented 0; unified off
     # Surprisal-weighted loss: focus on informative tokens
     surprisal_weight: float = 0.0  # γ, 0=disabled, 0.5=mild, 1.0=aggressive

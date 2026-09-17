@@ -118,7 +118,7 @@ class GroupedCognitiveMirror(nn.Module):
                  delta_var_ema_min: float = 0.8, delta_var_ema_max: float = 0.99, tie_mirror_proj: bool = False,
                  layer_idx: int = 0, n_layers: int = 32, has_private_mem: bool = False,
                  expert_asymmetry: bool = False, meta_trust: bool = False,
-                 gate_bias_scale: float = 0.0, alpha_novelty_weight: float = 0.0, seq_len: int = 256,
+                 gate_bias_scale: float = 0.0, seq_len: int = 256,
                     intent_bridge: bool = False, bridge_glu: bool = False,
                     bridge_glu_beta: float = 0.25,
                     pm_write_delay: int = 0, pm_coh_gate_std: float = 0.02,
@@ -223,7 +223,8 @@ class GroupedCognitiveMirror(nn.Module):
         self.w_delta_gate = nn.Parameter(torch.randn(G, self.k) / math.sqrt(self.k))
         gate_bias_val: torch.Tensor = torch.linspace(-gate_bias_scale, gate_bias_scale, G)
         self.gate_bias = nn.Parameter(gate_bias_val)
-        self._alpha_novelty_weight = alpha_novelty_weight
+        # M64.6: _alpha_novelty_weight removed with the push (the loss term owns
+        # the objective now).
 
         # ─── Intent Bridge: эксперты «ловят» восходящий intent-сигнал ───
         # Zero-init → вклад 0 при init → чекпоинт грузится без изменений
@@ -519,15 +520,14 @@ class GroupedCognitiveMirror(nn.Module):
                     # immaterial), pend this step's. Recompute passes flush
                     # and re-pend the SAME value — exactly one application
                     # per step either way.
-                    _push = None
-                    if self._alpha_novelty_weight > 0 and G > 1:
-                        _ape = self.alpha_diag.mean(dim=-1)
-                        _ac = _ape - _ape.mean()
-                        _boost = max(1.0, 0.1 / (_ape.std() + 0.01))
-                        _push = (self._alpha_novelty_weight * _boost * 2
-                                 * _ac.unsqueeze(1).expand(-1, k) / G)
+                    # M64.6: the alpha-novelty PUSH was removed — it applied the
+                    # same objective as the `alpha_novelty` loss term (losses.py)
+                    # a SECOND time, bypassing the LossBalancer's gradient bound
+                    # and invisible in the aux telemetry. The loss term (the
+                    # measurable, balancer-weighted idiom) stays; the alpha
+                    # self-regulation target lerp below is a different mechanism.
                     if not getattr(self, '_ggeo_freeze', False):
-                        self._alpha_pending = (alpha_target, _push)
+                        self._alpha_pending = (alpha_target, None)
         # B10 (audit 02b F2B-02): pen was a norm over the whole (G,k) plane
         # (~sqrt(G*k) x per-dim error, ~8.1 at the operating point) while
         # pen_decay_factor / igate-boost / UCL thresholds were designed for

@@ -114,25 +114,10 @@ def test_b2_adamp_radial_preserves_norm_and_sparsely_fires():
     assert float((changed > 1e-3).float().mean()) < 0.25, 'projection must fire only beyond the noise band'
 
 
-def test_b2_nuc_penalties_low_rank():
-    m = _mini()
-    x = torch.randint(1, 600, (1, 16))
-    def nuc_val():
-        h = m.embed_tokens(x)
-        out, *_ = m(h, None, step=9, tokens=x)
-        _, aux = m.compute_losses(out, x, h_emb=h)
-        return float(aux['nuc'].detach())
-    Wp = m.layers[0].bind.W_proj
-    keep = Wp.weight.detach().clone()
-    with torch.no_grad():
-        U, S, V = torch.linalg.svd(keep, full_matrices=False)
-        S2 = S.clone(); S2[2:] = float(S[0]) * 0.02           # numerically rank-2
-        Wp.weight.copy_(U @ torch.diag(S2) @ V)
-    low = nuc_val()
-    with torch.no_grad():
-        Wp.weight.copy_(keep)
-    full = nuc_val()
-    assert low > full + 1e-6, f'nuc must penalize collapse more: low={low} full={full}'
+# M64.6: test_b2_nuc_penalties_low_rank REMOVED — the `nuc` term itself was
+# removed (M63-E: inert by construction, sr ≈ rank for Gaussian W_proj, and the
+# detached sigma-max made its gradient purely radial). See the losses.py
+# tombstone.
 
 
 def test_b2_embed_head_roundtrip_alive_at_init():

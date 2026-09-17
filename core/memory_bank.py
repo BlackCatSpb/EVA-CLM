@@ -9,9 +9,9 @@ Architecture:
   L2 (learned): VSA-mediated memory bank with N slots
     - Write: at sentence boundaries (SEP token = 2)
     - Read: attention over slots at each token
-    - Selective: novelty-based write gating
-    - Simple ring buffer: overwrite oldest (or consumed slot)
-    - Differentiable: gradients flow through write/read
+    - Ring buffer: overwrite oldest (or consumed slot); M64.6: the
+      novelty-gate MLP was removed (dead by construction, M63-D)
+    - Differentiable: gradients flow through write/read (M64.3)
     - Keys normalized via F.normalize (sigmoid-weighted)
 
   L3 (concepts): emergent from L2 slot clustering
@@ -207,11 +207,12 @@ class L2Bank(nn.Module):
         self.register_buffer('keys', torch.randn(n_slots, bridge_dim) * 0.02)
         self.register_buffer('vals', torch.randn(n_slots, bridge_dim) * 0.02)
 
-        self.novelty_gate = nn.Sequential(
-            nn.Linear(D, bridge_dim),
-            nn.GELU(),
-            nn.Linear(bridge_dim, 1),
-        )
+        # (M64.6 TOMBSTONE: the `novelty_gate` MLP stood here — a 2-layer gate
+        # whose score only fed the `slot_novelty` diagnostic. The M63-D audit
+        # measured it dead by construction (no gradient path at all: the value
+        # was never multiplied into the read, and the M64.4 round-1 attempt to
+        # use it as a value scale was annihilated by val_norm's LayerNorm).
+        # Removed with the slot_novelty buffer + the novelty_mean telemetry.)
 
         # P0 FIX: initialize from τ-prior instead of frozen=1.0
         # L2 = medium: balanced tau
@@ -225,7 +226,6 @@ class L2Bank(nn.Module):
         self.val_log_scale = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
 
         self.register_buffer('slot_age', torch.zeros(n_slots), persistent=True)
-        self.register_buffer('slot_novelty', torch.ones(n_slots), persistent=True)
         self.register_buffer('slot_consumed', torch.zeros(n_slots, dtype=torch.bool), persistent=True)
         self.register_buffer('_write_idx', torch.zeros(1, dtype=torch.long), persistent=True)
         self._n_overwrites = 0
@@ -249,8 +249,6 @@ class L2Bank(nn.Module):
         consumes it, and the persistent buffer is committed with the detached
         copy so the checkpoint stays correct.
         """
-        novelty_score = torch.sigmoid(self.novelty_gate(embedding))
-
         n_filled = min(self._write_idx.item(), self.n_slots)
 
         # the slot choice is a state decision (ages/flags), not a gradient path
@@ -303,7 +301,6 @@ class L2Bank(nn.Module):
             self.keys.data.copy_(keys_eff.detach())
             self.vals.data.copy_(vals_eff.detach())
             self.slot_age.data[slot] = 0.0
-            self.slot_novelty.data[slot] = novelty_score.item()
             self.slot_consumed.data[slot] = False  # clear consumed flag
             mask = torch.arange(self.n_slots, device=self.slot_age.device) != slot
             self.slot_age.data[mask] += 1.0
@@ -360,7 +357,6 @@ class L2Bank(nn.Module):
             'n_overwrites': self._n_overwrites,
             'n_consumed': self._n_consumed,
             'fill_rate': min(self._write_idx.item(), self.n_slots) / self.n_slots,
-            'novelty_mean': self.slot_novelty.mean().item(),
             'consumed_count': int(self.slot_consumed.sum().item()),
             'key_scale': torch.sigmoid(self.key_log_scale).item(),
             'val_scale': torch.sigmoid(self.val_log_scale).item(),
@@ -370,7 +366,6 @@ class L2Bank(nn.Module):
         self.keys.data.zero_()
         self.vals.data.zero_()
         self.slot_age.zero_()
-        self.slot_novelty.zero_()
         self.slot_consumed.zero_()
         self._write_idx.zero_()
         self._n_overwrites = 0
@@ -391,7 +386,7 @@ class StreamingMemoryBank(nn.Module):
 
     Flow:
       L1.write(summary)  -> overwrite oldest (fast, immediate)
-      L2.write(summary)  -> novelty-gated slots (short-term)
+      L2.write(summary)  -> ring-buffer slots (short-term; M64.6: no novelty gate)
 
     Integration points:
     - forward(h, tokens, step, mat_gate): read from L1+L2 at each position
@@ -560,7 +555,6 @@ class StreamingMemoryBank(nn.Module):
             'l2_overwrites': l2s['n_overwrites'],
             'l2_consumed': l2s['n_consumed'],
             'l2_fill': l2s['fill_rate'],
-            'l2_novelty_mean': l2s['novelty_mean'],
             'l2_age_mean': self.l2.slot_age.mean().item(),
             'l2_key_scale': l2s['key_scale'],
             'l2_val_scale': l2s['val_scale'],
