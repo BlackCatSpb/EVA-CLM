@@ -317,7 +317,8 @@ class SigmoidCodedHead(nn.Module):
             # M54: the phantom-concept bank (the EVA-Ai lacuna lifecycle at
             # hidden-state level). Buffers ride in the checkpoint.
             self.phantom_bank = PhantomBank(
-                n_slots=int(getattr(cfg, 'head_phantom_slots', 16)), D=D)
+                n_slots=int(getattr(cfg, 'head_phantom_slots', 16)), D=D,
+                decay=float(getattr(cfg, 'head_phantom_decay', 0.999)))
             self.phantom_thr: float = float(getattr(cfg, 'head_phantom_thr', 0.1))
             self.phantom_every: int = max(1, int(getattr(cfg, 'head_phantom_every', 25)))
             self.register_buffer('_pb_step', torch.zeros(1, dtype=torch.long), persistent=False)

@@ -173,6 +173,22 @@ def _restore_optimizer(optimizer, model, ckpt_opt, param_names=None):
     return moved > 0
 
 
+def _pick_stream(stream_idx, n_pick, no_repeat, rng):
+    """M62: choose the next genre stream.
+
+    `no_repeat` (chunk rotation on) excludes the CURRENT stream: a switch into
+    the same genre is a no-op for the novelty machinery (lacuna gate, phantom
+    bank, UCL births) — it would look like a shift but carry no distribution
+    change. The legacy path (rotation only on exhaustion) keeps the original
+    uniform pick so old behaviour/checkpoints are unaffected.
+    """
+    n_pick = max(int(n_pick), 1)
+    if no_repeat and n_pick > 1:
+        p = int(torch.randint(0, n_pick - 1, (1,), generator=rng).item())
+        return p if p < int(stream_idx) else p + 1
+    return int(torch.randint(0, n_pick, (1,), generator=rng).item())
+
+
 def train(cfg=None, resume_path=None):
     if cfg is None:
         cfg = EVAConfig()
@@ -475,11 +491,18 @@ def train(cfg=None, resume_path=None):
             # (VSA memory, bridge, reasoning) never reset at boundaries.
             # Rotation now happens HERE, before the read: when the next batch
             # does not fit, switch to a random stream and reset state.
+            # M62: additionally rotate every `stream_chunk_steps` steps (the
+            # novelty machinery needs distribution SHIFTS to have a job: the
+            # exhaustion-only cadence was ~1200 steps per genre, ~6 shifts per
+            # 7.3k steps — nearly nothing to test the lacuna/phantom/UCL chain).
             _need = cfg.batch_size * seq_len + 1
-            if offset == 0 or offset + _need > streams[stream_idx].len:
+            _chunk = int(getattr(cfg, 'stream_chunk_steps', 0) or 0)
+            _rotate = (_chunk > 0 and step > 0 and step % _chunk == 0)
+            if offset == 0 or offset + _need > streams[stream_idx].len or _rotate:
                 # holdout: the LAST stream belongs to evaluate() (audit M8) —
                 # the old sampler could pick it, so 'val' was in-train data.
-                stream_idx = torch.randint(0, max(len(streams) - _hold_n, 1), (1,), generator=rng).item()
+                stream_idx = _pick_stream(stream_idx, len(streams) - _hold_n,
+                                          _rotate, rng)
                 offset = 0
                 state = None  # reset state on stream switch (document boundary)
                 gs = None

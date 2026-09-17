@@ -122,6 +122,14 @@ class WideBindConfig:
                                    # for ANY realistic state: the readout spans K of D)
     head_lacuna_ema: float = 0.99  # M55b: the self-calibration EMA decay
     head_phantom_every: int = 25  # M54: observe cadence (steps)
+    head_phantom_decay: float = 0.999  # M62: the bank's per-forward confidence
+                                       # decay (0.999 = the M54 value). The switch
+                                       # interval (~1200 steps) exceeded the decay
+                                       # time constant (~1000 steps), so confirmations
+                                       # could not accumulate; with the M62 chunk
+                                       # rotation (stream_chunk_steps) the interval
+                                       # drops, and this knob lets us slow the fade
+                                       # if confirmations still die too fast.
     code_dim: int = 32
     code_sparsity: int = 6
     embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)
@@ -462,6 +470,13 @@ class WideBindConfig:
     ucl_read_scale_floor_until: int = 0  # M59: the step until which the floor holds
     stream_cap: float = 1e3        # M50: per-layer residual-stream magnitude
                                    # cap (scale-invariant fuse); 0 disables
+    stream_chunk_steps: int = 0    # M62: rotate the genre stream every N steps
+                                   # (0 = legacy: rotate only on stream exhaustion,
+                                   # measured ~1200 steps per genre). The novelty
+                                   # machinery (lacuna/phantom bank/UCL) fires on
+                                   # DISTRIBUTION SHIFTS: with ~6 shifts per 7.3k
+                                   # steps it had almost nothing to test on.
+                                   # Recommended: 250 (6.9M tokens per chunk).
     branch_cap: float = 1e4        # M51: per-branch injection cap (conv/bind/
                                    # mirror/VPM/spectral/MLP); 0 disables
     branch_var_anchor: float = 0.5  # M51: absolute-scale anchor in the branch
