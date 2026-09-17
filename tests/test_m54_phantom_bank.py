@@ -50,13 +50,15 @@ def test_bank_respects_threshold():
 def test_bank_archives_faded_phantoms():
     b = PhantomBank(n_slots=4, D=64, decay=0.5, archive=0.25)
     d = _unit(64, 4)
+    b.decay_rate = 1.0                       # M64: the fade rides in observe now
     for _ in range(5):                       # count > 3 so archival can apply
         b.observe(d, torch.tensor([0.5]), 0.1)
     assert b.stats()['phantoms'] == 1
+    b.decay_rate = 0.5
     for _ in range(12):
         b.decay()                            # 0.7 * 0.5^12 << 0.25
-    # the lifecycle check runs inside observe: a new lacuna triggers it
-    b.observe(_unit(64, 6), torch.tensor([0.5]), 0.1)
+    # the lifecycle check runs inside observe: a new (opposite) lacuna triggers it
+    b.observe(-d, torch.tensor([0.5]), 0.1)
     st = b.stats()
     assert st['phantoms'] == 1, f'the faded phantom was not archived: {st}'
     assert float(b.directions[0].norm()) == 0.0, 'the archived slot was not freed'
@@ -88,7 +90,7 @@ def test_head_telemetry_reports_lacuna_srl_phantoms():
 def test_confirmed_directions_are_unit():
     b = PhantomBank(n_slots=4, D=64)
     d = _unit(64, 5)
-    for _ in range(6):
+    for _ in range(7):   # M64: the per-observe decay 0.999 -> 7 bumps for 0.75
         b.observe(d, torch.tensor([0.5]), 0.1)
     cd = b.confirmed_directions()
     assert cd.shape[0] == 1

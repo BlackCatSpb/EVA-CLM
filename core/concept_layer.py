@@ -370,12 +370,20 @@ class UnifiedConceptLayer(nn.Module):
             c_gate = torch.ones(B, L, 1, device=device)
 
         # ─── Output ───
-        scale = torch.sigmoid(self.read_scale)
+        _rs = torch.sigmoid(self.read_scale)
         # M59: the experiment floor — while active the model cannot close the
         # UCL's output (the chain measured read_scale -4.0 within 120 steps).
+        # M64 (M63-C): the floor is GRADIENT-ALIVE. The old
+        # `scale.clamp(min=floor)` has d scale/d read_scale = 0 exactly when
+        # bound: with the init read_scale=-4.0 (sigma=0.017986 < 0.1) the
+        # parameter was frozen at its init for ALL 5000 floor steps — the
+        # 'self-closure' after the release was the frozen init, not a
+        # decision, and the write-path gradient (proportional to scale) was
+        # dead the whole time. The affine reparameterization keeps
+        # sigma'(w) > 0 everywhere, so the channel can learn and prove itself
+        # while the floor holds.
         _fl = float(getattr(self, '_scale_floor', 0.0) or 0.0)
-        if _fl > 0.0:
-            scale = scale.clamp(min=_fl)
+        scale = _fl + (1.0 - _fl) * _rs if _fl > 0.0 else _rs
         self._last_scale = float(scale.mean().detach())   # M59: the EFFECTIVE scale
         out = read * u_gate * c_gate * scale
         # B1: per-position amplitude bound — measured 5-6×‖h‖ injection at

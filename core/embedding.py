@@ -318,6 +318,8 @@ class SigmoidCodedHead(nn.Module):
             # hidden-state level). Buffers ride in the checkpoint.
             self.phantom_bank = PhantomBank(
                 n_slots=int(getattr(cfg, 'head_phantom_slots', 16)), D=D,
+                merge=float(getattr(cfg, 'head_phantom_merge', 0.7)),
+                merge_lo=float(getattr(cfg, 'head_phantom_merge_lo', 0.25)),
                 decay=float(getattr(cfg, 'head_phantom_decay', 0.999)))
             self.phantom_thr: float = float(getattr(cfg, 'head_phantom_thr', 0.1))
             self.phantom_every: int = max(1, int(getattr(cfg, 'head_phantom_every', 25)))
@@ -493,7 +495,9 @@ class SigmoidCodedHead(nn.Module):
             self._last_p = p                                  # live: the L1 aux
             _pb = getattr(self, 'phantom_bank', None)
             if _pb is not None and getattr(self, '_pb_active', True):
-                _pb.decay()
+                # M64 (M63-C): the decay now rides INSIDE observe() (per-observe,
+                # not per-forward: the forward count per step (~8) made the
+                # slot life shorter than the confirmation time by arithmetic).
                 if int(self._pb_step.item()) % self.phantom_every == 0:
                     _pb.observe(e_l, ell_rel, self.phantom_thr)
                 # M58b (M55's consumer): the CONFIRMED phantom directions steer

@@ -24,11 +24,17 @@ class PhantomBank(nn.Module):
         n_slots: int = 16,
         D: int = 2560,
         merge: float = 0.7,        # cosine >= merge -> the same phantom (EVA-Ai dedup 0.7)
+        merge_lo: float = 0.25,    # M64 (M63-C): the soft route — cosine >= merge_lo
+                                   # takes a similarity-weighted EMA + a partial
+                                   # confidence bump. The hard merge alone is
+                                   # unreachable on D=2560 residuals (measured:
+                                   # zero merges in the whole run), which made
+                                   # the confirmation path dead by arithmetic.
         conf_init: float = 0.5,    # EVA-Ai ConceptMiner hypothesis init
         conf_step: float = 0.05,   # per re-observation
         confirm: float = 0.75,     # EVA-Ai: confirmed
         archive: float = 0.25,     # EVA-Ai: archived
-        decay: float = 0.999,      # per-step confidence decay
+        decay: float = 0.999,      # per-OBSERVE confidence decay (M64: was per-forward)
         ema: float = 0.05,         # direction EMA toward the observed residual
         max_observe: int = 32,     # per-call position budget (the Python loop)
     ) -> None:
@@ -36,6 +42,7 @@ class PhantomBank(nn.Module):
         self.n_slots = int(n_slots)
         self.D = int(D)
         self.merge = float(merge)
+        self.merge_lo = float(merge_lo)
         self.conf_init = float(conf_init)
         self.conf_step = float(conf_step)
         self.confirm = float(confirm)
@@ -49,16 +56,28 @@ class PhantomBank(nn.Module):
         self.register_buffer('filled', torch.zeros(self.n_slots, dtype=torch.bool))
         self.register_buffer('_births', torch.zeros(1, dtype=torch.long))
         self.register_buffer('_obs', torch.zeros(1, dtype=torch.long))
+        self.register_buffer('_merged', torch.zeros(1, dtype=torch.long))  # M64
 
     @torch.no_grad()
     def decay(self) -> None:
-        """Once per training forward: stale phantoms fade toward archival."""
+        """Stale phantoms fade toward archival.
+
+        M64 (M63-C): called ONCE PER OBSERVE CALL, not per training forward.
+        The old per-forward call made the effective rate depend on the number
+        of head forwards per step (measured ~8 with the reasoning/knowledge
+        passes), so the slot life (~100 steps) sat BELOW the confirmation time
+        (~200 steps) BY ARITHMETIC — no phantom could ever be confirmed
+        (measured: max confidence = conf_init for the whole run, i.e. not a
+        single merge). Per-observe semantics is deterministic w.r.t. the
+        cadence (head_phantom_every) and the arithmetic is now checkable.
+        """
         self.confidence.mul_(self.decay_rate)
 
     @torch.no_grad()
     def observe(self, e_l: torch.Tensor, ell: torch.Tensor, threshold: float) -> int:
         """Accumulate lacuna residuals above `threshold`. Returns the number of
         positions accepted (0 when the lacuna is quiet)."""
+        self.decay()   # M64: the fade is part of the observe cadence (see decay())
         E = e_l.reshape(-1, e_l.shape[-1]).float()
         L = ell.reshape(-1).float()
         sel = L > float(threshold)
@@ -81,14 +100,34 @@ class PhantomBank(nn.Module):
                 self.directions[i].mul_(1.0 - self.ema).add_(E[j], alpha=self.ema)
                 self.confidence[i] = min(1.0, float(self.confidence[i]) + self.conf_step)
                 self.count[i] += 1
+                self._merged += 1
+            elif s >= self.merge_lo and bool(self.filled[i]):
+                # M64 (M63-C): the SOFT route. The hard merge=0.7 is
+                # unreachable on D=2560 lacuna residuals (measured: max conf =
+                # conf_init -> zero merges in the whole run), so before this
+                # every unmatched observation EVICTED a slot: the bank was a
+                # snapshot of the last <=16 residuals, not a memory. A
+                # similarity-weighted EMA lets a recurring direction accumulate
+                # confidence across observations (the confirmation path).
+                w = (s - self.merge_lo) / max(1e-6, self.merge - self.merge_lo)
+                self.directions[i].mul_(1.0 - self.ema * w).add_(E[j], alpha=self.ema * w)
+                self.confidence[i] = min(1.0, float(self.confidence[i]) + self.conf_step * w)
+                self.count[i] += 1
+                self._merged += 1
             else:
                 free = (~self.filled).nonzero()
-                i = int(free[0]) if free.numel() else int(self.confidence.argmin())
-                self.directions[i].copy_(E[j])
-                self.confidence[i] = self.conf_init
-                self.count[i] = 1
-                self.filled[i] = True
-                self._births += 1
+                if free.numel():
+                    i = int(free[0])
+                    self.directions[i].copy_(E[j])
+                    self.confidence[i] = self.conf_init
+                    self.count[i] = 1
+                    self.filled[i] = True
+                    self._births += 1
+                # M64: no free slot and no close match -> DROP. The old
+                # `confidence.argmin()` eviction turned a full bank into a
+                # churn (births ~= observations); a slot now dies only by
+                # fading below `archive` (its own neglected lifecycle), not by
+                # being overwritten by an arbitrary residual.
             accepted += 1
         self._obs += 1
         # EVA-Ai lifecycle: archive the faded (after a grace period)
@@ -111,6 +150,7 @@ class PhantomBank(nn.Module):
             'conf': conf,
             'births': int(self._births),
             'obs': int(self._obs),
+            'merged': int(self._merged),
         }
 
     @torch.no_grad()

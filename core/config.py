@@ -117,6 +117,14 @@ class WideBindConfig:
     head_temper_after: int = 1045  # M55a: warmup (the memory is noise at init)
     head_phantom_slots: int = 16  # M54: the phantom-concept bank slots
     head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
+    head_phantom_merge_lo: float = 0.25  # M64 (M63-C): the soft route — cosine
+                                         # >= merge_lo takes a similarity-weighted
+                                         # EMA + a partial confidence bump. The
+                                         # hard merge=0.7 is unreachable on
+                                         # D=2560 residuals (measured: zero merges
+                                         # in the whole run) -> the confirmation
+                                         # path was dead by arithmetic and every
+                                         # unmatched observation evicted a slot.
     head_phantom_thr: float = 1.1  # M55b: RELATIVE lacuna (ell/EMA) above which a
                                    # position is observed (the absolute ell is ~0.97
                                    # for ANY realistic state: the readout spans K of D)
