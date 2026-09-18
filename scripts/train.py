@@ -17,6 +17,21 @@ from core.training_control import (codebook_fingerprint,
                                 verify_identity_resume, apply_tau_lr,
                                 grad_census, training_telemetry)  # M64.8
 
+import subprocess
+_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _git_head():
+    """Короткий хеш текущего HEAD репозитория ('?' если не git)."""
+    try:
+        return subprocess.run(['git', '-C', _BASE, 'rev-parse', '--short', 'HEAD'],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return '?'
+
+
+GIT_HASH = _git_head()  # хеш на момент импорта = код, который выполняет процесс
+
 
 def _save_checkpoint_safely(state, path):
     """Write checkpoint to temp file then rename — prevents corruption on interrupt."""
@@ -289,6 +304,7 @@ def train(cfg=None, resume_path=None):
         return {
             'step': int(_step), 'model': model.state_dict(),
             'code_fp': codebook_fingerprint(model),
+            'git_hash': GIT_HASH,
             'optimizer': optimizer.state_dict(),
             'param_names': _opt_param_names(model, optimizer),
             'scheduler': scheduler.state_dict(),
@@ -320,6 +336,10 @@ def train(cfg=None, resume_path=None):
     print(f'Adaptation: tau-LLRD (single source; index llrd={cfg.llrd}{_llrd_note}) '
           f'+ mirror-adaptive LR + plateau depth (init={cfg.init_active_layers}) '
           f'+ AGC + spectral aux')
+    _gh_now = _git_head()
+    print(f'Git: running={GIT_HASH} head={_gh_now}' +
+          ('  [WARN] stale clone — running code != HEAD! '
+           'force-pull и перезапустите (пин версии T5)' if GIT_HASH != _gh_now else ''))
     
     # Resume
     start_step = 0
@@ -693,7 +713,7 @@ def train(cfg=None, resume_path=None):
                            and step < getattr(cfg, 'eval_early_until', 3000)
                            and step % getattr(cfg, 'eval_early_every', 250) == 0)
             if _canonical_eval or _early_eval:
-                val_loss = evaluate(model, streams, cfg, device)
+                val_loss = evaluate(model, streams, cfg, device, step=step)
                 if not math.isfinite(val_loss):   # B12 (F3-01): empty pool — skip controllers
                     print('  EVAL skipped: empty validation pool (NaN) — no reporting', flush=True)
                 else:
@@ -752,7 +772,7 @@ def train(cfg=None, resume_path=None):
 
 
 @torch.no_grad()
-def evaluate(model, streams, cfg, device, hold_n=None):
+def evaluate(model, streams, cfg, device, hold_n=None, step=None):
     if hold_n is None:  # M13 default (mirrors the train-sampler split)
         hold_n = 3 if len(streams) >= 8 else (1 if streams else 0)
     model.eval()
@@ -780,6 +800,7 @@ def evaluate(model, streams, cfg, device, hold_n=None):
         model.restore_runtime_buffers(_rt_snap)
         return float('nan')
     eval_pool = streams[-hold_n:] if hold_n >= 1 else [streams[-1]]
+    _vw_rec = []
     for stream in eval_pool:
         if stream.len < cfg.batch_size * cfg.seq_len + 1:
             continue
@@ -799,15 +820,41 @@ def evaluate(model, streams, cfg, device, hold_n=None):
                 break  # end of the hold-out document region — no wrapped re-read
             x, y = x.to(device), y.to(device)
             h = model.embed_tokens(x)
-            out, est, ogs, _ = model(h, est, global_state=ogs, adaptive=False, tokens=x)
+            # T4 parity-eval: step=step — temper/lacuna-каналы включаются как
+            # на train (иначе val измеряет другой граф; см. CONCLUSIONS T4).
+            out, est, ogs, _ = model(h, est, global_state=ogs, adaptive=False,
+                                     tokens=x, step=step)
             loss = model.compute_loss(out, y, h_emb=h)
             total_loss += loss.item()
             total_steps += 1
+            _tel_w = model.head_telemetry() if hasattr(model, 'head_telemetry') else {}
+            _vw_rec.append({'file': getattr(stream, 'path', '?'),
+                            'offset': int(offset - cfg.seq_len),
+                            'ce': loss.item(),
+                            'sat': float(_tel_w.get('sat', float('nan'))),
+                            'conflict': float(_tel_w.get('conflict', float('nan')))})
+
+    if _vw_rec:
+        _wce = sorted(_vw_rec, key=lambda r: r['ce'], reverse=True)
+        _wmean = sum(r['ce'] for r in _vw_rec) / len(_vw_rec)
+        print(f'  EVAL windows: n={len(_vw_rec)} ce_mean={_wmean:.4f} '
+              f'ce_max={_wce[0]["ce"]:.4f} sat_max={max(r["sat"] for r in _vw_rec):.3f} '
+              f'conflict_max={max(r["conflict"] for r in _vw_rec):.3f}')
+        print('  EVAL worst 3:', '; '.join(
+            f'{r["file"]}@{r["offset"]} ce={r["ce"]:.2f}' for r in _wce[:3]))
     
     if _lc is not None:
         _lc.cache.clear()
     model.restore_runtime_buffers(_rt_snap)
     model.train()
+    # T4: rolling snapshot at every eval (attribution спайков; не только best)
+    try:
+        _env_l = {'step': int(step) if step is not None else -1,
+                  'val_loss': float(total_loss / total_steps) if total_steps else float('nan'),
+                  'git_hash': GIT_HASH, 'model': model.state_dict(), 'cfg': cfg}
+        torch.save(_env_l, os.path.join(getattr(cfg, 'save_dir', 'checkpoints'), 'eval_last.pt'))
+    except Exception as _e44:
+        print(f'  [warn] eval_last.pt save failed: {_e44}')
     # B12 (F3-01): an empty pool returned 0.0 — a PERFECT score that anchored
     # _best_val_loss=0 forever and ratcheted LR to its floor with an
     # unreachable recovery branch. NaN = 'no measurement'.
