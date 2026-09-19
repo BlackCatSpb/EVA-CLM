@@ -301,7 +301,9 @@ def train(cfg=None, resume_path=None):
                                             else getattr(cfg, 'balancer_align_every', 1)),
                             kill_terms=list(LossBalancer.AUX_TERMS)
                             if getattr(cfg, 'aux_kill_switch', False) else None,
-                            kill_disable=bool(getattr(cfg, 'aux_kill_disable', False)))
+                            kill_disable=bool(getattr(cfg, 'aux_kill_disable', False)),
+                            safety_aux=('head_wall',) if getattr(cfg, 'balancer_safety_ungated', True)
+                            else ())  # T9.6: стена головы вне CE-гейтинга
     # Adaptive gradient clipping (AGC, scale-free ratio). EVA-блоки
     # трансформероподобны (MLP + концепт-внимание) -> docstring рекомендует
     # c->0.1 для transformer-блоков (0.01 — режим ResNet из статьи).

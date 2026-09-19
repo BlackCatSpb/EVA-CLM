@@ -368,6 +368,11 @@ class WideBindConfig:
     # cheap one-backward normalized total otherwise; 0 = never align.
     # Default 1 = every step (historical behaviour).
     balancer_align_every: int = 1
+    # T9.6: safety-каналы (head_wall) не гейтятся CE-градиентом (предохранитель
+    # не должен питаться от того сигнала, который защищает; при насыщении
+    # |u|>17 CE-градиент≈0 и батчер глушил стену — замер 2026-09-19).
+    # False = откат к гейтингу (A/B-рука) без правок кода.
+    balancer_safety_ungated: bool = True
     # Cognitive MLP gate opening (fix for "MLP asleep"): init mlp_gate_b > 0 so the
     # mirror-gated MLP modulation (mlp_mod) actually scales the SwiGLU gate and
     # mod_scale_mlp receives a CE-gradient path (can open/close). 0 disables.

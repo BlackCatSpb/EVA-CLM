@@ -221,6 +221,11 @@ class LossBalancer:
     """
 
     BYPASS_AUX = ('gradalign',)
+    # T9.6: safety-термы — предохранители, не обучающие сигналы. Их градиент
+    # не гейтится CE (иначе при насыщении |u|>17, где CE-градиент ≈0, стена
+    # глушится ровно тогда, когда нужна — замер 2026-09-19: wall=250 при
+    # u_max 197→592). Свой масштаб 1.0, без sign-маски и CE-бонда.
+    SAFETY_AUX = ('head_wall',)
     # M64.12: the default kill-switch watch list (the aux keys the loops log)
     AUX_TERMS = ('branch', 'bridge_conn', 'div', 'decorr', 'diversity', 'balance',
                  'gate_l1', 'reinforce', 'signal_ent', 'alpha_novelty', 'pred',
@@ -232,9 +237,13 @@ class LossBalancer:
                  scale_min_ratio: float = 0.05, scale_max: float = 10.0,
                  scale_ema_decay: float = 0.99,
                  kill_terms: Optional[list] = None,
-                 kill_disable: bool = False) -> None:
+                 kill_disable: bool = False,
+                 safety_aux: Optional[tuple] = None) -> None:
         self.align: bool = bool(align)
         self.align_cap = align_cap  # accepted for config compatibility, NOT used
+        # T9.6: safety-каналы (A/B-ручка: () отключает; None = класс-дефолт).
+        self.safety_aux: tuple = (LossBalancer.SAFETY_AUX if safety_aux is None
+                                  else tuple(safety_aux))
         self.eval_interval: int = int(eval_interval)
         # M64.4 (M63-F): the align path costs THREE graph traversals (CE, aux,
         # bypass) — with gradient checkpointing that is ~3 recomputes per step,
@@ -454,9 +463,44 @@ class LossBalancer:
         # from the gradient geometry, so those adversarial cases cannot touch
         # it; the first step always aligns to seed `s`.
         params = [p for p in parameters if p.requires_grad]
+        # R2-ревью T9.6: НЕ мутируем словарь вызывающего (его логирует aux-строку
+        # ПОСЛЕ backward — pop съедал head_wall из лога). Копия здесь; ниже
+        # safety/kill работают с ней.
+        aux_dict = dict(aux_dict)
+        # T9.6 (находка 2026-09-19): SAFETY-термы (стена головы) НЕ гейтятся
+        # CE-градиентом. Диагноз: при насыщении |u|>17 CE-градиент ≈1e-13, и
+        # align-путь множит aux на clamp(‖gce‖/‖b‖, max=1) + sign-маску
+        # (gce*gau>0), а cheap-путь — на s≈0 (s из ‖g_CE‖) ⇒ head_wall
+        # глушится ровно при насыщении (M52a: «единственный быстрый выход»
+        # был структурно закрыт; замер: wall=250, u_max растёт 197→592).
+        # Safety получает свой градиент с масштабом 1.0, без маски/бонда:
+        # профиль relu(|u|−u0)² самоограничен (≡0 ниже u0).
+        # Порядок (R1/R2/R3-ревью): safety вынимается ДО kill.filter — иначе
+        # при aux_kill_disable стена отключалась бы ровно при насыщении
+        # (proj≈0 в Schmitt-логике).
+        safety: Dict[str, Any] = {}
+        for _k in self.safety_aux:
+            _v = aux_dict.get(_k)
+            if isinstance(_v, torch.Tensor) and _v.requires_grad:
+                safety[_k] = aux_dict.pop(_k)
         # M64.12: the kill-switch filter (a no-op when the switch is off)
         if self.kill is not None:
             aux_dict = self.kill.filter(aux_dict)
+        _safety_grads = None
+        if safety and params:
+            # R1-класс M64.4r3: любой backward проходит через gradalign-хук —
+            # стена не должна записываться как CE-цель (хук морозим вокруг).
+            if phase_model is not None:
+                for _l in getattr(phase_model, 'layers', []):
+                    _l._ga_record = False
+            try:
+                _safety_grads = torch.autograd.grad(
+                    sum(safety.values()), params, retain_graph=True,
+                    allow_unused=True)
+            finally:
+                if phase_model is not None:
+                    for _l in getattr(phase_model, 'layers', []):
+                        _l._ga_record = True
         _cheap = (not self.align) or (self.align_every <= 0) or (
             self.align_every > 1 and step is not None
             and int(step) % self.align_every != 0)
@@ -488,6 +532,7 @@ class LossBalancer:
                 if phase_model is not None:
                     for _l in getattr(phase_model, 'layers', []):
                         _l._ga_record = True
+            self._add_safety(params, _safety_grads)
             return
         self.last_path = 'align'
         self.n_align += 1
@@ -504,7 +549,6 @@ class LossBalancer:
         # (iii) bypass terms are added under the same sign-mask+bound (was:
         # raw .backward(), measured 100×‖g_CE‖ — the bound claim was false).
         bypass: Dict[str, Any] = {}
-        aux_dict = dict(aux_dict)   # never mutate the caller's dict (logging)
         for _k in self.BYPASS_AUX:
             _v = aux_dict.get(_k)
             if isinstance(_v, torch.Tensor) and _v.requires_grad:
@@ -548,6 +592,7 @@ class LossBalancer:
                 if phase_model is not None:
                     for _l in getattr(phase_model, 'layers', []):
                         _l._ga_record = True
+            self._add_safety(params, _safety_grads)
             return
 
         if phase_model is not None:
@@ -617,9 +662,26 @@ class LossBalancer:
                     b = gb * ((p.grad * gb) > 0)
                     _s = torch.clamp(p.grad.norm() / (b.norm() + 1e-12), max=1.0)
                     p.grad.add_(b * _s)
+        self._add_safety(params, _safety_grads)
         if phase_model is not None:
             for _l in getattr(phase_model, 'layers', []):
                 _l._ga_record = True
+
+    @staticmethod
+    def _add_safety(params, safety_grads) -> None:
+        """T9.6: добавить градиент safety-термов (стена головы) к p.grad без
+        CE-маски/бонда. Профиль relu(|u|−u0)² самоограничен (≡0 ниже u0) —
+        вклад появляется только при насыщении, где CE-градиент уже мёртв."""
+        if safety_grads is None:
+            return
+        with torch.no_grad():
+            for p, gs in zip(params, safety_grads):
+                if gs is None:
+                    continue
+                if p.grad is None:
+                    p.grad = gs.clone()
+                else:
+                    p.grad.add_(gs)
 
 
 # ───────────────────── M64.12: the aux kill-switch (M63-E §7) ────────────────

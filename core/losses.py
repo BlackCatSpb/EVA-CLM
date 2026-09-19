@@ -426,6 +426,11 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     # the sigma CE-gradient is ~1e-13 at |u|>17). The wall's gradient is LINEAR
     # in the excess (2w(|u|-u0)) and stays alive at any u — the only fast escape
     # (ST clamps rescue at 1e-7..1e-4/step, i.e. ~1e6-1e11 steps).
+    # T9.6-ПОПРАВКА (замер 2026-09-19): «выход» был структурно ЗАКРЫТ —
+    # как aux-терм стена гейтилась CE-градиентом (sign-маска + бонд ‖g_CE‖),
+    # а при насыщении g_CE≈0 ⇒ стена глушилась ровно тогда, когда нужна
+    # (wall=250, u_max рос 197→592). Исправлено: head_wall в SAFETY_AUX —
+    # отдельный путь без маски/бонда (LossBalancer._add_safety).
     _pl1 = float(getattr(stack.cfg, 'head_phantom_l1', 0.0))
     if _pl1 > 0.0:
         _last_p = getattr(stack.lm_head, '_last_p', None)

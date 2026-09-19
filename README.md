@@ -671,8 +671,10 @@ stream-кэши зеркал, диагностические буферы, кэ�
   `ks_off/ks_low/ks_err` (сколько раз каждый aux был бы обрезан/выключен),
   реальный обрез включается `aux_kill_switch=True` (порог-Шмитт, бюджет
   max_off, тест T12);
-* **grad census** — 17 каналов на шаг (`g_wk/g_wv/g_fusion2/head_wall/
-  g_readout/g_log_temp/g_ucl_scale/...`) — взрыв любого пути виден в момент;
+* **grad census** — каналы на шаг (`g_wk/g_wv/g_fusion2/g_cache_gate/
+  g_cache_attn/g_readout/g_log_temp/g_ucl_scale/...`; T9.6: стена head_wall
+  своего параметра не имеет — её эффект виден через `aux: head_wall` и
+  `spk_u_max/spk_sat`) — взрыв любого пути виден в момент;
 * **спайк-снапшот** (`spk_n/spk_u_max/spk_h_norm/spk_sat`) — состояние головы
   на пике;
 * **anomaly_track** — пер-слой max ‖hp‖/predMSE/min-gate с дельтами к
