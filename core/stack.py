@@ -162,8 +162,9 @@ class EVAStack(nn.Module):
             cfg=cfg,
             softmax_free=getattr(cfg, 'softmax_free', True),
         ) if getattr(cfg, 'unified_concept_layer', True) else None
-        # ─── Maturation controller (unified wake-up gate) ───
-        # Uses tau_config.mat_delay for per-layer timing.
+        # ─── Maturation controller (ramp-источник; НЕ «единый гейт») ───
+        # T8: итоговый mat = max(ramp, readiness.detach()) считается ниже (line ~471);
+        # контроллер даёт только ramp-расписание (per-layer timing из tau_config.mat_delay).
         if getattr(cfg, 'maturation_enabled', True):
             self.maturation = MaturationController(
                 cfg.n_layers, tau_l[0].item(), tau_l[-1].item(), cfg,

@@ -353,7 +353,8 @@ class EVABlock(nn.Module):
         
         # ─── Spectral (self-organizing frequency filters) ───
         self.register_buffer('V_dct', dct_basis(cfg.D))
-        # ─── MLP-output runaway tracker (self-referencing, τ-linked) ───
+        # ─── MLP-output runaway tracker (self-referencing; cadence 0.99/0.999,
+        # НЕ τ-linked — T8: горизонт статистики, зарегистрирован в test_tau_lint) ───
         # fast (0.99) vs slow (0.999) EMA of ‖h_mlp‖. Healthy ratio ≈ 1; a
         # ×2–50 runaway lifts it within a few steps, unlike an absolute bound
         # which the runaway's growing variance absorbs.

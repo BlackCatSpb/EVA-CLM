@@ -328,7 +328,8 @@ class GroupedCognitiveMirror(nn.Module):
         # U5: τ-scheduled signal temperature
         self._tau_signal_log = nn.Parameter(torch.tensor(0.0))  # τ_signal base (learnable)
         # Store layer-specific τ primitives for signal temperature scheduling
-        # and τ-tied gate amplitude authority (intent_alpha = 1 − exp(−τ_l/τ_min)).
+        # and τ-tied gate amplitude authority (intent_alpha = 1 − 1/τ_l — v3,
+        # единый EMA-горизонт; T8).
         self._tau_norm_layer = None
         self._intent_alpha = 1.0
         # Fallbacks equal the TauConfig defaults (0.3/5.0) so a standalone
@@ -937,7 +938,7 @@ class GroupedCognitiveMirror(nn.Module):
             # weights from the layer's own τ-coordinate (sum to 1, no magic 0.5/0.5).
             w_spec = self._tau_norm_layer
             w_cons = 1.0 - w_spec
-            # Overlay authority: complement of intent_alpha = exp(−τ_l/τ_min).
+            # Overlay authority: complement of intent_alpha = 1/τ_l (v3; T8).
             # Fast (shallow) layers rely more on soft routing, mature layers on intent.
             ctr = ctr + (spec * w_spec + cons * w_cons) * self.w_contra * (1.0 - self._intent_alpha)
             if self.training:
