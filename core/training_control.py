@@ -757,6 +757,10 @@ def grad_census(model) -> dict:
         'g_wo': ('memory_bank.l2', 'W_o.weight'),
         'g_fusion2': ('memory_bank', 'fusion.2.weight'),
         'g_l1_proj': ('memory_bank.l1', 'proj.weight'),
+        # T8: суммарный градиент _tau_dev по живым путям (mat / intent_alpha /
+        # lr_mult / gate_tau). mat-путь обнулён через readiness.detach()
+        # (stack ~471) — этот канал показывает, какие пути кривизны живы.
+        'g_tau_dev': ('tau_config', '_tau_dev'),
     }
     for key, (mod, attr) in probes.items():
         p = model

@@ -29,6 +29,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from . import tau_api
+
 
 class TauConfig(nn.Module):
     """Единое τ-поле: один набор параметров → все τ-зависимые величины.
@@ -54,16 +56,16 @@ class TauConfig(nn.Module):
     def __init__(
         self,
         n_layers: int = 24,
-        tau_min: float = 8.0,
-        tau_max: float = 512.0,
+        tau_min: float = tau_api.TAU_MIN,
+        tau_max: float = tau_api.TAU_MAX,
         dev_max: float = 0.3,
-        T0: float = 8000.0,
-        T_delay: float = 8000.0,
-        delta_t: float = 4000.0,
-        gate_tau_min: float = 0.3,
-        gate_tau_max: float = 5.0,
-        mem_tau_ref: float = 64.0,
-        llrd_gamma: float = 0.65,
+        T0: float = tau_api.T0,
+        T_delay: float = tau_api.T_DELAY,
+        delta_t: float = tau_api.DELTA_T,
+        gate_tau_min: float = tau_api.GATE_TAU_MIN,
+        gate_tau_max: float = tau_api.GATE_TAU_MAX,
+        mem_tau_ref: float = tau_api.MEM_TAU_REF,
+        llrd_gamma: float = tau_api.LLRD_GAMMA,
     ):
         super().__init__()
         self.n_layers = n_layers

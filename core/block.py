@@ -290,10 +290,12 @@ class EVABlock(nn.Module):
         # the stack-level _vsa_log_param (tau_s is always passed), and this
         # copy is EXCLUDED from both optimizer builders so it stops being
         # zero-gradient weight in the production optimizer state (audit M7).
+        # T8: значения — единый источник core.tau_api.VSA_LADDER.
+        from . import tau_api as _tau_api
         self._vsa_tau_log = nn.Parameter(
-            torch.tensor([math.log(8), math.log(32), math.log(128), math.log(512)]))
+            torch.tensor([math.log(x) for x in _tau_api.VSA_LADDER]))
         # Keep old buffer for backward compat (unused in forward when tau_config provided)
-        tau_s = torch.tensor([8, 32, 128, 512], dtype=torch.float32)
+        tau_s = torch.tensor(_tau_api.VSA_LADDER, dtype=torch.float32)
         self.register_buffer('_tau_s', tau_s)
         self.w_i = nn.Parameter(torch.randn(cfg.D))          # content-dependent write gate (shared across scales)
         self.w_d = nn.Parameter(torch.randn(cfg.D) * cfg.w_d_init_std)    # content-dependent decay modulation

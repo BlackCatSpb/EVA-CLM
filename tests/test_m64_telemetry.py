@@ -29,7 +29,7 @@ def test_grad_census_reports_the_channels():
     ce.backward()
     gc = grad_census(m)
     for k in ('g_readout', 'g_token_bias', 'g_ucl_scale', 'g_phantom_basis',
-              'g_lacuna_w', 'g_log_eta'):
+              'g_lacuna_w', 'g_log_eta', 'g_tau_dev'):   # T8: τ-пути кривизны
         assert k in gc, f'{k} missing from the census'
         assert gc[k] >= 0.0 and torch.isfinite(torch.tensor(gc[k]))
     # the readout and token_bias must be LIVE (nonzero) after a real CE backward

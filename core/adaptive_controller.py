@@ -123,11 +123,11 @@ class AdaptiveController:
         # τ_ref 32/64 for the whole path; mem_tau_ref is 64).
         c = 0.166 * 32.0
         if tau_l is None:
-            # T8: fallback replicates the config ladder 8..512 by hand — the
-            # third copy of the VSA/τ basis. Zero-risk: values match; the
-            # consolidation to one source is registered in test_tau_lint.
+            # T8: fallback ссылается на единый источник (tau_api), а не
+            # дублирует числа лестницы (прежние 8.0 + 504.0 — третья копия).
+            from . import tau_api as _tau_api
             lf = getattr(layer, 'layer_idx', 0) / max(getattr(layer, 'total_layers', 32) - 1, 1)
-            tau_l = 8.0 + 504.0 * lf          # B3: matches the real 8..512 ladder (old 141·lf was stale)
+            tau_l = _tau_api.TAU_MIN + (_tau_api.TAU_MAX - _tau_api.TAU_MIN) * lf
         i_target = min(1.0, c / max(tau_l, 1e-3))
         i_eff = max(i_target * math.exp(b_i_base), 1e-6)
         b_i = math.log(math.expm1(i_eff))     # exact softplus⁻¹

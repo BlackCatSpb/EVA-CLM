@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from .lambda_utils import LambdaConfig
+from . import tau_api  # T8: единый язык временных констант (period/horizon/temp)
 
 _LAMBDA_OVERRIDE_DOC = (
     "Set to None to use λ_d-derived value (recommended for Experiment 1)."
@@ -118,6 +119,7 @@ class WideBindConfig:
     head_phantom_slots: int = 16  # M54: the phantom-concept bank slots
     head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
     head_phantom_merge_lo: float = 0.2  # M64 (M63-C): the soft route — cosine
+    # T8 role=design: порог мягкого слияния направлений (калиброван M63-C)
                                          # >= merge_lo takes a similarity-weighted
                                          # EMA + a partial confidence bump. The
                                          # hard merge=0.7 is unreachable on
@@ -131,9 +133,10 @@ class WideBindConfig:
     head_phantom_thr: float = 1.1  # M55b: RELATIVE lacuna (ell/EMA) above which a
                                    # position is observed (the absolute ell is ~0.97
                                    # for ANY realistic state: the readout spans K of D)
-    head_lacuna_ema: float = 0.99  # M55b: the self-calibration EMA decay
+    head_lacuna_ema: float = tau_api.period(100)  # M55b: the self-calibration EMA decay
+    # (T8: каденция — период 100 наблюдений, объявлен через tau_api.period)
     head_phantom_every: int = 25  # M54: observe cadence (steps)
-    head_phantom_decay: float = 0.99  # M62/M64: the bank's per-OBSERVE confidence
+    head_phantom_decay: float = tau_api.period(100)  # M62/M64: the bank's per-OBSERVE confidence
                                        # decay (0.999 = the old per-forward value).
                                        # R1/R2 calibration: at the observed ~0.13
                                        # observes/step (checkpoint counters) 0.99 gives the
@@ -203,10 +206,11 @@ class WideBindConfig:
     # раннее включение — оно управляется компетентностью, а не часами.
     matur_r0: float = 0.3           # readiness sigmoid center (lower = earlier opening)
     matur_rs: float = 0.2           # readiness sigmoid slope (lower = sharper transition)
-    matur_ema: float = 0.999        # pred-error EMA decay (smoothness)
+    matur_ema: float = tau_api.period(1000)        # pred-error EMA decay (smoothness)
     matur_warm: int = 300           # warm steps: capture random-regime pred_err_init
     # matur_warmup_steps: REMOVED — no warmup, clean start from checkpoint
     matur_write_thr: float = 0.3    # maturity needed before private-memory writes
+    # T8 role=permission: тот же класс, что mem_min_write_mat (выключатель, не амплитуда)
     # ─── Maturity: компетентностная добавка к time-рампе (E3-уточнение) ───
     # effective maturity = max(time_ramp, readiness_l), где readiness_l
     # считается в maturation.py из НАСЫЩЕНИЯ ЗАМЕРА pred-ошибки зеркала
@@ -267,8 +271,8 @@ class WideBindConfig:
 
     # Per-layer LS-based LR modulation (индивидуальная адаптация по var(log_scale))
     per_layer_ls_lr: bool = False  # True = per-layer mult из fast/slow EMA var(ls)
-    ls_ema_fast: float = 0.99
-    ls_ema_slow: float = 0.999
+    ls_ema_fast: float = tau_api.period(100)
+    ls_ema_slow: float = tau_api.period(1000)
     ls_mult_min: float = 0.5
     ls_mult_max: float = 2.0
     ls_mirror_mult_max: float = 2.0  # кламп итога irm*ls_mult для mirror-градиентов
@@ -279,11 +283,11 @@ class WideBindConfig:
     w_mem2v_scale_min: float = 0.5
     w_mem2v_scale_max: float = 1.0
     ema_alpha_min: float = 0.90
-    ema_alpha_max: float = 0.99
+    ema_alpha_max: float = tau_api.period(100)
     noise_scale_min: float = 0.001
     noise_scale_max: float = 0.05
     delta_var_ema_min: float = 0.80
-    delta_var_ema_max: float = 0.99
+    delta_var_ema_max: float = tau_api.period(100)
 
     # Optimizer
     gate_lr_mult: float = 5.0
@@ -415,6 +419,8 @@ class WideBindConfig:
     mem_l1_slots: int = 3           # L1 rolling buffer slots (immediate)
     mem_l2_slots: int = 32          # L2 learned bank slots (short-term)
     mem_min_write_mat: float = 0.3  # min maturation before writes allowed (like private_mem)
+    # T8 role=permission: бинарный выключатель записи (не amplitude-множитель;
+    # не делать непрерывной функцией — T3/T7)
     mem_bridge_dim: int = 256       # memory bank bridge dim (matches bridge_dim)
     concept_birth_novelty_threshold: float = 0.15  # birth only if d_min > threshold (best_sim < 1-threshold)
 
@@ -445,7 +451,7 @@ class WideBindConfig:
 
     # VSA long-range memory
     vsa_b_d_max: float = 12.0       # max b_d (τ≈160K at 12.0, was 5.0/τ≈150)
-    vsa_b_d_smooth: float = 0.999   # per-step lerp rate towards controller target
+    vsa_b_d_smooth: float = tau_api.period(1000)   # per-step lerp rate towards controller target
                                     # 0.999 = 0.1%/step (τ_lerp≈1000 steps)
                                     # 1.0 = instant overwrite (old behavior)
     vsa_b_lr_mult: float = 0.1      # optimizer LR multiplier for b_d/b_i
@@ -504,6 +510,8 @@ class WideBindConfig:
     eval_interval: int = 1000
     ucl_read_scale_floor: float = 0.0   # M59: floor on sigmoid(read_scale) until
                                         # `ucl_read_scale_floor_until` (0 = off);
+    # T8 role=amplitude-floor: пол на АМПЛИТУДУ чтения (не permission; после релиза
+    # модель закрывает чтение — лечится валютой/UCB, не ещё одним полом)
                                         # lets the UCL prove itself before the model
                                         # self-closes it (measured: -4.0 in 120 steps)
     ucl_read_scale_floor_until: int = 0  # M59: the step until which the floor holds

@@ -452,3 +452,22 @@ gate_tau как источник init), 	au_api.perm(роль) (пороги с 
 - НЕ сделано (осознанно): сведение 3 копий VSA-базиса и удаление
   fallback-лестницы (зарегистрированы, консолидация — отдельная правка);
   снимок grad-норм по _tau_dev (фича, не фикс).
+
+
+### T8 — отложенный пакет исполнен (2026-09-18, вечер)
+
+- **core/tau_api.py** — единый язык: TAU_MIN/MAX, MEM_TAU_REF, T0/T_DELAY/DELTA_T,
+  GATE_TAU_MIN/MAX, LLRD_GAMMA, VSA_LADDER + контракты horizon()/period()/temp().
+- **TauConfig** — дефолты ссылаются на tau_api (значения идентичны, cfg_fp не меняется);
+- **VSA-база** — block.py fallback (_vsa_tau_log, _tau_s) → tau_api.VSA_LADDER;
+- **fallback-лестница** adaptive_controller → tau_api.TAU_MIN/TAU_MAX (504 удалён);
+- **config-дефолты EMA** (8 полей: head_lacuna_ema, head_phantom_decay, matur_ema,
+  ls_ema_fast/slow, ema_alpha_max, delta_var_ema_max, vsa_b_d_smooth) →
+  	au_api.period(100/1000) — каденция объявлена, не магия;
+- **роли порогов** объявлены в config: mem_min_write_mat/matur_write_thr=permission,
+  ucl_read_scale_floor=amplitude-floor, head_phantom_merge_lo=design;
+- **g_tau_dev** — суммарный градиент _tau_dev (mat/intent_alpha/lr_mult/gate_tau)
+  добавлен в grad_census (T8: видно, какие пути кривизны живы; mat-путь обнулён
+  через readiness.detach(), stack ~471);
+- τlint-реестр обновлён (tau_api — авторитет; config/adaptive_controller больше
+  не нарушители); 468 тестов зелёные.
