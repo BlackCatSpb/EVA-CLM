@@ -210,7 +210,33 @@ M64.2/M64.3 — переработаны, ожидают верификацио�
 | T9.1 | bridge hard-negative mining (`bridge_hard_neg_k`, default 0) | ✅ | `test_t9_bridge_hardneg.py` (3) | ревью | 77ea2c9 |
 | T9.2 | phantom upgrade: cycle-gate 5, coh-EMA, типы, priority, аудит-ринг | ✅ | `test_t9_phantom_upgrade.py` (5) + M58-локи | ревью | 77ea2c9 |
 | T9.3 | CovarianceMemory: 2-й момент `M=d·M+i·k kᵀ`, τ_l, chunked скан | ревью-раунд 1: REVISE×3 → правки внесены | `test_t9_cov_memory.py` (11), `test_t9_cov_block.py` (5) | R1/R2/R3 → REVISE (исполнено) | 3642d02 |
-| T9.4 | **ROOT-FIX мёртвой τ-лестницы**: снятие регистрации общего tau_config подмодулем блоков/банка/матуры + `object.__setattr__` для rope; grad_census различает None/0 | ревью-раунд 1: R1/R3 REVISE (исполнено), R2 ACCEPT | `test_t9_tau_registration.py` (6); на реальном best.pt: g_tau_dev 0→0.0014, tau_l.grad_fn=ExpBackward0 | R1/R2/R3 | (тек.) |
+| T9.4 | **ROOT-FIX мёртвой τ-лестницы**: снятие регистрации общего tau_config подмодулем блоков/банка/матуры + `object.__setattr__` для rope; grad_census различает None/0 | ревью-раунд 1: R1/R3 REVISE (исполнено), R2 ACCEPT | `test_t9_tau_registration.py` (6); на реальном best.pt: g_tau_dev 0→0.0014, tau_l.grad_fn=ExpBackward0 | R1/R2/R3 | 0f2c005 |
+| T9.5 | **Логит-кэш (двусторонний KV-аналог)**: телеметрия фактического гейта + пробы ценза + фикс диагностики analyze; рампа гейта — A/B-рука (off) | замер: gate_fact=0.043 уже на 250 шагах (σ(bias)=4.5e-5 — ложный индикатор) | `test_t9_cache_gate.py` (5) | (ревью) | (тек.) |
+
+**T9.5 — логит-кэш: диагноз замером, а не по σ(bias) (2026-09-19):**
+- **Замысел (оператор):** кэш — аналог KV-кэша, но двусторонний: при обучении
+  копит последовательности (окна h) и внимает им; на инференсе — генерация с
+  полным вниманием (сжатые логиты, 43× компактнее KV). Замечание: в проде
+  инференс пока идёт через `augment(training=True)` (h-режим), сжатые логиты
+  живут в 5% scheduled-sampling и bench — инференс-контракт заявлен, но не
+  прогнан end-to-end.
+- **Ложный диагноз:** analyze печатал `σ(bias)=4.5e-5 -> identity` — только
+  bias, без weight-терма. Замер на реальном чекпойнте: при bias −10
+  **mean-гейт=0.043** (weight-терм распределён по позициям), `|g|` веса
+  гейта≈7 — кэш УЖЕ приоткрыт и учится сам; ramp до −2 даёт факт-гейт
+  0.13–0.5+ (зависит от входа) — сильное вмешательство, потому off.
+- **Сделано:** `cache_gate`/`cache_gate_bias`/`cache_read_ratio`
+  (‖gate·(attn_out−h)‖/‖h‖ — «поток», не только «клапан») в tele; пробы ценза
+  `g_cache_gate`+`g_cache_gate_w` (weight-терм — именно он открывает) +
+  `g_cache_attn`/`g_logit_to_hidden`; analyze печатает `gate_fact`
+  (3 сид-окна, изолированно: step=None, cache.clear() в finally); рампа
+  `logit_cache_gate_ramp` (0 = выкл) — A/B-рука, инвариант training-only
+  (generate передаёт step в eval — guard по self.training).
+- **A/B-спека (если решим ускорять открытие):** руки {ramp=0, ramp=4000→−2}
+  (= tau_api.DELTA_T); окно := 2×eval_interval; шумовая полоса — no-op-абляция
+  ≥3 сидов; метрики: `cache_gate` (факт), `cache_read_ratio`, val/CE;
+  двухсторонний критерий: ramp поднимает gate_fact, а read_ratio/val не
+  двигаются за 2 окна ⇒ кэш не используется (оставить инференс-роль).
 
 **T9.4 — корневая причина мёртвой τ-лестницы (2026-09-19, «чиним не костылями»):**
 - **Диагноз:** EVABlock (а также MemoryBank/Maturation) присваивал общий `tau_config` обычным атрибутом nn.Module ⇒ PyTorch регистрировал его ПОДМОДУЛЕМ каждого потребителя ⇒ параметры τ попадали в `layer.parameters()` и `state_dict` (`layers.N.tau_config.*` ×24) ⇒ `DepthController.set_active_depth(k)` (итерирует только `model.layers`) вызывал `requires_grad_(False)` на `_tau_dev` при заморозке слоёв k..n−1 ⇒ **`_tau_dev.requires_grad=False`**, `g_tau_dev=0` (ровно), `_tau_dev=0.0000` в чекпойнте за 250 шагов. Adam-слот `_tau_l_dev` в конверте пуст при 778 заполненных — за 250 шагов ни одного градиента.

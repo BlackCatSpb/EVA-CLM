@@ -358,6 +358,35 @@ class LogitAttention(nn.Module):
         # opposite of the documented identity.)
         nn.init.zeros_(self.cache_gate[-2].weight)
         nn.init.constant_(self.cache_gate[-2].bias, -10.0)
+        # T9.5: фактический mean-гейт и read-ratio последнего train-forward
+        # (телеметрия; тензоры — конвертация в training_telemetry).
+        self._last_gate_mean: Optional[torch.Tensor] = None
+        self._last_read_ratio: Optional[torch.Tensor] = None
+
+    def set_gate_schedule(self, step: Optional[int], ramp: int = 0,
+                          bias_final: float = -2.0) -> None:
+        """T9.5: расписание открытия гейта (A/B-рука; ramp=0 — выкл).
+
+        ЗАМЕР (реальный ckpt, 250 шагов): σ(bias)=4.5e-5 — ЛОЖНЫЙ индикатор;
+        weight-терм даёт фактический mean-гейт 0.043 — кэш уже приоткрыт и
+        учится сам (|g| веса гейта=6.96). Рампа — опциональное ускорение
+        открытия, не лечение «мёртвого» гейта; её эффект сильный (при
+        bias_final=−2 факт-гейт на рабочих входах 0.13–0.5+, зависит от входа).
+
+        Инвариант: расписание действует ТОЛЬКО в training. Callers передачи
+        step (generate/analyze) в eval НЕ должны затирать обученный bias —
+        guard по self.training, а не по step (ревью R1/R2/R3: generate.py
+        передаёт 0-based step, что клэмпило гейт на генерации).
+        ramp<=0 — no-op.
+        """
+        if ramp <= 0 or step is None or not self.training:
+            return
+        if int(step) > int(ramp):
+            return          # рампа завершена — параметр свободен (учится сам)
+        t = min(max(int(step), 0) / float(ramp), 1.0)
+        with torch.no_grad():
+            self.cache_gate[-2].bias.fill_(
+                -10.0 + (float(bias_final) + 10.0) * t)
 
     def bit_profile(self, logits: torch.Tensor) -> torch.Tensor:
         """Per-bit evidence of a logit field, in the head's sparse block code.
@@ -447,6 +476,15 @@ class LogitAttention(nn.Module):
 
         # Gate: blend cache output with direct path
         gate = self.cache_gate(h)
+        # T9.5: телеметрия фактического blend. Тензоры (не float() — без
+        # per-step GPU→CPU sync, M37b); конвертация — в training_telemetry.
+        # read_ratio = ‖gate·(attn_out−h)‖/‖h‖ — «поток», не только «клапан»
+        # (ревью R3: gate может быть открыт, а attn_out≈h ⇒ вклада нет).
+        if self.training:
+            with torch.no_grad():
+                self._last_gate_mean = gate.detach().mean()
+                _d = (gate * (output - h)).detach()
+                self._last_read_ratio = (_d.norm() / (h.detach().norm() + 1e-9))
         output = gate * output + (1 - gate) * h
 
         if return_attention:
@@ -490,6 +528,11 @@ class LogitCacheAttention(nn.Module):
         _kdim = int(codes.shape[1]) if codes is not None else 64
         self.logit_to_hidden = nn.Linear(_kdim, D, bias=False)
         nn.init.xavier_uniform_(self.logit_to_hidden.weight, gain=0.01)
+
+    def set_gate_schedule(self, step: Optional[int], ramp: int = 0,
+                          bias_final: float = -2.0) -> None:
+        """T9.5: делегат к attention (единая точка вызова из стека)."""
+        self.attention.set_gate_schedule(step, ramp=ramp, bias_final=bias_final)
 
     def forward(self, h: torch.Tensor, logits: torch.Tensor,
                 training: bool = True,

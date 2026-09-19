@@ -800,6 +800,27 @@ def grad_census(model) -> dict:
                      ('g_cov_out', _co), ('g_cov_wd', _cd), ('g_cov_wi', _ci)):
         if arr:
             out[key] = sum(arr) / len(arr)
+    # T9.5: logit cache — 26M-параметровый блок, чью живость ценз не видел.
+    lc = getattr(model, 'logit_cache', None)
+    if lc is not None:
+        att = getattr(lc, 'attention', None)
+        probes_c = []
+        if att is not None:
+            cg = getattr(att, 'cache_gate', None)
+            if cg is not None:
+                # R3-ревью: weight-терм — именно он открывает кэш (|g|≈7);
+                # проба только bias повторяла ошибку «bias ≠ гейт».
+                probes_c.append(('g_cache_gate', cg[-2].bias))
+                probes_c.append(('g_cache_gate_w', cg[-2].weight))
+            op = getattr(att, 'out_proj', None)
+            if op is not None:
+                probes_c.append(('g_cache_attn', op.weight))
+        l2h = getattr(lc, 'logit_to_hidden', None)
+        if l2h is not None:
+            probes_c.append(('g_logit_to_hidden', l2h.weight))
+        for key, p in probes_c:
+            g = getattr(p, 'grad', None)
+            out[key] = float(g.norm()) if g is not None else None
     return out
 
 
@@ -855,6 +876,23 @@ def training_telemetry(model) -> dict:
             cr.append(float(yn) / (float(hn) + 1e-9))
     if cr:
         out['cov_read_ratio'] = sum(cr) / len(cr)
+    # T9.5: logit cache — фактический гейт (тензор → float здесь, без per-step
+    # sync), σ(bias) (пол) и read_ratio (‖gate·(attn_out−h)‖/‖h‖ — «поток»:
+    # клапан может быть открыт, а вклада нет, если attn_out≈h).
+    lc = getattr(model, 'logit_cache', None)
+    if lc is not None:
+        att = getattr(lc, 'attention', None)
+        gm = getattr(att, '_last_gate_mean', None)
+        if gm is not None:
+            out['cache_gate'] = float(gm)
+        rr = getattr(att, '_last_read_ratio', None)
+        if rr is not None:
+            out['cache_read_ratio'] = float(rr)
+        try:
+            out['cache_gate_bias'] = float(torch.sigmoid(
+                att.cache_gate[-2].bias).detach())
+        except Exception:
+            pass
     head = getattr(model, 'lm_head', None)
     if head is not None:
         sp = getattr(head, '_spike_stats', None)

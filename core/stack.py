@@ -776,6 +776,14 @@ class EVAStack(nn.Module):
             _nov = None
             if pred_errs:
                 _nov = float(torch.stack(pred_errs).mean())
+            # T9.5: расписание открытия гейта (A/B-рука, ramp=0 по умолчанию).
+            # Инвариант training-only — внутри set_gate_schedule (generate.py
+            # передаёт 0-based step в eval: без guard'а обученный bias гейта
+            # затирался бы на −10 при каждой генерации — ревью R1/R2/R3).
+            self.logit_cache.set_gate_schedule(
+                step,
+                ramp=int(getattr(self.cfg, 'logit_cache_gate_ramp', 0) or 0),
+                bias_final=float(getattr(self.cfg, 'logit_cache_gate_bias_final', -2.0)))
             # M56: R1 — the previous step's logits let the cache run its
             # scheduled sampling (5% inference-mode) during training. Eval keeps
             # the h-mode (eval-isolation); the first step has no stale logits.

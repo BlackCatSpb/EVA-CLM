@@ -231,13 +231,55 @@ def run_mech(model, cfg):
         a = lc.attention
         gb = float(a.cache_gate[-2].bias.detach())
         gate = 1.0 / (1.0 + math.exp(-gb))
-        status = ('identity — CE кэш ещё не спрашивает' if gate < 1e-3 else
-                  'приоткрыт' if gate < 0.05 else 'АКТИВНО востребован')
+        # T9.5: σ(bias) — ЛОЖНЫЙ индикатор (weight-терм открывает кэш: факт
+        # 0.043 при bias −10). Печатаем фактический mean-гейт; MECHANISMS идёт
+        # раньше LIVE — при отсутствии train-forward делаем минимальный
+        # изолированный forward. Ревью R1/R2/R3: step=None (расписание не
+        # трогает bias), кэш чистится в finally (не персистится; иначе запись
+        # течёт в LIVE), 3 сид-окна для устойчивости (одно окно мигает).
+        gm = getattr(a, '_last_gate_mean', None)
+        if gm is None:
+            _snap = None
+            try:
+                if hasattr(model, 'snapshot_runtime_buffers'):
+                    _snap = model.snapshot_runtime_buffers()
+                _gms = []
+                with torch.no_grad():
+                    for _s in (11, 22, 33):
+                        torch.manual_seed(_s)
+                        _tok = torch.randint(3, int(cfg.vocab), (1, 16))
+                        _hh = model.embed(_tok)
+                        model(_hh, None, step=None, tokens=_tok)
+                        _g = getattr(a, '_last_gate_mean', None)
+                        if _g is not None:
+                            _gms.append(float(_g))
+                gm = (sum(_gms) / len(_gms)) if _gms else None
+            except Exception:
+                gm = None
+            finally:
+                try:
+                    lc.cache.clear()
+                except Exception:
+                    pass
+                if _snap is not None:
+                    try:
+                        model.restore_runtime_buffers(_snap)
+                    except Exception:
+                        pass
+        else:
+            gm = float(gm)
+        _fact = gm if gm is not None else gate
+        status = ('identity — CE кэш ещё не спрашивает' if _fact < 1e-3 else
+                  'приоткрыт' if _fact < 0.05 else 'АКТИВНО востребован')
         at = float(a.log_tau.detach().exp().clamp(0.1, 10.0))
         vs = torch.sigmoid(lc.cache.vsa_scales.detach()).tolist()
-        print(f'  cache: windows={lc.cache.max_entries} gate_bias={gb:+.2f} (σ={gate:.5f}) -> {status}')
+        _gms = f'{gm:.4f}' if gm is not None else 'n/a (нет train-forward)'
+        _rr = getattr(a, '_last_read_ratio', None)
+        _rrs = f' read_ratio={float(_rr):.4f}' if _rr is not None else ''
+        print(f'  cache: windows={lc.cache.max_entries} gate_bias={gb:+.2f} '
+              f'(σ(bias)={gate:.5f}) gate_fact={_gms}{_rrs} -> {status}')
         print(f'         attn τ={at:.2f}; inference k-фракции шкал={[round(x, 2) for x in vs]}')
-        out['cache'] = {'gate': gate, 'bias': gb}
+        out['cache'] = {'gate': gate, 'bias': gb, 'gate_fact': gm}
     ucl = getattr(model, 'concept_layer', None)
     if ucl is not None:
         nb = int(ucl._n_births); nu = int(ucl._n_updates); ns = int(ucl._n_skipped)
@@ -634,9 +676,13 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
                   f'lacuna_w={float(lm.lacuna_w):.2f} lacuna_b={float(lm.lacuna_b):.2f}')
         _lc = getattr(model, 'logit_cache', None)
         if _lc is not None:
+            # T9.5 (ревью R3): кэш НЕ персистится (списки, не буферы) ⇒
+            # h-entries=0 сразу после загрузки чекпойнта — структурно, а не
+            # «кэш ни разу не писал» (прежняя интерпретация в CONCLUSIONS).
             print(f'  [M56] logit cache: R1 steps={int(_lc._r1_steps)} '
                   f'h-entries={len(_lc.cache._h_cache)} '
-                  f'compressed={len(_lc.cache._logit_cache)}')
+                  f'compressed={len(_lc.cache._logit_cache)} '
+                  f'(кэш не персистится — 0 после загрузки структурно)')
         if hasattr(lm, 'srl_on'):
             print(f'  [M53] SRL: on={lm.srl_on} apply={getattr(lm, "srl_apply", False)} '
                   f'steps={lm.srl_steps} '

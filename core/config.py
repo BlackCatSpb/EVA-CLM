@@ -460,6 +460,17 @@ class WideBindConfig:
     logit_cache_n_heads: int = 8         # attention heads for logit cache
     logit_cache_scheduled_sampling: float = 0.05  # R1: probability of inference-mode during training (0.05 = 5%)
     logit_cache_reset_on_resume: bool = True  # R6: clear cache on resume/LR-reset
+    # T9.5 (оператор 2026-09-19): кэш — двусторонний KV-аналог (тренировка:
+    # копит последовательности и внимает; инференс: полное внимание).
+    # ДИАГНОЗ УТОЧНЁН замером: σ(bias)=4.5e-5 — ложный индикатор (weight-терм
+    # распределён по позициям; ФАКТ mean-гейт=0.043 уже на 250 шагах, |g| веса
+    # гейта≈7 — кэш открывается сам). Рампа НЕ нужна; оставлена A/B-рукой
+    # (0 = выкл, дефолт). Сила руки: при bias_final=−2 факт-гейт на рабочих
+    # входах 0.13–0.5+ (зависит от входа) — сильное вмешательство.
+    # Инвариант: расписание действует только в training (generate передаёт
+    # step в eval — guard внутри set_gate_schedule).
+    logit_cache_gate_ramp: int = 0         # 0 = выкл (A/B-рука: >0 = ramp)
+    logit_cache_gate_bias_final: float = -2.0   # финал рампы (свободный параметр руки)
     cache_horizon_tokens: int = 0     # M34: 0 = AUTO = cfg.tau_max (the cache
                                       # spans exactly the slowest VSA scale);
                                       # negative = legacy blind FIFO; >0 = fixed
