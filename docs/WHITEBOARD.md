@@ -203,6 +203,28 @@ M64.2/M64.3 — переработаны, ожидают верификацио�
 
 **Калибровка M64.12 (перед disable):** measure-only прогон → квантили `proj` по термам; eps_off/eps_on — между модой шума и реальными значениями; ожидаемо: branch/gradalign — наибольшие, bridge_conn≈0 (пол+detached probe), div/alpha_novelty ~1e-6..1e-7; если ВСЕ ниже eps_off и ни один выше eps_on — пороги неверны, disable остаётся off. **Спека A/B `bridge_conn` (M64.11):** руки {0.1, 0}, ≥2 канонических окна (2090), один ckpt/сид/стримы, откат при Δval > max(0.1, 2σ).
 
+## T9: порты внешних проектов (EVA-Ai/FCF/FCP) — реестр и A/B
+
+| ID | Правка | Статус | Доказательство | Голоса (R1/R2/R3) | Коммит |
+|---|---|---|---|---|---|
+| T9.1 | bridge hard-negative mining (`bridge_hard_neg_k`, default 0) | ✅ | `test_t9_bridge_hardneg.py` (3) | ревью | 77ea2c9 |
+| T9.2 | phantom upgrade: cycle-gate 5, coh-EMA, типы, priority, аудит-ринг | ✅ | `test_t9_phantom_upgrade.py` (5) + M58-локи | ревью | 77ea2c9 |
+| T9.3 | CovarianceMemory: 2-й момент `M=d·M+i·k kᵀ`, τ_l, chunked скан | ревью-раунд 1: REVISE×3 → правки внесены | `test_t9_cov_memory.py` (11), `test_t9_cov_block.py` (3) | R1/R2/R3 → REVISE (исполнено) | (тек.) |
+
+**Спека A/B T9.3 (cov_memory), pre-registered:**
+- **Руки:** {`cov_memory=False` (A), `cov_memory=True` (B)}, всё остальное идентично; один ckpt-ствол (трансплант `state_dict` без cov-ключей) ИЛИ два прогона с одним сидом — ветвь создаётся ПОСЛЕДНЕЙ в `__init__` (RNG-поток ствола не сдвинут; лок `test_zero_risk_init_bit_identical`).
+- **Окна:** ≥2 канонических окна (2090 шагов), один ckpt/сид/стримы; порог отката: **Δval > max(0.1, 2σ)**.
+- **Метрики (обязательные):** val/CE; `cov_read_ratio` = ‖cov_y‖/‖h‖ (среднее по слоям, телеметрия); градиенты `g_cov_k/q/read/out/wd/wi` (ценз).
+- **Фальсификатор (заранее):** если `cov_read_ratio` ~0 или монотонно затухает к 0, а val не отличается от A — ветвь мертва (класс phantom_mix), реверт без обсуждения. Если ratio стабилен, но Δval в пределах шума — механизм не нужен для этой задачи, ветвь остаётся off.
+- **Нормировка/стоимость:** read делится на √Dh (канон attention-скейла); выход low-rank r=128 (≈1.6M параметров/слой при D=2560, не D²); checkpointing при cov=True не выключать (иначе OOM на seq≥128).
+
+**Сделано (T9.3, раунд 1 ревью):**
+- **R1 (корректность):** `step()` для B>1 был сломан (broadcast B↔H) и возвращал 5-D state против 4-D forward — исправлено (нормализация state 4-D/5-D, `view(B,H,1,1)`), локи: B=2 step≡forward, handoff forward→step, legacy 5-D, None-после-тёплого, detach, τ-флор.
+- **R2 (интеграция):** warm-resume CLI был мёртв (безусловные `state=None; gs=None` затирали восстановленный конверт) — исправлено (`scripts/train.py`: объявление до resume-блока); ноутбук cell 10 затирал `gs` — исправлено (`if 'gs' not in globals()`).
+- **R3 (дизайн):** RNG-сдвиг ствола при cov=True (A/B несравним) — ветвь создаётся последней; per-head τ-модуляция (w_d/w_i per head); low-rank выход; числа из tau_api (TAU_MIN/MEM_TAU_REF-совместимо); read-usage телеметрия + фальсификатор; NaN-пути несут cov-состояние.
+- **Оператор:** на каждом eval сохраняется только `best.pt` (eval_last.pt удалён); eval каждые **440** шагов (8×55) — оба раннера (CLI+ноутбук).
+
+
 **Сделано:**
 - **M64.10:** `tests/test_m64_liveness.py` — T5/T6-замок: все каналы census'а обязаны получать ненулевой градиент через CE (конфиг активирует каналы: maturation off, phantom_after=0, bank on, wake-и). **Находка census'а:** фантомный канал — **холодный старт** (`phantom_mix` zero-init ⇒ dL/d(basis)=dL/dp@mix=0), путь пробуждения жив (градиент самого mix ненулевой, после wake все фантомные параметры живы); метрика `ph_sat = mean(tanh²)` (~0.31 — умеренно, не блокирует) добавлена в `head_telemetry`. T13-замок: в align-режиме `*_weight` — on/off (значение aux не зависит от веса; `div_weight`-комментарий исправлен). Мёртвые поля `nuclear_weight`/`gate_repulse_weight` сняты.
 - **M64.11:** analyze-чек `bridge_conn выше chance (>ln(B·L)=6.10)` (замер: 6.15 — на полу); запись: инъекция bridge выключена (readiness≈0) при стоимости O(Nq²·24) — A/B `bridge_conn=0` в M65.

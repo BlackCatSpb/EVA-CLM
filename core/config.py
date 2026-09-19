@@ -421,6 +421,22 @@ class WideBindConfig:
     # A/B: k=0 vs k=32 (pre-registered в docs/WHITEBOARD.md).
     bridge_hard_neg_k: int = 0
 
+    # ─── T9 (порт EVA-Ai/FCP): Covariance Memory ───
+    # Опциональная per-layer ветвь памяти второго порядка:
+    # M_t = d_t·M_{t−1} + i_t·k_t k_tᵀ, чтение y = W_out(W_read(qᵀ M/√Dh)).
+    # Дополняет VSA (первый момент): хранит парные корреляции k-пространства
+    # (интерференция ниже, чем у векторной суперпозиции; не нулевая).
+    # τ ветви = живой τ_l слоя (M7-refresh). W_out zero-init (rank>0: W_out_b)
+    # ⇒ старт бит-в-бит residual (включать безопасно).
+    # Дефолты под бюджет A100: Hd = heads×head_dim = 128, low-rank выход 128
+    # ⇒ ~1.6M параметров/слой при D=2560 (не D²).
+    # A/B: cov_memory False vs True (спека — docs/WHITEBOARD.md, T9).
+    cov_memory: bool = False
+    cov_memory_heads: int = 4        # головы; Hd = heads × head_dim (не D)
+    cov_memory_head_dim: int = 32
+    cov_memory_rank: int = 128       # ранг выхода (0 = полный D×D)
+    cov_memory_chunk: int = 64       # размер чанка log-space скана
+
     # bridge_lr_mult: REMOVED — bridge uses base LR (the LBG routing was
     # removed in M64.5 as a dead channel; see docs/WHITEBOARD.md)
 
@@ -517,7 +533,7 @@ class WideBindConfig:
     # Training
     max_steps: int = 500000
     log_interval: int = 100
-    eval_interval: int = 1000
+    eval_interval: int = 440   # оператор: каждые 440 = 8×55 (выравнивание с логом)
     ucl_read_scale_floor: float = 0.0   # M59: floor on sigmoid(read_scale) until
                                         # `ucl_read_scale_floor_until` (0 = off);
     # T8 role=amplitude-floor: пол на АМПЛИТУДУ чтения (не permission; после релиза

@@ -778,6 +778,25 @@ def grad_census(model) -> dict:
             continue
         g = getattr(p, 'grad', None)
         out[key] = float(g.norm()) if g is not None else 0.0
+    # T9: Covariance Memory — per-layer ветвь (не влезает в probes: ModuleList).
+    # Средние нормы по слоям; ключи отсутствуют, пока ветвь выключена.
+    # w_d/w_i/b_d/b_i — гейты затухания/записи (ревью R3: без них ценз слеп).
+    _ck, _cq, _cr, _co, _cd, _ci = [], [], [], [], [], []
+    for l in getattr(model, 'layers', []):
+        cm = getattr(l, 'cov_memory', None)
+        if cm is None:
+            continue
+        _out_p = cm.W_out_b.weight if cm.W_out_b is not None else cm.W_out.weight
+        for arr, p in ((_ck, cm.k_proj.weight), (_cq, cm.q_proj.weight),
+                       (_cr, cm.W_read.weight), (_co, _out_p),
+                       (_cd, cm.w_d), (_ci, cm.w_i)):
+            g = getattr(p, 'grad', None)
+            if g is not None:
+                arr.append(float(g.norm()))
+    for key, arr in (('g_cov_k', _ck), ('g_cov_q', _cq), ('g_cov_read', _cr),
+                     ('g_cov_out', _co), ('g_cov_wd', _cd), ('g_cov_wi', _ci)):
+        if arr:
+            out[key] = sum(arr) / len(arr)
     return out
 
 
@@ -819,6 +838,20 @@ def training_telemetry(model) -> dict:
         out['alpha_std'] = sum(als) / len(als)
     if hs:
         out['usage_H'] = sum(hs) / len(hs)
+    # T9: read-usage ковариационной ветви — ‖cov_y‖/‖h‖ (среднее по слоям).
+    # Это ВКЛАД, а не градиент (T2): falsifier A/B — ratio ~0/затухает ⇒ ветвь
+    # мертва, реверт; ratio стабилен, val не отличается ⇒ механизм не нужен.
+    cr = []
+    for l in layers:
+        cm = getattr(l, 'cov_memory', None)
+        if cm is None:
+            continue
+        yn = getattr(l, '_cov_y_norm', None)
+        hn = getattr(l, '_cov_h_norm', None)
+        if yn is not None and hn is not None:
+            cr.append(float(yn) / (float(hn) + 1e-9))
+    if cr:
+        out['cov_read_ratio'] = sum(cr) / len(cr)
     head = getattr(model, 'lm_head', None)
     if head is not None:
         sp = getattr(head, '_spike_stats', None)

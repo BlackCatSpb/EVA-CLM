@@ -365,6 +365,11 @@ def train(cfg=None, resume_path=None):
     resumed_stream_idx = 0
     _m12_rng = None
     _m12_data_rng = None
+    # B15-fix (T9-ревью R1/R2): state/gs объявляются ДО resume-блока, чтобы
+    # восстановленные stream_state/stream_gs (466-469) не затирались ниже —
+    # безусловные `state = None; gs = None` после блока убивали warm resume.
+    state = None
+    gs = None
     if resume_path == 'auto':
         # Find the checkpoint: interrupt > step_* > best (operator: the name is
         # best, as before — the M42 rolling latest.pt is gone: the poisoned
@@ -477,9 +482,8 @@ def train(cfg=None, resume_path=None):
         resumed_stream_idx = int(ckpt.get('stream_idx', 0) or 0)
     reasoning_enabled_step = ckpt.get('reasoning_enabled_step', 0) if resume_path and os.path.exists(resume_path) else 0
     
-    # State for recurrent layers
-    state = None
-    gs = None
+    # State for recurrent layers (B15: объявлен выше resume-блока; здесь НЕ
+    # сбрасывать — иначе восстановленный stream_state мёртв)
     rng = torch.Generator().manual_seed(42)
     if _m12_rng is not None:          # resume the dropout/sampling stream (M12)
         torch.set_rng_state(_m12_rng.cpu())  # map_location=device may have moved it to CUDA
@@ -871,14 +875,8 @@ def evaluate(model, streams, cfg, device, hold_n=None, step=None):
         _lc.cache.clear()
     model.restore_runtime_buffers(_rt_snap)
     model.train()
-    # T4: rolling snapshot at every eval (attribution спайков; не только best)
-    try:
-        _env_l = {'step': int(step) if step is not None else -1,
-                  'val_loss': float(total_loss / total_steps) if total_steps else float('nan'),
-                  'git_hash': GIT_HASH, 'model': model.state_dict(), 'cfg': cfg}
-        torch.save(_env_l, os.path.join(getattr(cfg, 'save_dir', 'checkpoints'), 'eval_last.pt'))
-    except Exception as _e44:
-        print(f'  [warn] eval_last.pt save failed: {_e44}')
+    # Оператор: на каждом eval сохраняется ТОЛЬКО best.pt (один файл). Rolling
+    # eval_last.pt удалён (T4-диагностика спайков больше не пишется на диск).
     # B12 (F3-01): an empty pool returned 0.0 — a PERFECT score that anchored
     # _best_val_loss=0 forever and ratcheted LR to its floor with an
     # unreachable recovery branch. NaN = 'no measurement'.
@@ -911,7 +909,7 @@ if __name__ == '__main__':
     parser.add_argument('--warmup', type=int, default=500)
     parser.add_argument('--resume', type=str, default='')
     parser.add_argument('--log-interval', type=int, default=100)
-    parser.add_argument('--eval-interval', type=int, default=1000)
+    parser.add_argument('--eval-interval', type=int, default=440)
     parser.add_argument('--save-interval', type=int, default=5000)
     parser.add_argument('--scheduler', type=str, default='mirror', choices=['cosine', 'mirror'])
     parser.add_argument('--per-layer-ls-lr', action='store_true',

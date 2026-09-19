@@ -387,19 +387,48 @@ class EVABlock(nn.Module):
 
         # Collective concept layer moved to stack.py (UnifiedConceptLayer — global)
         self.collective = None
+
+        # ─── T9: Covariance Memory (порт EVA-Ai/FCP; default off) ───
+        # Создаётся ПОСЛЕДНЕЙ: RNG-поток всех остальных параметров не сдвигается,
+        # A/B cov_memory=False vs True с одним сидом сравнимы (ревью R3).
+        # W_out zero-init (rank>0: W_out_b) ⇒ на старте бит-в-бит residual.
+        # τ обновляется в forward из живого τ_l слоя (M7-refresh).
+        self.cov_memory = None
+        if getattr(cfg, 'cov_memory', False):
+            from .cov_memory import CovarianceMemory
+            # RNG-изоляция (ревью R3): параметры ветви берутся из «теневого»
+            # потока, глобальный поток не сдвигается ⇒ модули, созданные ПОСЛЕ
+            # блоков (банк/голова/концепты), инициализируются как без ветви —
+            # A/B cov_memory=False vs True с одним сидом сравним.
+            _rng_cpu = torch.get_rng_state()
+            self.cov_memory = CovarianceMemory(
+                D=cfg.D,
+                n_heads=int(getattr(cfg, 'cov_memory_heads', 4)),
+                head_dim=int(getattr(cfg, 'cov_memory_head_dim', 32)),
+                tau=64.0,
+                chunk=int(getattr(cfg, 'cov_memory_chunk', 64)),
+                rank=int(getattr(cfg, 'cov_memory_rank', 128)))
+            torch.set_rng_state(_rng_cpu)
+        # T9 read-usage телеметрия: ‖cov_y‖/‖h‖ (только training; заполняется
+        # в forward, агрегируется training_telemetry) — «градиент ≠ вклад» (T2).
+        self._cov_y_norm: Optional[torch.Tensor] = None
+        self._cov_h_norm: Optional[torch.Tensor] = None
     
     def forward(self, h: torch.Tensor, state: Optional[Tuple] = None, global_state: Optional[torch.Tensor] = None,
                 mem2v_scale: float = 1.0, diff: Optional[torch.Tensor] = None, noise_scale: float = 0.0,
                 tanh_bias_mod: float = 1.0, pred_scale_mod: Optional[torch.Tensor] = None, spectral_mod: float = 1.0,
                 context_mem: Optional[torch.Tensor] = None, allow_write: Optional[bool] = None, tau_s: Optional[torch.Tensor] = None, step: Optional[int] = None, intent: Optional[torch.Tensor] = None,
                 salience: Optional[torch.Tensor] = None, maturity: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple]:
-        mem_state = mu_state = conv_state = traj_state = pen = None
+        mem_state = mu_state = conv_state = traj_state = pen = cov_state = None
+        cov_state_out = None
         if state is not None:
             mem_state, mu_state, conv_state = state[:3]
             if len(state) > 3:
                 traj_state = state[3]
             if len(state) > 4:
                 pen = state[4]
+            if len(state) > 5:
+                cov_state = state[5]
         B, L, D = h.shape
         NaN = float('nan')
         self._nan_at = None
@@ -415,6 +444,14 @@ class EVABlock(nn.Module):
             self._tau_norm = _tn
             if hasattr(self.bind, '_tau_norm'):
                 self.bind._tau_norm = _tn
+            if self.cov_memory is not None:
+                # T9: τ ковариационной памяти = живой τ_l слоя (единый язык,
+                # как VSA/spectral). Флор — канонический TAU_MIN (tau_api),
+                # clamp здесь явный (конструкторный clamp живую запись не ловит).
+                from .tau_api import TAU_MIN as _TAU_MIN
+                self.cov_memory.tau = max(
+                    float(self.tau_config.tau_l[self.layer_idx].detach()),
+                    float(_TAU_MIN))
             mir = getattr(self, 'mirror', None)
             if mir is not None:
                 mir._intent_alpha = _ia
@@ -426,6 +463,14 @@ class EVABlock(nn.Module):
                 self._nan_at = f'L{self.layer_idx}.{label}[{t.min():.2f},{t.max():.2f}]'
                 return True
             return False
+
+        def _nan_ret(hh):
+            # T9 (ревью R1/R2): при включённой ветви NaN-пути несут cov-состояние
+            # (не теряют его молча); при выключенной — прежний 5-кортеж.
+            _t = (_nan_mem, _nan_mem, _nan_conv, None, None)
+            if self.cov_memory is not None:
+                _t = _t + (cov_state_out,)
+            return hh * NaN, _t
 
         def _ln(x):
             # M50: overflow-safe (amax-rescale) — x^2 overflows fp32 at 1e19
@@ -476,7 +521,7 @@ class EVABlock(nn.Module):
         if conv_state_out.shape[-1] < self._conv_pad:              # B1: fixed-width carry
             conv_state_out = F.pad(conv_state_out, (self._conv_pad - conv_state_out.shape[-1], 0))
         h = h + _stream_cap(h_conv, self.branch_cap)
-        if _chk(h, 'conv'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(h, 'conv'): return _nan_ret(h)
         if self.training:
             self._cache_conv_out = h_conv  # for branch_loss (with grad)
         
@@ -508,7 +553,7 @@ class EVABlock(nn.Module):
             coherence = torch.zeros(B, L, K, device=device, dtype=h.dtype)
             new_traj = None
             traj_state_out = None
-        if _chk(bind_out, 'bind'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(bind_out, 'bind'): return _nan_ret(h)
         
         # ─── VSA Memory (multi-scale: S=4 фиксированных τ) ───
         S = self._n_scales
@@ -651,7 +696,23 @@ class EVABlock(nn.Module):
         mu_read = mu_all * self.w_q_mu
         mem_read = mem_read + mu_read * self.w_mu_mem
         mu_state_out = mu_state_out_vec.reshape(B, S * D)
-        if _chk(mem_read, 'mem_read'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(mem_read, 'mem_read'): return _nan_ret(h)
+
+        # ─── T9: Covariance Memory (порт EVA-Ai/FCP; default off) ───
+        # Второй момент (парные корреляции) поверх той же τ-лестницы; отдельная
+        # residual-ветвь с per-branch pre-LN (M31). fp32-якорь: скан в log-space.
+        cov_state_out = None
+        if self.cov_memory is not None:
+            with torch.autocast(device_type=h.device.type, enabled=False):
+                _cov_y, cov_state_out = self.cov_memory(_ln(h).float(), cov_state)
+            if self.training:
+                # T9 read-usage: ‖cov_y‖/‖h‖ — «градиент ≠ вклад» (T2); ratio
+                # агрегируется training_telemetry, falsifier для A/B.
+                with torch.no_grad():
+                    self._cov_y_norm = _cov_y.detach().float().norm()
+                    self._cov_h_norm = h.detach().float().norm()
+            h = h + _stream_cap(_cov_y.to(h.dtype), self.branch_cap)
+            if _chk(h, 'cov_mem'): return _nan_ret(h)
         
         # ─── Mirror (self-consistency: local + global) ───
         # fp32-якорь: exp/log/softmax в mirror переполняются в fp16 под AMP
@@ -667,9 +728,9 @@ class EVABlock(nn.Module):
             mlp_mod = mlp_mod.to(h.dtype) if isinstance(mlp_mod, torch.Tensor) else mlp_mod
             self._cache_mlp_mod = mlp_mod  # (B,L,G) per-expert MLP gate (gradalign)
             mem_mod = mem_mod.to(h.dtype) if isinstance(mem_mod, torch.Tensor) else mem_mod
-        if _chk(mirror, 'mirror'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
-        if _chk(mlp_mod, 'mlp_mod'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
-        if _chk(mem_mod, 'mem_mod'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(mirror, 'mirror'): return _nan_ret(h)
+        if _chk(mlp_mod, 'mlp_mod'): return _nan_ret(h)
+        if _chk(mem_mod, 'mem_mod'): return _nan_ret(h)
         
         # ─── Output (adaptive memory scale, per-group modulation) ───
         # mem_mod: per-token, per-expert gating of memory contribution
@@ -695,12 +756,12 @@ class EVABlock(nn.Module):
         enhanced = (_stream_cap(enhanced_base, self.branch_cap)
                     + _stream_cap(mirror, self.branch_cap))
         # Concept layer moved to stack.py (UnifiedConceptLayer — global, after embedding)
-        if _chk(enhanced, 'enhanced'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(enhanced, 'enhanced'): return _nan_ret(h)
         if self.training:
             self._cache_bind_out = enhanced_base  # for branch_loss (with grad)
             self._cache_mirror_out = mirror  # for branch_loss (with grad)
         h = h + enhanced
-        if _chk(h, 'post_enhanced'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(h, 'post_enhanced'): return _nan_ret(h)
 
         # ─── Variable Precision Memory ───
         if self.variable_precision:
@@ -723,7 +784,7 @@ class EVABlock(nn.Module):
             if self.training:
                 self._precision_mean = precision.mean()
 
-        if _chk(h, 'vpm'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(h, 'vpm'): return _nan_ret(h)
         
         # ─── Spectral (adaptive: diff modulates frequency shaping) ───
         # fp32-якорь: DCT-базис даёт -inf в fp16 под AMP
@@ -737,7 +798,7 @@ class EVABlock(nn.Module):
             h_dct = h_dct * self.lambda_k.float() * float(spectral_mod) * _cheb_damp
             h = h + _stream_cap((h_dct @ self.V_dct).to(h.dtype),
                                 self.branch_cap)
-        if _chk(h, 'spectral'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(h, 'spectral'): return _nan_ret(h)
         
         # ─── MLP (mirror-conditioned SwiGLU, variant A) ───
         # mirror_gate = mlp_mod (из зеркала) управляет воротами SwiGLU.
@@ -758,7 +819,7 @@ class EVABlock(nn.Module):
                 gg = grad.detach().float().reshape(grad.shape[0], grad.shape[1], _m.G, -1)
                 _blk._gradalign_tgt = gg.pow(2).sum(dim=(0, 1, 3)).sqrt()
             h_mlp.register_hook(_ga_hook)
-        if _chk(h_mlp, 'mlp_out'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(h_mlp, 'mlp_out'): return _nan_ret(h)
         with torch.no_grad():
             _mrms = torch.norm(h_mlp.detach().reshape(-1)).float()
             if self._mlp_cnt.item() == 0:
@@ -772,9 +833,14 @@ class EVABlock(nn.Module):
             self._mlp_cnt.add_(1)
             self._mlp_ratio = float((self._mlp_now_ema / (self._mlp_base_ema + 1e-12)).item())
         h = h + _stream_cap(h_mlp, self.branch_cap)
-        if _chk(h, 'post_mlp'): return h * NaN, (_nan_mem, _nan_mem, _nan_conv, None, None)
+        if _chk(h, 'post_mlp'): return _nan_ret(h)
 
-        return h, (mem_state_out, mu_state_out, conv_state_out, traj_state_out, pen)
+        _s_out = (mem_state_out, mu_state_out, conv_state_out, traj_state_out, pen)
+        if self.cov_memory is not None:
+            # T9: cov-состояние — 6-й элемент, только когда ветвь включена
+            # (default off ⇒ контракт 5-кортежа и чекпойнты не меняются).
+            _s_out = _s_out + (cov_state_out,)
+        return h, _s_out
     
     @property
     def base_parameters(self) -> List[nn.Parameter]:
