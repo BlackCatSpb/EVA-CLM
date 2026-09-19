@@ -972,6 +972,20 @@ class EVAStack(nn.Module):
         self._reasoning_buffer = None
         self._reasoning_count = None
 
+    def reset_streams(self):
+        """T7: холодный рестарт кросс-шагового стримингового состояния.
+
+        Единый контракт «новый документ ⇒ холодные стримы»: intent-поток,
+        последняя шина/салиенс и bridge-stream. Вызывать на границе документа
+        (train), на каждом eval-файле и при resume без сохранённого intent.
+        VSA-состояние живёт в передаваемых state/gs (caller ставит None).
+        """
+        self._intent_stream = None
+        self._last_bus = None
+        self._last_salience = None
+        if getattr(self, 'bridge', None) is not None:
+            self.bridge.bridge_stream.zero_()
+
     def embed_tokens(self, tokens):
         """Token indices -> D-space vectors."""
         return self.embed(tokens)

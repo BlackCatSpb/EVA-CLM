@@ -335,6 +335,8 @@ def train(cfg=None, resume_path=None):
             'stream_idx': int(stream_idx), 'offset': int(offset),
             'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
             'stream_state': _dstate(state), 'stream_gs': _dstate(gs if gs is not None else None),
+            'intent_stream': _dstate(model._intent_stream)
+                             if isinstance(getattr(model, '_intent_stream', None), list) else None,
             'cuda_rng': torch.cuda.get_rng_state() if device == 'cuda' else None,
         }
 
@@ -465,6 +467,8 @@ def train(cfg=None, resume_path=None):
             state = _tstate(ckpt['stream_state'], device)   # streaming continuity
             if ckpt.get('stream_gs') is not None:
                 gs = _tstate(ckpt['stream_gs'], device)
+        if isinstance(ckpt.get('intent_stream'), list):   # T7: тёплый resume intent-потока
+            model._intent_stream = _tstate(ckpt['intent_stream'], device)
         if ckpt.get('cuda_rng') is not None and device == 'cuda':   # B16
             torch.cuda.set_rng_state(ckpt['cuda_rng'])
         _m12_rng = ckpt.get('rng')
@@ -548,8 +552,10 @@ def train(cfg=None, resume_path=None):
                 offset = 0
                 state = None  # reset state on stream switch (document boundary)
                 gs = None
-                if model.bridge is not None:
-                    model.bridge.bridge_stream.zero_()  # reset bridge memory at document boundary
+                # T7: единый холодный рестарт стримов (intent-поток, bus/salience,
+                # bridge-stream) — раньше intent-поток молча переживал границу
+                # документа (stack предпочитает его переданному intent_state).
+                model.reset_streams()
                 if getattr(model, 'memory_bank', None) is not None:
                     model.memory_bank.reset()  # reset streaming banks at document boundary
                 if getattr(model, 'logit_cache', None) is not None:
@@ -759,6 +765,8 @@ def train(cfg=None, resume_path=None):
                         'stream_idx': int(stream_idx), 'offset': int(offset),
                         'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
                         'stream_state': _dstate(state), 'stream_gs': _dstate(gs if gs is not None else None),
+                        'intent_stream': _dstate(model._intent_stream)
+                                         if isinstance(getattr(model, '_intent_stream', None), list) else None,
                         'cuda_rng': torch.cuda.get_rng_state() if device == 'cuda' else None,  # B16
                     }, save_path)
                     print(f'  Saved best model to {save_path}')
@@ -826,6 +834,7 @@ def evaluate(model, streams, cfg, device, hold_n=None, step=None):
             model.reset_reasoning()
         if getattr(model, 'memory_bank', None) is not None:   # M33: fresh bank per doc
             model.memory_bank.reset()
+        model.reset_streams()   # T7: intent/bus/salience/bridge — холодный старт файла
         est = ogs = None
         offset = max(stream.len // 2, cfg.batch_size * cfg.seq_len + 1)
         for _ in range(max(min(100 // max(hold_n, 1),
