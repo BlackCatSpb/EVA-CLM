@@ -170,6 +170,11 @@ def run_envelope(ckpt):
           f'depth={ckpt.get("active_depth")}  reasoning_ramp={ckpt.get("reasoning_enabled_step")}')
     print(f'  data cursor: stream_idx={ckpt.get("stream_idx")} offset={ckpt.get("offset")}')
     print(f'  balancer: ema_ce={b.get("ema_ce")} align={b.get("align")}')
+    _gh = ckpt.get('git_hash', '?'); _cf = ckpt.get('cfg_fp', '?')
+    print(f'  [T8] version: git={_gh} cfg_fp={_cf}  '
+          f'(cfg tau=[{getattr(ckpt.get("cfg"), "tau_min", "?")},'
+          f'{getattr(ckpt.get("cfg"), "tau_max", "?")}]  '
+          f'— фактический τ_l и vsa-лестница печатаются в GLOBAL)')
     print(f'  rng: cpu={("rng" in present)} data_gen={("data_rng" in present)}  '
           f'optimizer: groups={ckpt.get("_opt_groups", 0)} slots={ckpt.get("_opt_slots", 0)} '
           f'(model tensors={ckpt.get("_n_tensors", 0)})')

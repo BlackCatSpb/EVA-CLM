@@ -33,6 +33,21 @@ def _git_head():
 GIT_HASH = _git_head()  # хеш на момент импорта = код, который выполняет процесс
 
 
+def _cfg_fp(cfg):
+    """T8: τ-паспорт — детерминированный отпечаток τ-релевантных полей конфига.
+
+    Закрывает класс «лог↔репо» (наблюдённый [6.59,255.98] vs [8,512]):
+    паспорт сверяет конфиг, на котором сделан чекпоинт, с текущим.
+    """
+    import hashlib, json
+    _fields = ('tau_min', 'tau_max', 'T0', 'T_delay', 'delta_t', 'gate_tau_min',
+               'gate_tau_max', 'mem_tau_ref', 'llrd_gamma', 'seq_len', 'batch_size',
+               'n_layers', 'D', 'vocab')
+    _vals = {k: getattr(cfg, k, None) for k in _fields}
+    _s = json.dumps(_vals, sort_keys=True, default=str)
+    return hashlib.sha1(_s.encode()).hexdigest()[:12]
+
+
 def _save_checkpoint_safely(state, path):
     """Write checkpoint to temp file then rename — prevents corruption on interrupt."""
     import tempfile, shutil
@@ -304,7 +319,7 @@ def train(cfg=None, resume_path=None):
         return {
             'step': int(_step), 'model': model.state_dict(),
             'code_fp': codebook_fingerprint(model),
-            'git_hash': GIT_HASH,
+            'git_hash': GIT_HASH, 'cfg_fp': _cfg_fp(cfg),
             'optimizer': optimizer.state_dict(),
             'param_names': _opt_param_names(model, optimizer),
             'scheduler': scheduler.state_dict(),

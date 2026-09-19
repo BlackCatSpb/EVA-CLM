@@ -49,8 +49,9 @@ def layer_tau_ctx(layer, tau_config=None, layer_idx: Optional[int] = None) -> Tu
 
     Falls back to the mirror's own captured τ primitives when no ``tau_config``
     is in scope (legacy standalone use). tau_norm ∈ [0,1] is the layer's
-    logarithmic position on the τ-ladder; intent_alpha = 1 − exp(−τ_l/τ_min) is
-    the gate-amplitude authority.
+    logarithmic position on the τ-ladder; intent_alpha = 1 − 1/τ_l (v3 — the
+    single EMA-horizon authority; T8: v2 1−exp(−τ_l/τ_min) убран из докстрингов
+    — остался только в diversity-α, где зарегистрирован отдельно).
     """
     m = getattr(layer, 'mirror', layer)
     li = getattr(layer, 'layer_idx', 0) or 0

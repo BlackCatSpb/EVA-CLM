@@ -17,7 +17,7 @@
   tau_norm_l = (log(τ_l) − log(τ_min)) / (log(τ_max) − log(τ_min))   ∈ [0,1]
   mat_delay_l = T0 + (1 − tau_norm_l) · T_delay
   gate_tau_l  = exp(log τ_max_gate + (log τ_min_gate − log τ_max_gate) · mat_gate_l)
-  alpha_l     = 1 − exp(−τ_l / τ_min)
+  alpha_l     = 1 − 1/τ_l                       (v3 — единый EMA-горизонт, единственная формула «α»)
   lr_mult_l   = (τ_l / τ_ref) ^ (−gamma)
   mem_tau     = перцентили τ_l для memory bank температур
 """

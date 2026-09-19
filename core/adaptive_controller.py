@@ -118,8 +118,14 @@ class AdaptiveController:
         # (i_target < e^-3+... unrepresentable via the additive b_i_base) —
         # softplus⁻¹ is now solved EXACTLY for the target, and b_i_base shifts
         # the CONTENT modulation around it, so every τ gets its own write rate.
+        # T8: λ⁻⁶ (scale-language) × τ_ref=32 (horizon-language) — a documented
+        # two-language product, registered in test_tau_lint (A/B: pick one
+        # τ_ref 32/64 for the whole path; mem_tau_ref is 64).
         c = 0.166 * 32.0
         if tau_l is None:
+            # T8: fallback replicates the config ladder 8..512 by hand — the
+            # third copy of the VSA/τ basis. Zero-risk: values match; the
+            # consolidation to one source is registered in test_tau_lint.
             lf = getattr(layer, 'layer_idx', 0) / max(getattr(layer, 'total_layers', 32) - 1, 1)
             tau_l = 8.0 + 504.0 * lf          # B3: matches the real 8..512 ladder (old 141·lf was stale)
         i_target = min(1.0, c / max(tau_l, 1e-3))

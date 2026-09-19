@@ -70,7 +70,9 @@ def _memory_attention(q: torch.Tensor, k: torch.Tensor, temp: torch.Tensor,
     # B3 (agent D): the old form multiplied raw scores by temp AND fed them to
     # hybrid_gate (which divides internally) — the two effects cancelled and
     # entropy moved 1.5% across the whole τ range: the learned temperature was
-    # decorative. One consistent τ in both branches (0.1..10 covers it):
+    # decorative. One consistent τ in both branches. T8: the clamp band
+    # [0.1, 10] is NOT τ-derived (the τ-ladder is 8..512) — it is a DECLARED
+    # calibrated band for learnable log_tau (registered in test_tau_lint).
     scores = (q @ k.T) / math.sqrt(bridge_dim)
 
     if softmax_free:
