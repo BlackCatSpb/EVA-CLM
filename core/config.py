@@ -120,6 +120,9 @@ class WideBindConfig:
     head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
     head_phantom_merge_lo: float = 0.2  # M64 (M63-C): the soft route — cosine
     # T8 role=design: порог мягкого слияния направлений (калиброван M63-C)
+    # T9 (порт EVA-Ai ConceptMiner): подтверждение требует не только conf>=0.75,
+    # но и не менее cycles_before_stable наблюдений (recurrence gate).
+    head_phantom_cycles_stable: int = 5
                                          # >= merge_lo takes a similarity-weighted
                                          # EMA + a partial confidence bump. The
                                          # hard merge=0.7 is unreachable on
@@ -410,6 +413,13 @@ class WideBindConfig:
     # back into each layer. If False the bridge still predicts next-token
     # embeddings but does not inject a spatial stream signal.
     bridge_depth: bool = True
+
+    # bridge_hard_neg_k: hard-negative mining для контрастива моста (порт FCF,
+    # T9). 0 = выключено (текущее поведение: полный пул негативов); >0 = CE по
+    # [позитив + top-K самых похожих негативов] — концентрирует градиент на
+    # различимых парах (лечит голодание: bridge_conn ≈ шанс весь прогон).
+    # A/B: k=0 vs k=32 (pre-registered в docs/WHITEBOARD.md).
+    bridge_hard_neg_k: int = 0
 
     # bridge_lr_mult: REMOVED — bridge uses base LR (the LBG routing was
     # removed in M64.5 as a dead channel; see docs/WHITEBOARD.md)

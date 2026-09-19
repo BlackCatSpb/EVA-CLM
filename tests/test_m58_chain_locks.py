@@ -102,6 +102,7 @@ def test_m55_confirmed_directions_steer_the_basis():
         d = d / d.norm()
         pb.directions[0].copy_(d)
         pb.confidence[0] = 0.9                    # confirmed
+        pb.count[0] = pb.cycles_before_stable     # T9: recurrence gate (EVA-Ai)
         pb.filled[0] = True
         b0 = m.lm_head.phantom_basis.data[0].clone()
         m.lm_head._pb_step.zero_()                # force the steering cadence

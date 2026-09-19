@@ -61,6 +61,8 @@ class SemanticBridge(nn.Module):
         # ─── Readiness по компетентности bridge (замена слепой time-рампе) ───
         self._br_r0: float = float(getattr(cfg, 'matur_bridge_r0', 0.3))
         self._br_rs: float = float(getattr(cfg, 'matur_bridge_rs', 0.2))
+        # T9: hard-negative mining контрастива (порт FCF); 0 = выключено.
+        self._hard_neg_k: int = int(getattr(cfg, 'bridge_hard_neg_k', 0) or 0)
         self.register_buffer('bridge_loss_init', torch.tensor(1.0), persistent=False)
         self.register_buffer('bridge_loss_ema', torch.tensor(1.0), persistent=False)
 
@@ -206,6 +208,10 @@ class SemanticBridge(nn.Module):
         total: torch.Tensor = torch.zeros((), device=tgt.device, dtype=torch.float32)
         n: int = 0
         layer_means: list[torch.Tensor] = []
+        # T9 (порт FCF): hard-negative mining — CE по [позитив + top-K похожих
+        # негативов] вместо полного пула; концентрирует градиент на различимых
+        # парах (лечит голодание контрастива: bridge_conn ≈ ln(N) весь прогон).
+        _hk = self._hard_neg_k
         for s_l in self._preds:
             pred: torch.Tensor = s_l[:, :-1]
             m: int = min(pred.shape[1], tgt.shape[1])
@@ -224,7 +230,16 @@ class SemanticBridge(nn.Module):
             false_neg = (tok[:, None] == tok[None, :])
             false_neg &= ~torch.eye(Nq, dtype=torch.bool, device=sims.device)
             sims = sims.masked_fill(false_neg, float('-inf'))
-            total = total + F.cross_entropy(sims, labels)
+            if 0 < _hk < Nq - 1:
+                eye = torch.eye(Nq, dtype=torch.bool, device=sims.device)
+                pos = sims.diagonal().unsqueeze(1)                  # (Nq, 1)
+                neg = sims.masked_fill(eye, float('-inf'))          # drop positive column
+                hard, _ = neg.topk(_hk, dim=1)                      # (Nq, K) hardest
+                logits = torch.cat([pos, hard], dim=1)              # (Nq, 1+K)
+                labels_h = torch.zeros(Nq, dtype=torch.long, device=sims.device)
+                total = total + F.cross_entropy(logits, labels_h)
+            else:
+                total = total + F.cross_entropy(sims, labels)
             n += 1
             layer_means.append(s_l.detach().mean(dim=(0, 1)))
         loss_val: torch.Tensor = total / max(n, 1)
