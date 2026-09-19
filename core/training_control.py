@@ -777,7 +777,10 @@ def grad_census(model) -> dict:
         if p is None:
             continue
         g = getattr(p, 'grad', None)
-        out[key] = float(g.norm()) if g is not None else 0.0
+        # T9-ревью R3: None ≠ 0.0. Проба обязана различать «параметр вне графа»
+        # (мёртвый канал/заморозка) и «градиент ровно ноль». Именно склейка
+        # 0.0 маскировала корень τ-бага (requires_grad=False от set_active_depth).
+        out[key] = float(g.norm()) if g is not None else None
     # T9: Covariance Memory — per-layer ветвь (не влезает в probes: ModuleList).
     # Средние нормы по слоям; ключи отсутствуют, пока ветвь выключена.
     # w_d/w_i/b_d/b_i — гейты затухания/записи (ревью R3: без них ценз слеп).

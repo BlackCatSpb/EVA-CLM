@@ -227,7 +227,14 @@ class EVABlock(nn.Module):
         # Keep the τ-field so the mirror can bind its gate authorities to τ
         # (intent_alpha etc.); previously the mirror always saw tau_config=None,
         # which silently disabled all τ-ties inside GroupedCognitiveMirror.
-        self.tau_config: Optional[object] = tau_config
+        # T9-ROOT-FIX: НЕ регистрировать tau_config как подмодуль блока!
+        # При обычной присваивании nn.Module регистрировал общий τ-модуль в
+        # КАЖДОМ блоке ⇒ его параметры попадали в layer.parameters() и в
+        # state_dict (layers.N.tau_config.*), и set_active_depth(k) вызывал
+        # requires_grad_(False) на _tau_dev (последний слой k..n−1) — τ-лестница
+        # замерла (g_tau_dev=0, _tau_dev=0.0000 в чекпойнтах). object.__setattr__
+        # оставляет это обычной ссылкой: владелец модуля — стек.
+        object.__setattr__(self, 'tau_config', tau_config)
         
         # Pre-LN weight
         self.register_buffer('pre_ln_w', torch.ones(cfg.D))

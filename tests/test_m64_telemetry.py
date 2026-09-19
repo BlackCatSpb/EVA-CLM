@@ -31,7 +31,9 @@ def test_grad_census_reports_the_channels():
     for k in ('g_readout', 'g_token_bias', 'g_ucl_scale', 'g_phantom_basis',
               'g_lacuna_w', 'g_log_eta', 'g_tau_dev'):   # T8: τ-пути кривизны
         assert k in gc, f'{k} missing from the census'
-        assert gc[k] >= 0.0 and torch.isfinite(torch.tensor(gc[k]))
+        # T9-ревью R3: None = «вне графа», 0.0 = «ровно ноль» — оба валидны,
+        # но None обязан быть отличим (иначе A/B живой/мёртвой лестницы слеп)
+        assert gc[k] is None or (gc[k] >= 0.0 and torch.isfinite(torch.tensor(gc[k])))
     # the readout and token_bias must be LIVE (nonzero) after a real CE backward
     assert gc['g_readout'] > 0.0, 'the readout has no gradient through the CE path'
     assert gc['g_token_bias'] > 0.0

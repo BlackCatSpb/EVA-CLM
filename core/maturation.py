@@ -75,7 +75,9 @@ class MaturationController(nn.Module):
         self.n_layers: int = int(n_layers)
         self.tau_min: float = float(tau_min)
         self.tau_max: float = float(tau_max)
-        self.tau_config = tau_config
+        # T9-ROOT-FIX: общий τ-модуль — ссылка без регистрации подмодулем
+        # (иначе его параметры дублируются в state_dict/параметр-обходах).
+        object.__setattr__(self, 'tau_config', tau_config)
         lf: torch.Tensor = torch.linspace(0.0, 1.0, self.n_layers)
         self.register_buffer("_lf", lf)
         self.register_buffer("tau_norm", torch.zeros(self.n_layers))

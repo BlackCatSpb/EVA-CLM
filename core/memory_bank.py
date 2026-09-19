@@ -408,7 +408,10 @@ class StreamingMemoryBank(nn.Module):
         self.lacuna_k: float = float(getattr(cfg, 'mem_lacuna_k', 0.5))
         self._min_write_maturation = min_write_maturation
         self._softmax_free = softmax_free
-        self.tau_config = tau_config
+        # T9-ROOT-FIX: τ-модуль — общий, владелец стек; обычное присваивание
+        # регистрировало его подмодулем банка (дубли параметров в state_dict и
+        # лишние слоты в параметр-обходах). Ссылка без регистрации.
+        object.__setattr__(self, 'tau_config', tau_config)
 
         # Compute τ-priors from tau_config if available
         if tau_config is not None:
@@ -525,7 +528,11 @@ class StreamingMemoryBank(nn.Module):
         # τ-low layers (fast, shallow): less memory injection
         # τ-high layers (slow, deep): more memory injection
         if self.tau_config is not None and hasattr(self.tau_config, 'tau_norm'):
-            tau_norm = self.tau_config.tau_norm.mean()
+            # T9-ревью R1: τ-модуль больше не подмодуль банка (не переносится
+            # его .to(device)) — приводим к device/dtype явно, иначе
+            # standalone-банк на CUDA смешает CUDA-параметр с CPU-тензором.
+            tau_norm = self.tau_config.tau_norm.mean().to(
+                device=scale.device, dtype=scale.dtype)
             scale = scale * (0.3 + 0.7 * tau_norm)
 
         # When maturation too low, bypass memory bank entirely (no-op)

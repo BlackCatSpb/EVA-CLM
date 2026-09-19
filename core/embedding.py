@@ -237,7 +237,9 @@ class PartitionedHead(nn.Module):
         codes: torch.Tensor = build_codes(cfg)
         self.K: int = codes.shape[1]
         self.register_buffer('codes', codes, persistent=False)
-        self._embed_rope = rope
+        # T9-ревью R1: rope — общий модуль (владелец — стек); не регистрировать
+        # подмодулем головы (дубль embed.rope.* в state_dict).
+        object.__setattr__(self, '_embed_rope', rope)
         
         D: int = cfg.D
         assert D % self.K == 0
@@ -264,7 +266,9 @@ class SigmoidCodedHead(nn.Module):
         codes: torch.Tensor = build_codes(cfg)
         self.K: int = codes.shape[1]
         self.S: int = cfg.code_sparsity
-        self._embed_rope = rope
+        # T9-ревью R1: rope — общий модуль (владелец — стек); не регистрировать
+        # подмодулем головы (дубль embed.rope.* в state_dict).
+        object.__setattr__(self, '_embed_rope', rope)
         self.register_buffer('codes', codes, persistent=False)
         D: int = cfg.D
         self.D: int = D
@@ -677,7 +681,9 @@ class CognitiveCodedHead(nn.Module):
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
         self._k_mirror: int = k_mirror
         self.register_buffer('codes', codes, persistent=False)
-        self._embed_rope = rope
+        # T9-ревью R1: rope — общий модуль (владелец — стек); не регистрировать
+        # подмодулем головы (дубль embed.rope.* в state_dict).
+        object.__setattr__(self, '_embed_rope', rope)
         if embed_basis is not None:
             self.readout = embed_basis
             self.tie_readout: bool = True
