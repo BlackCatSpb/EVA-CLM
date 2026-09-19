@@ -956,6 +956,28 @@ def training_telemetry(model) -> dict:
         except Exception:
             pass
     head = getattr(model, 'lm_head', None)
+    # T9.7: мета-лестница противоречий головы (4 τ-шкалы) + фактический порог
+    # наблюдения фантома (адаптивный p95). meta_lad — строка (парсер её
+    # пропускает, печать — как есть).
+    if head is not None:
+        _ml = getattr(head, '_meta_levels', None)
+        if _ml is not None:
+            try:
+                # R1/R2-ревью: отдельные float-ключи — парсер analyze (_AUX_KV)
+                # берёт из строки только первое число; строка остаётся для лога.
+                for _i, _v in enumerate(_ml):
+                    out[f'meta_l{_i}'] = float(_v)
+                out['meta_lad'] = '|'.join(f'{float(v):.3g}' for v in _ml)
+            except Exception:
+                pass
+        _mt = getattr(head, '_meta_thr', None)
+        if _mt is not None:
+            out['ph_thr'] = float(_mt)
+        _sq = getattr(head, '_sal_q', None)
+        if _sq is not None:
+            out['sal_p50'], out['sal_p90'], out['sal_p99'] = (float(_sq[0]),
+                                                              float(_sq[1]),
+                                                              float(_sq[2]))
     if head is not None:
         sp = getattr(head, '_spike_stats', None)
         if sp:

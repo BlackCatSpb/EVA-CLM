@@ -41,8 +41,11 @@ def test_gate_opens_on_a_relative_spike():
     x, h = _hq(m)
     m(h, None, step=1, tokens=x)
     g_closed = float(m.lm_head._last_lacuna_gate)
+    # T9.7: гейт читает СЕРЕДИНУ VSA-лестницы (дроп-ин к прежней ell_ema ~100);
+    # спайк симулируем тем же приёмом — вдвое занижаем рабочий уровень.
+    _mid = m.lm_head.ell_ladder.numel() // 2
     with torch.no_grad():
-        m.lm_head.ell_ema.mul_(0.5)          # simulate: the state is 2x more novel
+        m.lm_head.ell_ladder[_mid].mul_(0.5)
     m(h, None, step=2, tokens=x)
     assert float(m.lm_head._last_lacuna_rel) > 1.5
     assert float(m.lm_head._last_lacuna_gate) > 0.9, 'the gate did not open on a spike'

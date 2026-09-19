@@ -78,7 +78,7 @@ def test_head_telemetry_reports_lacuna_srl_phantoms():
     h = m.embed_tokens(x)
     out, st, gs, _ = m(h, None, step=1, tokens=x)
     with torch.no_grad():
-        m.lm_head.ell_ema.mul_(0.5)      # M55b: a relative spike makes the bank observe
+        m.lm_head.ell_ladder[-1].mul_(0.2)  # T9.7: гейт читает середину VSA-лестницы      # M55b: a relative spike makes the bank observe
     out, st, gs, _ = m(h, None, step=2, tokens=x)
     tel = m.head_telemetry()
     assert 'lacuna' in tel and tel['lacuna'] >= 0.0

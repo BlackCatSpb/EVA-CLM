@@ -315,6 +315,33 @@ class SigmoidCodedHead(nn.Module):
             # re-calibrates within ~1000 steps after a resume).
             self.lacuna_ema: float = float(getattr(cfg, 'head_lacuna_ema', 0.99))
             self.register_buffer('ell_ema', torch.zeros(1), persistent=False)
+            # T9.7 (мета-архитектура): VSA-ЛЕСТНИЦА ПРОТИВОРЕЧИЙ вместо одной
+            # EMA. 4 регистра на канонических τ-шкалах (tau_api.VSA_LADDER):
+            # спайк(8)/вспышка(32)/тренд(128)/база(512). salience_i = ell/L_i —
+            # относительная новизна на горизонте. Гейты читают разные шкалы:
+            # lacuna/temper — середина (дроп-ин к прежней EMA ~100), наблюдение
+            # фантома — адаптивный p95 по салиентности (см. ниже). Буферы
+            # non-persistent: рекалибруются на резюме (как ell_ema).
+            from . import tau_api as _tau_api
+            _lad = torch.tensor(_tau_api.VSA_LADDER, dtype=torch.float32)
+            self.register_buffer('_ladder_tau', _lad, persistent=False)
+            self.register_buffer('_ladder_decay', torch.exp(-1.0 / _lad),
+                                 persistent=False)
+            self.register_buffer('ell_ladder', torch.zeros(_lad.numel()),
+                                 persistent=False)
+            # T9.7: адаптивный порог наблюдения фантома — p95 салиентности в
+            # скользящем окне (64 observe-вызова). Константа 1.1 оказалась
+            # ВЫШЕ диапазона сигнала (lacuna_rel ~1.00-1.02) ⇒ ph_obs=0 во всех
+            # прогонах, лестница «фантом↔UCL» мертва с рождения. Порог больше
+            # не константа: он не может «застрять» выше сигнала по построению.
+            self.register_buffer('_sal_ring', torch.zeros(64), persistent=False)
+            self.register_buffer('_sal_ptr', torch.zeros(1, dtype=torch.long),
+                                 persistent=False)
+            # T9.7: телеметрия мета-лестницы (уровни + фактический порог +
+            # квантили салиентности p50/p90/p99 — для калибровки порога)
+            self._meta_levels: Optional[torch.Tensor] = None
+            self._meta_thr: Optional[float] = None
+            self._sal_q: Optional[tuple] = None
             self._noise_gen = None
             self.log_eta: nn.Parameter = nn.Parameter(torch.tensor(
                 math.log(max(float(getattr(cfg, 'head_phantom_noise', 0.05)), 1e-4))))
@@ -498,13 +525,32 @@ class SigmoidCodedHead(nn.Module):
             if float(self.ell_ema) <= 0.0:
                 # lazy init in BOTH modes (a fresh model must not saturate the
                 # gate at eval) ...
-                self.ell_ema.fill_(float(ell.detach().mean()))
+                _m0 = float(ell.detach().mean())
+                self.ell_ema.fill_(_m0)
+                self.ell_ladder.fill_(_m0)
             elif self.training:
                 # ... but the running statistic only moves in training (M55c:
                 # the M8 eval-isolation doctrine — eval must not drift it).
+                _m = ell.detach().mean()
                 self.ell_ema.mul_(self.lacuna_ema).add_(
-                    ell.detach().mean(), alpha=1.0 - self.lacuna_ema)
-        ell_rel = (ell / (self.ell_ema + 1e-6)).clamp(0.0, 5.0)
+                    _m, alpha=1.0 - self.lacuna_ema)
+                # T9.7: лестница — L_i ← d_i·L_i + (1−d_i)·mean(ell), d=exp(−1/τ_i)
+                self.ell_ladder.mul_(self._ladder_decay).add_(
+                    (1.0 - self._ladder_decay) * _m)
+        # T9.7: салиентность по шкалам (ступеньки). Гейты (lacuna/temper) читают
+        # СЕРЕДИНУ (τ≈128 — дроп-ин к прежней EMA ~100); НАБЛЮДЕНИЕ фантома —
+        # СТАРУЮ шкалу (τ=512, базовая ставка): «наблюдай, если новизна выше
+        # базы на head_phantom_thr». Ревью R1/R2/R3: quantile-порог отвергнут
+        # (дрейфует за сигналом — на стационарном входе 16 наблюдений; зависит
+        # от batch; 5% гарантированы по построению). Базовая ставка не дрейфует
+        # от спайков по построению лестницы.
+        _mid = self.ell_ladder[self.ell_ladder.numel() // 2]
+        _slow = self.ell_ladder[-1]
+        ell_rel = (ell / (_mid + 1e-6)).clamp(0.0, 5.0)
+        ell_rel_slow = (ell / (_slow + 1e-6)).clamp(0.0, 5.0)
+        if self.training:
+            # T9.7: телеметрия уровней — вне гейта observe (лестница живёт всегда)
+            self._meta_levels = self.ell_ladder.detach().clone()
         if self.training:
             _eta = torch.exp(self.log_eta).clamp(0.0, 0.2)
             e_in = e_l + _eta * self._noise_like(e_l)
@@ -532,7 +578,24 @@ class SigmoidCodedHead(nn.Module):
                 # not per-forward: the forward count per step (~8) made the
                 # slot life shorter than the confirmation time by arithmetic).
                 if int(self._pb_step.item()) % self.phantom_every == 0:
-                    _pb.observe(e_l, ell_rel, self.phantom_thr)
+                    # T9.7: порог наблюдения — СТАРАЯ шкала лестницы (базовая
+                    # ставка) × head_phantom_thr: спайк относительно базы, не
+                    # рабочего уровня. Ring — только телеметрия (p50/p90/p99
+                    # фактической салиентности), гейтинг от него не зависит.
+                    _sal = float(ell_rel_slow.detach().max())
+                    if not math.isfinite(_sal):
+                        _sal = 0.0                      # R1: NaN-яд
+                    _n = int(min(int(self._sal_ptr.item()), self._sal_ring.numel()))
+                    self._sal_ring[int(self._sal_ptr.item()) % self._sal_ring.numel()] = _sal
+                    self._sal_ptr += 1
+                    if _n >= 8:
+                        _win = self._sal_ring[:min(_n + 1, self._sal_ring.numel())].float()
+                        _q = torch.quantile(_win, torch.tensor(
+                            [0.5, 0.9, 0.99], device=_win.device, dtype=_win.dtype))
+                        self._sal_q = (float(_q[0]), float(_q[1]), float(_q[2]))
+                    _thr = self.phantom_thr
+                    _pb.observe(e_l, ell_rel_slow, _thr)
+                    self._meta_thr = _thr
                 # M58b (M55's consumer): the CONFIRMED phantom directions steer
                 # the phantom basis (a slow EMA, no_grad) — the recurring
                 # novelties become the channel's own readout instead of the
