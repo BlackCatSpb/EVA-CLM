@@ -129,6 +129,41 @@ class PartitionedEmbedding(nn.Module):
         self._rope_theta: float = getattr(cfg, 'rope_theta', 1000000.0)
         self._rope_scaling: float = getattr(cfg, 'rope_scaling', 1.0)
         self.rope: RotaryEmbedding = RotaryEmbedding(D, theta=self._rope_theta, scaling=self._rope_scaling)
+        # ─── T9.9: ГРАНИЦЫ ПРЕДЛОЖЕНИЙ КАК ПЕРВОКЛАССНЫЙ СИГНАЛ ───
+        # Оператор: «вся модель должна уметь видеть границы предложений».
+        # Раньше SEP(id=2) читал ТОЛЬКО банк памяти; ствол/голова/кэш видели
+        # плоский поток и должны были выучивать сегментацию сами (медленно).
+        # Здесь — три сигнала, идущие по ВСЕМУ стволу через эмбеддинг:
+        #   sent_eos_emb — на позициях SEP (граница);
+        #   sent_bos_emb — на первых токенах предложения (после SEP и позиция 0);
+        #   sent_pos_emb — позиция ВНУТРИ предложения (таблица, clamp).
+        # Zero-init ⇒ на старте forward бит-в-бит как раньше (контракт identity),
+        # сигнал выучивается с нуля (градиент течёт через CE).
+        self._sent_on = bool(getattr(cfg, 'sent_boundary_emb', True))
+        self._sent_pos_max = int(getattr(cfg, 'sent_pos_max', 64))
+        if self._sent_on:
+            self.sent_eos_emb = nn.Parameter(torch.zeros(D))
+            self.sent_bos_emb = nn.Parameter(torch.zeros(D))
+            self.sent_pos_emb = nn.Embedding(self._sent_pos_max, D)
+            nn.init.zeros_(self.sent_pos_emb.weight)
+
+    def sent_masks(self, tokens: torch.Tensor):
+        """T9.9: (sep_mask, bos_mask, rel_pos) из токенов (SEP id=2). rel_pos —
+        позиция внутри предложения (0 = первый токен; SEP принадлежит своему
+        предложению и имеет rel = его длину-1), bos — первый токен предложения
+        (rel == 0, включая позицию 0 — начало документа)."""
+        B, L = tokens.shape
+        idx = torch.arange(L, device=tokens.device).unsqueeze(0).expand(B, L)
+        sep = (tokens == 2)
+        # индекс последнего SEP строго ДО позиции (значения сдвигаем вправо;
+        # для SEP это предыдущий SEP, для остальных — ближайший слева)
+        _last = torch.where(sep, idx, torch.full_like(idx, -1)).cummax(dim=1).values
+        last_prev = torch.full_like(idx, -1)
+        if L > 1:
+            last_prev[:, 1:] = _last[:, :-1]
+        rel = (idx - last_prev - 1).clamp(min=0, max=self._sent_pos_max - 1)
+        bos = (rel == 0)
+        return sep, bos, rel
     
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         # Защита от токенов ≥ vocab (device-side assert в gather): фон-клип
@@ -161,6 +196,12 @@ class PartitionedEmbedding(nn.Module):
         B, L = tokens.shape
         # Внешнее произведение вместо einsum (стабильно под AMP на любых GPU)
         out: torch.Tensor = (codes.unsqueeze(-1) * self.basis.view(1, 1, self.K, -1)).reshape(B, L, -1)
+        # T9.9: сигнал границ предложений — во ВСЁМ стволе (см. __init__).
+        if self._sent_on:
+            _sep, _bos, _rel = self.sent_masks(tokens)
+            out = out + self.sent_eos_emb.view(1, 1, -1) * _sep.unsqueeze(-1).to(out.dtype)
+            out = out + self.sent_bos_emb.view(1, 1, -1) * _bos.unsqueeze(-1).to(out.dtype)
+            out = out + self.sent_pos_emb(_rel).to(out.dtype)
         # B2 (agent-A identity-path finding): RoPE-on-embedding is off by default.
         # In an attention-free trunk positions are intrinsic to the stream (conv,
         # scan read the time axis directly); the rope tag bought nothing and it

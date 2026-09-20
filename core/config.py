@@ -151,7 +151,13 @@ class WideBindConfig:
                                        # whenever either changes (see the whiteboard).
     code_dim: int = 32
     code_sparsity: int = 6
-    embed_rope: bool = False       # B2: legacy rotary tag in embedding (off: see embedding.py)
+    embed_rope: bool = False
+    # T9.9 (оператор): границы предложений как первоклассный сигнал для ВСЕЙ
+    # модели (SEP id=2 читал только банк; ствол/голова/кэш видели плоский
+    # поток). sent_eos_emb/sent_bos_emb/sent_pos_emb — zero-init (на старте
+    # forward бит-в-бит прежний), выучиваются через CE. False = откат (A/B).
+    sent_boundary_emb: bool = True
+    sent_pos_max: int = 64       # B2: legacy rotary tag in embedding (off: see embedding.py)
     logit_cache_mode: str = 'topk'   # M18: 'profile' = store z@C on write, no V-work on read
     vsa_decay_floor_k: float = 2.0   # B18 (audit 02b F2B-02): decay floor exp(-k/tau_s);
                                      # content can shorten memory down to tau_s/k, never below.
