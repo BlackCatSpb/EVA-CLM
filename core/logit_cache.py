@@ -96,6 +96,12 @@ class LogitCache(nn.Module):
         # write-time k/v encodings for the h entries (owned by LogitAttention's
         # projections, stored HERE so every cache.clear() boundary is complete)
         self._kv_h: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        # T9.9 шаг 2: SENTENCE-RING — пулированные K/V предложений (mean по
+        # токенам предложения; один вектор на предложение). Второй уровень
+        # чтения: окна = точный контент, sentence-ring = семантика («какие
+        # прошлые предложения релевантны»). Пишется на границах SEP (id=2).
+        self._kv_sent: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        self._sent_lens: List[int] = []
         self._position = 0
 
     def get_k(self, scale_idx: int = 0) -> int:
@@ -250,11 +256,30 @@ class LogitCache(nn.Module):
         """The stored write-time encodings (chronological, ≤ n entries)."""
         return self._kv_h[-n:] if n else list(self._kv_h)
 
+    def push_kv_sent(self, k: torch.Tensor, v: torch.Tensor, n_tokens: int) -> None:
+        """T9.9: запись пулированного K/V предложения (k/v: (B, 1, kv))."""
+        if self._kv_sent and (self._kv_sent[0][0].shape[0] != k.shape[0]
+                              or self._kv_sent[0][0].shape[2] != k.shape[2]):
+            self._kv_sent.clear()
+            self._sent_lens.clear()
+        self._kv_sent.append((k, v))
+        self._sent_lens.append(int(n_tokens))
+        while len(self._kv_sent) > self.max_entries:
+            self._kv_sent.pop(0)
+            if self._sent_lens:
+                self._sent_lens.pop(0)
+
+    def kv_sent_window(self, n: int = None):
+        """Пулированные K/V предложений (хронологически, ≤ n)."""
+        return self._kv_sent[-n:] if n else list(self._kv_sent)
+
     def clear(self) -> None:
         """Clear the cache."""
         self._logit_cache.clear()
         self._p_cache.clear()
         self._kv_h.clear()
+        self._kv_sent.clear()       # T9.9: sentence-ring
+        self._sent_lens.clear()
         self._h_scores.clear()          # M34
         self._h_lens.clear()
         self._l_scores.clear()
@@ -264,10 +289,12 @@ class LogitCache(nn.Module):
     def size_mb(self, training: bool = True) -> float:
         """Estimate cache size in megabytes (T9.8: трейн — K/V-кольцо)."""
         if training:
-            if not self._kv_h:
+            if not self._kv_h and not self._kv_sent:
                 return 0.0
             total_bytes = sum(k.numel() * 4 + v.numel() * 4
                               for k, v in self._kv_h)
+            total_bytes += sum(k.numel() * 4 + v.numel() * 4
+                               for k, v in self._kv_sent)
         else:
             if not self._logit_cache:
                 return 0.0
@@ -280,7 +307,7 @@ class LogitCache(nn.Module):
         # T9.8: метаданные (lens) — первичный счётчик записей (K/V пушится в том
         # же forward ПОСЛЕ store, поэтому без lens первый forward не увидел бы
         # запись и кольцо не заполнилось бы никогда); тензоры — в _kv_h.
-        return max(len(self._h_lens), len(self._kv_h),
+        return max(len(self._h_lens), len(self._kv_h), len(self._kv_sent),
                    len(self._logit_cache), len(self._p_cache))
 
 
@@ -297,8 +324,11 @@ class LogitAttention(nn.Module):
 
     def __init__(self, D: int, V: int, n_heads: int = 8,
                  max_cache_len: int = 1024, codes: torch.Tensor | None = None,
-                 sparsity: float = 1.0, kv_dim: int = 0):
+                 sparsity: float = 1.0, kv_dim: int = 0,
+                 sentence_ring: bool = True):
         super().__init__()
+        # T9.9 шаг 2: sentence-ring — второй уровень чтения (пулы предложений)
+        self.sentence_ring: bool = bool(sentence_ring)
         self.D = D
         self.V = V
         self.n_heads = n_heads
@@ -404,7 +434,8 @@ class LogitAttention(nn.Module):
 
     def forward(self, h: torch.Tensor, cache: LogitCache,
                 training: bool = True,
-                return_attention: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                return_attention: bool = False,
+                tokens: torch.Tensor | None = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Attend to cached data.
 
         Args:
@@ -441,6 +472,35 @@ class LogitAttention(nn.Module):
             K = torch.cat([p[0] for p in pairs[:-1]] + [k_new], dim=1)
             V_cache = torch.cat([p[1] for p in pairs[:-1]] + [v_new], dim=1)
             M = K.shape[1]
+            # T9.9 шаг 2: sentence-ring — пул K/V по предложениям (mean по
+            # токенам сегмента; пишутся только ЗАВЕРШЁННЫЕ сегменты — с SEP).
+            if (self.sentence_ring and tokens is not None
+                    and int(tokens.shape[1]) == int(h.shape[1])):
+                _sep = (tokens == 2)
+                # SEP принадлежит ЗАВЕРШАЕМОМУ предложению: exclusive cumsum
+                _sid = torch.cumsum(_sep.long(), dim=1) - _sep.long()   # (B, L)
+                _ns = int(_sid.max().item()) + 1
+                _kv = k_new.shape[-1]
+                _sk = torch.zeros(B, _ns, _kv, device=h.device, dtype=k_new.dtype)
+                _sv = torch.zeros_like(_sk)
+                _sk.scatter_add_(1, _sid.unsqueeze(-1).expand(-1, -1, _kv), k_new)
+                _sv.scatter_add_(1, _sid.unsqueeze(-1).expand(-1, -1, _kv), v_new)
+                _cnt = torch.zeros(B, _ns, device=h.device, dtype=k_new.dtype)
+                _cnt.scatter_add_(1, _sid, torch.ones_like(_sid, dtype=k_new.dtype))
+                _mk = _sk / _cnt.clamp_min(1.0).unsqueeze(-1)
+                _mv = _sv / _cnt.clamp_min(1.0).unsqueeze(-1)
+                # завершённые сегменты = sid НА позициях SEP (по всем батчам —
+                # union; запись (B,1,kv), чтобы чтение не рассинхронилось при B>1)
+                # R1/R2-ревью: только сегменты, завершённые во ВСЕХ батчах
+                # (иначе — нулевые/чужие пулы при B>1)
+                _valid = (_cnt > 0).all(dim=0)
+                for _s in torch.unique(_sid[_sep]).tolist():
+                    if not bool(_valid[_s]):
+                        continue
+                    cache.push_kv_sent(
+                        _mk[:, _s, :].view(B, 1, -1).detach(),
+                        _mv[:, _s, :].view(B, 1, -1).detach(),
+                        int(_cnt[:, _s].max().item()))
         else:
             # M18: 'profile' mode — cache carries write-time p; read is
             # p -> (K,V), zero V-space work. Legacy top-k path kept verbatim
@@ -462,6 +522,13 @@ class LogitAttention(nn.Module):
                 prof2 = self.bit_profile(cached)
                 K = self.k_norm(self.k_proj_l(prof2))
                 V_cache = self.v_norm(self.v_proj_l(prof2))
+
+        # T9.9 шаг 2: семантический уровень — K/V пулов предложений
+        if training and self.sentence_ring and getattr(cache, '_kv_sent', None):
+            _sp = cache.kv_sent_window(n=min(len(cache._kv_sent), 512))
+            K = torch.cat([K] + [p[0] for p in _sp], dim=1)
+            V_cache = torch.cat([V_cache] + [p[1] for p in _sp], dim=1)
+            M = K.shape[1]
 
         # position ids modulo the embedding table (the old arange(M) raised
         # IndexError once the entry-window exceeded max_cache_len at L>2)
@@ -520,12 +587,13 @@ class LogitCacheAttention(nn.Module):
                  scheduled_sampling_ratio: float = 0.05,
                  codes: torch.Tensor | None = None, sparsity: float = 1.0,
                  mode: str = 'topk', horizon_tokens: int = 0,
-                 kv_dim: int = 0):
+                 kv_dim: int = 0, sentence_ring: bool = True):
         super().__init__()
         self.cache = LogitCache(V, D, max_entries, n_scales=4,
                                 horizon_tokens=horizon_tokens)
         self.attention = LogitAttention(D, V, n_heads, codes=codes,
-                                        sparsity=sparsity, kv_dim=kv_dim)
+                                        sparsity=sparsity, kv_dim=kv_dim,
+                                        sentence_ring=sentence_ring)
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
         self.mode = str(mode)
         # M56c: how many times the R1 inference-mode actually fired (rides in
@@ -548,7 +616,8 @@ class LogitCacheAttention(nn.Module):
     def forward(self, h: torch.Tensor, logits: torch.Tensor,
                 training: bool = True,
                 use_cache: bool = True,
-                novelty: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+                novelty: Optional[float] = None,
+                tokens: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Process through cache and augment hidden state.
 
         Args:
@@ -588,7 +657,8 @@ class LogitCacheAttention(nn.Module):
         # Attend to cache
         # During scheduled sampling, attend to compressed logits (inference mode)
         h_augmented = self.attention(h, self.cache,
-                                     training=(training and not use_inference_mode))
+                                     training=(training and not use_inference_mode),
+                                     tokens=tokens)
 
         # Check for NaN
         if torch.isnan(h_augmented).any():
@@ -610,7 +680,8 @@ class LogitCacheAttention(nn.Module):
 
     def augment(self, h: torch.Tensor, novelty: Optional[float] = None,
                 logits: Optional[torch.Tensor] = None,
-                training: bool = True) -> torch.Tensor:
+                training: bool = True,
+                tokens: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Training/inference-loop integration (decision #3).
 
         Stores the current hidden state (the live newest entry keeps a
@@ -627,5 +698,5 @@ class LogitCacheAttention(nn.Module):
         falls back to the h-mode — the historical behavior.
         """
         out = self.forward(h, logits=logits, training=training, use_cache=True,
-                           novelty=novelty)[0]
+                           novelty=novelty, tokens=tokens)[0]
         return out if torch.isfinite(out).all() else h

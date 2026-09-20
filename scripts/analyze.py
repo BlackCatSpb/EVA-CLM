@@ -684,6 +684,7 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
             print(f'  [M56] logit cache: R1 steps={int(_lc._r1_steps)} '
                   f'h-lens={len(_lc.cache._h_lens)} '
                   f'kv-entries={len(_lc.cache._kv_h)} '
+                  f'sent-ring={len(getattr(_lc.cache, "_kv_sent", []))} '
                   f'compressed={len(_lc.cache._logit_cache)} '
                   f'(кэш не персистится — 0 после загрузки структурно)')
         if hasattr(lm, 'srl_on'):

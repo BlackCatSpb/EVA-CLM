@@ -139,6 +139,14 @@ class WideBindConfig:
     head_lacuna_ema: float = tau_api.period(100)  # M55b: the self-calibration EMA decay
     # (T8: каденция — период 100 наблюдений, объявлен через tau_api.period)
     head_phantom_every: int = 25  # M54: observe cadence (steps)
+    # T9.9 шаг 2: наблюдения фантома по ПУЛАМ предложений (семантические
+    # единицы; средняя салиентность сегмента vs порог). False = per-position.
+    phantom_sentence_level: bool = True
+    # T9.9 шаг 2 (опции, default off — A/B): boundary-aware VSA (мягкий сброс
+    # памяти на границах: decay *= 1 − strength·sep) и conv-стена (вход conv
+    # обнуляется на SEP). Включать только по A/B: сброс меняет семантику памяти.
+    vsa_boundary_reset: float = 0.0
+    conv_boundary_wall: bool = False
     head_phantom_decay: float = tau_api.period(100)  # M62/M64: the bank's per-OBSERVE confidence
                                        # decay (0.999 = the old per-forward value).
                                        # R1/R2 calibration: at the observed ~0.13
@@ -477,6 +485,9 @@ class WideBindConfig:
     # даёт то же для обеих сторон (трейн/инференс — одно пространство).
     # 0 = D (прежнее поведение, бит-совместимо); A/B-рука: 64 (×40 меньше).
     logit_cache_kv_dim: int = 0
+    # T9.9 шаг 2: sentence-ring — второй уровень чтения кэша (пулы предложений
+    # по SEP; окна = точный контент, ring = семантика). False = откат/A-B.
+    logit_cache_sentence_ring: bool = True
     # T9.5 (оператор 2026-09-19): кэш — двусторонний KV-аналог (тренировка:
     # копит последовательности и внимает; инференс: полное внимание).
     # ДИАГНОЗ УТОЧНЁН замером: σ(bias)=4.5e-5 — ложный индикатор (weight-терм

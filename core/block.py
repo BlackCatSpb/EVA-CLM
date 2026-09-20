@@ -215,6 +215,10 @@ class EVABlock(nn.Module):
         # per layer; healthy branches measure O(1)–O(1e3), so 1e4 is a
         # no-op until something runs away.
         self.branch_cap: float = float(getattr(cfg, 'branch_cap', 1e4))
+        # T9.9 шаг 2 (опции, default off): boundary-aware VSA (мягкий сброс на
+        # SEP) и conv-стена (обнуление входа conv на границах).
+        self._vsa_bound_reset: float = float(getattr(cfg, 'vsa_boundary_reset', 0.0) or 0.0)
+        self._conv_wall: bool = bool(getattr(cfg, 'conv_boundary_wall', False))
         # Store τ_norm for this layer (U1, U3). __init__ value is only the
         # fallback; forward refreshes it from the LIVE τ-field (audit M7:
         # _tau_dev trains during the run, a snapshot froze U3/U10/ψ at their
@@ -425,7 +429,8 @@ class EVABlock(nn.Module):
                 mem2v_scale: float = 1.0, diff: Optional[torch.Tensor] = None, noise_scale: float = 0.0,
                 tanh_bias_mod: float = 1.0, pred_scale_mod: Optional[torch.Tensor] = None, spectral_mod: float = 1.0,
                 context_mem: Optional[torch.Tensor] = None, allow_write: Optional[bool] = None, tau_s: Optional[torch.Tensor] = None, step: Optional[int] = None, intent: Optional[torch.Tensor] = None,
-                salience: Optional[torch.Tensor] = None, maturity: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple]:
+                salience: Optional[torch.Tensor] = None, maturity: Optional[torch.Tensor] = None,
+                sep_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple]:
         mem_state = mu_state = conv_state = traj_state = pen = cov_state = None
         cov_state_out = None
         if state is not None:
@@ -520,6 +525,11 @@ class EVABlock(nn.Module):
         if conv_state is None:
             conv_state = torch.zeros(B, D, self._conv_pad, device=device, dtype=h.dtype)
         h_perm = _ln(h).transpose(1, 2)
+        # T9.9 шаг 2 (опция): conv-стена — обнуление входа conv на границах
+        # предложений (SEP). Дешёвый барьер; полная per-tap маска — позже.
+        if self._conv_wall and sep_mask is not None:
+            _w = (1.0 - sep_mask.to(h_perm.dtype)).view(B, 1, L)
+            h_perm = h_perm * _w
         _full = torch.cat([conv_state, h_perm], dim=-1)
         if _full.shape[-1] < self._conv_pad + L:      # B1: defensive left-pad
             _full = F.pad(_full, (self._conv_pad + L - _full.shape[-1], 0))
@@ -617,6 +627,12 @@ class EVABlock(nn.Module):
         d_s_vec = d_s.view(1, 1, S, 1).expand(B, L, S, D)
         d_mod_vec = d_mod.unsqueeze(2).expand(-1, -1, S, -1)
         decay = (d_s_vec * d_mod_vec).clamp(min=0.01, max=1.0)  # per-scale per-channel
+        # T9.9 шаг 2 (опция): boundary-aware VSA — на границах предложений
+        # затухание усиливается (мягкий сброс памяти на SEP; strength<1 —
+        # сохраняет форму скана, в отличие от жёсткого обнуления состояния).
+        if self._vsa_bound_reset > 0.0 and sep_mask is not None:
+            _bf = (1.0 - self._vsa_bound_reset * sep_mask.to(decay.dtype))
+            decay = decay * _bf.view(B, L, 1, 1)
         # B18/B19: the ladder floor (content may shorten a scale toward
         # tau_s/k, k=2 default, 0 disables) is enforced inside _scan_chunk
         # in log space — zero extra graph memory.

@@ -200,6 +200,7 @@ class EVAStack(nn.Module):
             horizon_tokens=(int(getattr(cfg, 'cache_horizon_tokens', 0))
                             or int(cfg.tau_max)),   # M34: auto = top VSA scale
             kv_dim=int(getattr(cfg, 'logit_cache_kv_dim', 0) or 0),  # T9.8 low-rank K/V
+            sentence_ring=bool(getattr(cfg, 'logit_cache_sentence_ring', True)),  # T9.9
         ) if getattr(cfg, 'logit_cache_enabled', True) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,
@@ -267,6 +268,12 @@ class EVAStack(nn.Module):
         tau_min = tau_l[0]
         tau_max = tau_l[-1]
         tau_mid = (tau_min * tau_max).sqrt()
+        # T9.9 шаг 2: SEP-маска для boundary-aware VSA / conv-стены (опции)
+        _sep_mask = None
+        if (tokens is not None and int(tokens.shape[1]) == int(h.shape[1]) and
+                (float(getattr(self.cfg, 'vsa_boundary_reset', 0.0) or 0.0) > 0.0
+                 or bool(getattr(self.cfg, 'conv_boundary_wall', False)))):
+            _sep_mask = (tokens == 2)
         # Per-scale tau from _vsa_log_param (for block-level VSA memory, S=4)
         # U1: τ-consistent VSA scales: blend learnable base with τ-derived scaling
         _base_vsa = torch.exp(torch.cumsum(F.softplus(self._vsa_log_param), dim=0)) + 1.0  # (4,)
@@ -389,6 +396,7 @@ class EVAStack(nn.Module):
             _st = -1 if step is None else int(step)
             _head._srl_active = bool(_head.srl_on) and _st >= int(getattr(_head, 'srl_after', 0))
             _head._pb_active = _st >= int(getattr(_head, 'phantom_after', 0))
+            _head._tokens = tokens   # T9.9: sentence-level наблюдения фантома
             _head._temper_active = bool(getattr(_head, 'temper_on', False)) and _st >= int(getattr(_head, 'temper_after', 0))
             _head._bus_cap = float(getattr(self.cfg, 'head_bus_cap', 3.0) or 0.0)   # M61
             # M59: the UCL floor + the head<->UCL concept links
@@ -618,6 +626,7 @@ class EVAStack(nn.Module):
                     tanh_bias_mod, pred_scale_mod, spectral_mod,
                     context_mem, allow_write, _vsa_tau_i, step, intent_i,
                     salience=_sal, maturity=(mat_gate[i] if mat_gate is not None else None),
+                    sep_mask=_sep_mask,
                     use_reentrant=False,
                 )
                 h, s_out, layer.mirror._cached_pred_error_norm, layer.mirror._cached_hp = _out
@@ -631,7 +640,8 @@ class EVAStack(nn.Module):
                                  spectral_mod=spectral_mod,
                                  context_mem=context_mem, allow_write=allow_write,
                                   tau_s=_vsa_tau_i, step=step, intent=intent_i, salience=_sal,
-                                   maturity=(mat_gate[i] if mat_gate is not None else None))
+                                   maturity=(mat_gate[i] if mat_gate is not None else None),
+                                   sep_mask=_sep_mask)
             h = _stream_cap(h, _STREAM_CAP)   # M50: blow-up fuse (see above)
             # ─── Unified Concept Layer (global, after first layer provides hp) ───
             # Called once after first layer to read/write concepts from expert K-space.
@@ -790,7 +800,7 @@ class EVAStack(nn.Module):
             # the h-mode (eval-isolation); the first step has no stale logits.
             _lc_logits = getattr(self, '_last_logits', None) if self.training else None
             h = self.logit_cache.augment(h, novelty=_nov, logits=_lc_logits,
-                                         training=True)
+                                         training=True, tokens=tokens)
 
         return h, new_state, global_state, (reasoning_buffer, reasoning_count)
 
@@ -1339,7 +1349,7 @@ class EVAStack(nn.Module):
                              mem2v_scale, diff, noise_scale,
                              tanh_bias_mod, pred_scale_mod, spectral_mod,
                              context_mem, allow_write, tau_s, step, intent=None,
-                             salience=None, maturity=None):
+                             salience=None, maturity=None, sep_mask=None):
         """Wrapper for gradient checkpointing.
         Mirror cache is passed as explicit args/returns so checkpoint saves/restores it,
         preventing stale-cache mismatch between forward and backward recomputation."""
@@ -1350,7 +1360,8 @@ class EVAStack(nn.Module):
                              tanh_bias_mod=tanh_bias_mod, pred_scale_mod=pred_scale_mod,
                              spectral_mod=spectral_mod, context_mem=context_mem,
                              allow_write=allow_write, tau_s=tau_s, step=step,
-                             intent=intent, salience=salience, maturity=maturity)
+                             intent=intent, salience=salience, maturity=maturity,
+                             sep_mask=sep_mask)
         return h_out, s_out, layer.mirror._cached_pred_error_norm, layer.mirror._cached_hp
 
     def param_count(self):

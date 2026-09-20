@@ -213,6 +213,21 @@ class PartitionedEmbedding(nn.Module):
 
 
 
+def sentence_masks(tokens: torch.Tensor, max_pos: int = 64):
+    """T9.9: общий хелпер (sep, bos, rel) из токенов (SEP id=2). Используется
+    эмбеддингом и головой (sentence-level наблюдения фантома)."""
+    B, L = tokens.shape
+    idx = torch.arange(L, device=tokens.device).unsqueeze(0).expand(B, L)
+    sep = (tokens == 2)
+    _last = torch.where(sep, idx, torch.full_like(idx, -1)).cummax(dim=1).values
+    last_prev = torch.full_like(idx, -1)
+    if L > 1:
+        last_prev[:, 1:] = _last[:, :-1]
+    rel = (idx - last_prev - 1).clamp(min=0, max=max_pos - 1)
+    bos = (rel == 0)
+    return sep, bos, rel
+
+
 def _orth_rows(A: torch.Tensor, gain: float = 1.0) -> torch.Tensor:
     """B2 (agent-A): segment-addressed code reads need <B_i, B_k> to vanish for
     i != k — otherwise the per-bit margin (z_hi - z_lo)*||B||^2 (~0.3) drowns in
@@ -383,6 +398,11 @@ class SigmoidCodedHead(nn.Module):
             self._meta_levels: Optional[torch.Tensor] = None
             self._meta_thr: Optional[float] = None
             self._sal_q: Optional[tuple] = None
+            # T9.9 шаг 2: sentence-level наблюдения (семантические единицы) —
+            # стек кладёт токены в _tokens перед вызовом головы.
+            self._tokens: Optional[torch.Tensor] = None
+            self._phantom_sent_level: bool = bool(
+                getattr(cfg, 'phantom_sentence_level', True))
             self._noise_gen = None
             self.log_eta: nn.Parameter = nn.Parameter(torch.tensor(
                 math.log(max(float(getattr(cfg, 'head_phantom_noise', 0.05)), 1e-4))))
@@ -635,7 +655,44 @@ class SigmoidCodedHead(nn.Module):
                             [0.5, 0.9, 0.99], device=_win.device, dtype=_win.dtype))
                         self._sal_q = (float(_q[0]), float(_q[1]), float(_q[2]))
                     _thr = self.phantom_thr
-                    _pb.observe(e_l, ell_rel_slow, _thr)
+                    _obs_e, _obs_ell = e_l, ell_rel_slow
+                    _skip_obs = False
+                    # T9.9 шаг 2: sentence-level — наблюдения по ПУЛАМ предложений
+                    # (семантические единицы; сглаживает per-position хвост и
+                    # лечит порог: сравнивается средняя салиентность сегмента).
+                    # R1/R2-ревью: режим ДЕТЕРМИНИРОВАН — при наличии токенов
+                    # неполнооконные вызовы (L=1 _last_conf и пр.) не наблюдаем.
+                    if (self._phantom_sent_level and self._tokens is not None
+                            and e_l.dim() == 3
+                            and int(self._tokens.shape[1]) == int(e_l.shape[1])):
+                        _sep = (self._tokens == 2)   # нужна только граница
+                        _B, _L = self._tokens.shape
+                        _sid = torch.cumsum(_sep.long(), dim=1) - _sep.long()
+                        _ns = int(_sid.max().item()) + 1
+                        if _ns >= 1:
+                            _D = e_l.shape[-1]
+                            _se = torch.zeros(_B, _ns, _D, device=e_l.device,
+                                              dtype=e_l.dtype)
+                            _sl = torch.zeros(_B, _ns, device=e_l.device,
+                                              dtype=ell_rel_slow.dtype)
+                            _sc = torch.zeros(_B, _ns, device=e_l.device,
+                                              dtype=ell_rel_slow.dtype)
+                            # R2-ревью: пулы — только для observe (no_grad)
+                            with torch.no_grad():
+                                _se.scatter_add_(
+                                    1, _sid.unsqueeze(-1).expand(-1, -1, _D), e_l.detach())
+                                _sl.scatter_add_(
+                                    1, _sid, ell_rel_slow.squeeze(-1).detach())
+                                _sc.scatter_add_(
+                                    1, _sid, torch.ones_like(_sid, dtype=_sc.dtype))
+                                _sc = _sc.clamp_min(1.0)
+                                _e_sent = (_se / _sc.unsqueeze(-1)).reshape(-1, _D)
+                                _l_sent = (_sl / _sc).reshape(-1)
+                            _obs_e, _obs_ell = _e_sent, _l_sent
+                    elif self._phantom_sent_level and self._tokens is not None:
+                        _skip_obs = True
+                    if not _skip_obs:
+                        _pb.observe(_obs_e, _obs_ell, _thr)
                     self._meta_thr = _thr
                 # M58b (M55's consumer): the CONFIRMED phantom directions steer
                 # the phantom basis (a slow EMA, no_grad) — the recurring
