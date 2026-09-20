@@ -169,7 +169,7 @@ def load_russian_tokenizer(path=None):
 def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
              show_mind=False, continuous_learn=False, context_mem=None,
              sampler=None, rep_penalty=2.0, rep_window=5, reset_reasoning=False,
-             bias_alpha=0.0):
+             bias_alpha=0.0, base_step=0):
     """Generate tokens from prompt string."""
     model.eval()
     # B3: true autoregressive decoding → enable mirror error-damping
@@ -190,12 +190,18 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
     # Encode prompt
     encoded = tok.encode(prompt)
     prompt_tokens = encoded.ids
+    # T9.11: границы предложений как в обучении (SEP id=2) — промпт завершается
+    # границей, чтобы sent_* эмбеддинги, sentence-ring и записи банка включились.
+    if not prompt_tokens or prompt_tokens[-1] != 2:
+        prompt_tokens = prompt_tokens + [2]
     detokenize = lambda ids: tok.decode(ids, skip_special_tokens=True)
     
     tokens = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
     
     # Generate
     state = None
+    gs = None            # T9.11: кросс-слойный self-model EMA — вести между
+    intent_state = None  # шагами (как в тренировке), иначе контекст зеркала рвётся
     allow_write = continuous_learn or None
     rb = None
     
@@ -211,12 +217,14 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
             model.reset_reasoning()
             rb = None
         h = model.embed_tokens(ctx)
-        out, state, _, rb = model(h, state, adaptive=False,
+        out, state, gs, rb = model(h, state, global_state=gs, adaptive=False,
                                   context_mem=context_mem, allow_write=allow_write,
-                                  step=step,
+                                  step=base_step + step,
+                                  intent_state=intent_state,
                                   reasoning_buffer=rb[0] if rb is not None else None,
                                   reasoning_count=rb[1] if rb is not None else None,
                                   tokens=ctx)
+        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
         model.observe_output(out)  # salience of THIS step -> next step's intent
         
         if show_mind and step % 10 == 0:
@@ -365,6 +373,9 @@ if __name__ == '__main__':
     model.reasoning_scale_override = {'natural': None, 'off': 0.0, 'full': 1.0}[args.reasoning]
     
     print(f'Loaded checkpoint: step={state.get("step", "?")}  params={model.param_count():,}')
+    # T9.11: паритет режима — гейты (temper/lacuna/SRL/phantom) читают step;
+    # 0-based шаг генерации выключал бы их. Ведём от шага чекпойнта.
+    _ckpt_step = int(state.get('step', 0) or 0)
     print(f'[device] model on {next(model.parameters()).device} '
           f'(cuda_available={torch.cuda.is_available()}, requested={device})')
 
@@ -382,7 +393,8 @@ if __name__ == '__main__':
             'В начале было Слово', 'Искусственный интеллект']
         for p in prompts:
             text, dec = smart_generate(model, p, ctrl, max_new_tokens=args.tokens,
-                                       rep_window=ctrl.rep_window, no_trunc=args.no_top)
+                                       rep_window=ctrl.rep_window, no_trunc=args.no_top,
+                                       base_step=_ckpt_step)
             print(f'> {p}')
             print(text)
             print()
@@ -428,7 +440,8 @@ if __name__ == '__main__':
                         show_mind=args.show_mind, continuous_learn=args.continuous_learn,
                         context_mem=context_mem, sampler=sampler,
                         rep_penalty=args.rep_penalty, rep_window=args.rep_window,
-                        reset_reasoning=args.reset_reasoning, bias_alpha=args.bias_alpha)
+                        reset_reasoning=args.reset_reasoning, bias_alpha=args.bias_alpha,
+                        base_step=_ckpt_step)
         print(f'Prompt: {args.prompt}')
         print(f'Generated: {text}')
     else:
@@ -443,7 +456,8 @@ if __name__ == '__main__':
                             show_mind=args.show_mind, continuous_learn=args.continuous_learn,
                             context_mem=context_mem, sampler=sampler,
                             rep_penalty=args.rep_penalty, rep_window=args.rep_window,
-                            reset_reasoning=args.reset_reasoning, bias_alpha=args.bias_alpha)
+                            reset_reasoning=args.reset_reasoning, bias_alpha=args.bias_alpha,
+                            base_step=_ckpt_step)
             print(f'> {p}')
             print(text)
             print()

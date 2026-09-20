@@ -234,7 +234,7 @@ class SmartController:
 @torch.no_grad()
 def smart_generate(model, prompt, controller, max_new_tokens=64, rep_window=8,
                    set_reason=True, no_trunc=False, allow_write=None,
-                   context_mem=None, reset_reasoning=False):
+                   context_mem=None, reset_reasoning=False, base_step=0):
     """Генерация под управлением SmartController. set_reason=True -> переключает
     model.reasoning_scale_override перетокеново (по решению контроллера).
     allow_write=True -> разрешает записи в memory bank. context_mem -> внешний контекст."""
@@ -244,10 +244,15 @@ def smart_generate(model, prompt, controller, max_new_tokens=64, rep_window=8,
     tok = load_russian_tokenizer()
     det = lambda ids: tok.decode(ids, skip_special_tokens=True)
     ids = tok.encode(prompt).ids
+    # T9.11: границы предложений как в обучении (SEP id=2)
+    if not ids or ids[-1] != 2:
+        ids = ids + [2]
     device = next(model.parameters()).device
     tokens = torch.tensor(ids, dtype=torch.long, device=device)
     L = model.cfg.seq_len
     state = None
+    gs = None            # T9.11: кросс-слойный self-model EMA между шагами
+    intent_state = None
     rb = None
     head = model.lm_head
     tb = getattr(head, 'token_bias', None)
@@ -260,12 +265,14 @@ def smart_generate(model, prompt, controller, max_new_tokens=64, rep_window=8,
         if reset_reasoning:
             model.reset_reasoning()
             rb = None
-        out, state, _, rb = model(h, state, adaptive=False,
+        out, state, gs, rb = model(h, state, global_state=gs, adaptive=False,
                                   context_mem=context_mem, allow_write=allow_write,
-                                  step=step,
+                                  step=base_step + step,
+                                  intent_state=intent_state,
                                   reasoning_buffer=rb[0] if rb is not None else None,
                                   reasoning_count=rb[1] if rb is not None else None,
                                   tokens=ctx)
+        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
         model.observe_output(out)
         logits = head(out[:, -1:, :])[0, 0]
         if not torch.isfinite(logits).all():
