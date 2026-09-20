@@ -289,10 +289,11 @@ temp   = exp(log_tau).clamp(0.1,10) · (1 + 0.5·lacuna)
 
 #### 2.3.1 Хранилище и eviction
 
-- `LogitCache`: `max_entries=64`; training-кольцо `_h_cache` (полные (B,L,D), detach на store),
+- `LogitCache`: `max_entries=64`; training-кольцо — write-time K/V (`_kv_h`) + метаданные
+  `_h_lens/_h_scores`; T9.8: мёртвое h-кольцо (полные (B,L,D)) снято —
   inference-кольцо `_logit_cache` (сжатые top-k логиты), `_p_cache` (M18 profile, fp16 (B,L,K)),
   `_kv_h` (write-time k/v), `_position`, счётчики novelty/длин.
-- `store(h_or_logits, training, novelty)` (`:118-146`): training → `_h_cache.append(h.detach())`;
+- `store(h_or_logits, training, novelty)`: training → метаданные (lens/score), K/V — `push_kv`;
   иначе → `_compress(logits)` (sparse top-k, `k=get_k(0)`).
 - `_evict` (`:148-183`): hard-cap `max_entries` (FIFO), затем **M34 horizon**:
 ```

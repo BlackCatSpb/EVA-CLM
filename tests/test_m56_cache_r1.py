@@ -36,7 +36,7 @@ def _step(m, step):
 def test_r1_sampling_stores_compressed_logits():
     m = _model(logit_cache_scheduled_sampling=1.0).train()
     _step(m, 1)                               # the first step: h-mode (no stash yet)
-    assert len(m.logit_cache.cache._h_cache) >= 1
+    assert len(m.logit_cache.cache._h_lens) >= 1   # T9.8: метаданные
     _step(m, 2)                               # the stash is in -> the inference mode
     assert len(m.logit_cache.cache._logit_cache) >= 1, 'R1 never stored the compressed logits'
 
@@ -46,7 +46,7 @@ def test_r1_off_keeps_the_h_mode():
     _step(m, 1)
     _step(m, 2)
     assert len(m.logit_cache.cache._logit_cache) == 0, 'the h-mode run stored compressed logits'
-    assert len(m.logit_cache.cache._h_cache) >= 1
+    assert len(m.logit_cache.cache._h_lens) >= 1   # T9.8: метаданные
 
 
 def test_first_step_without_logits_is_safe():
@@ -64,4 +64,4 @@ def test_eval_keeps_the_h_mode_and_does_not_crash():
         x, h = _hq(m)
         out, st, gs, _ = m(h, None, step=2, tokens=x)
     assert torch.isfinite(out).all()
-    assert len(m.logit_cache.cache._h_cache) >= 1
+    assert len(m.logit_cache.cache._h_lens) >= 1   # T9.8: метаданные

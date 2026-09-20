@@ -677,10 +677,13 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
         _lc = getattr(model, 'logit_cache', None)
         if _lc is not None:
             # T9.5 (ревью R3): кэш НЕ персистится (списки, не буферы) ⇒
-            # h-entries=0 сразу после загрузки чекпойнта — структурно, а не
+            # entries=0 сразу после загрузки чекпойнта — структурно, а не
             # «кэш ни разу не писал» (прежняя интерпретация в CONCLUSIONS).
+            # T9.8 (ревью R1/R2): h-тензоры больше не хранятся — метаданные
+            # (_h_lens) первичны, кольцо живёт в _kv_h.
             print(f'  [M56] logit cache: R1 steps={int(_lc._r1_steps)} '
-                  f'h-entries={len(_lc.cache._h_cache)} '
+                  f'h-lens={len(_lc.cache._h_lens)} '
+                  f'kv-entries={len(_lc.cache._kv_h)} '
                   f'compressed={len(_lc.cache._logit_cache)} '
                   f'(кэш не персистится — 0 после загрузки структурно)')
         if hasattr(lm, 'srl_on'):

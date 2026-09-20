@@ -1,4 +1,6 @@
 """
+# DEPRECATED (T9.8): мёртв с audit #3 (max_tokens снят), retrieve(training=True)=None.
+# Оставлен как справка; актуальные локи — tests/test_t9_cache_operator.py.
 Test: Gradient flow through LogitCache (dual-mode).
 """
 import sys, os, torch

@@ -704,20 +704,18 @@ def test_logit_cache_incremental_kv_and_identity_init():
         assert (out - h.detach()).abs().max().item() < 2e-3, \
             'zero-gate must make augment ~identity at init'
         outs.append(out)
-    # (1) every stored entry and stored kv pair is detached
-    for e in a.cache._h_cache:
-        assert e.grad_fn is None, 'entries must be detached at STORE time'
+    # (1) every stored kv pair is detached (T9.8: h-тензоры не хранятся)
     for k, v in a.cache._kv_h:
         assert k.grad_fn is None and v.grad_fn is None
-    # lengths stay in lockstep with max_entries
-    assert len(a.cache._kv_h) == len(a.cache._h_cache) == 3
+    # lengths stay in lockstep with max_entries (метаданные — первичны)
+    assert len(a.cache._kv_h) == len(a.cache._h_lens) == 3
     # (2) frozen weights ⇒ incremental encoding == full re-projection
     h4 = torch.randn(1, L, D)
     with torch.no_grad():
         out_live = a.augment(h4)
     with torch.no_grad():
         full = a.attention.k_norm(a.attention.k_proj_h(
-            torch.cat([e for e in a.cache._h_cache], dim=1)))
+            torch.cat(hs, dim=1)))   # T9.8: h-тензоры не хранятся — берём входы
         last = a.attention.k_norm(a.attention.k_proj_h(h4))
         inc = torch.cat([p[0] for p in a.cache.kv_window()] + [last], dim=1)
         # stored encodings cover every window at write weights == full
@@ -732,7 +730,7 @@ def test_logit_cache_incremental_kv_and_identity_init():
         'k_proj_h must train via the live newest entry'
     # clear() must clear the kv list too
     a.cache.clear()
-    assert a.cache._kv_h == [] and a.cache._h_cache == []
+    assert a.cache._kv_h == [] and a.cache._h_lens == []
     # bias really is -10 (sigmoid≈4.5e-5), not the old zero init
     assert abs(float(a.attention.cache_gate[2].bias.detach()) + 10.0) < 1e-6
 

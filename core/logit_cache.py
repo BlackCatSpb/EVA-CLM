@@ -84,8 +84,13 @@ class LogitCache(nn.Module):
         # Initialized to 0 → sigmoid(0) = 0.5 → k = base_k/2
         self.vsa_scales = nn.Parameter(torch.zeros(n_scales))
 
-        # Storage: either h (training) or compressed logits (inference)
-        self._h_cache: List[torch.Tensor] = []  # training: store h (detached)
+        # Storage: the OPERATOR's output, not the state (T9.8):
+        #  - training: write-time K/V pairs (self._kv_h, owned by LogitAttention's
+        #    projections) + metadata (lens/scores for the M34 retention policy);
+        #  - inference: compressed logits / write-time profiles.
+        # The legacy `_h_cache` (raw h tensors, 252MB at 64×384×D) was MAINTAINED
+        # but never read by the model (`retrieve(training=True)` lived only in a
+        # dev script) — removed: the ring keeps only the metadata it needs.
         self._logit_cache: List[Dict] = []  # inference: store compressed logits
         self._p_cache: list = []   # M18: write-time profiles (B,L,K) fp16
         # write-time k/v encodings for the h entries (owned by LogitAttention's
@@ -128,24 +133,23 @@ class LogitCache(nn.Module):
                 not simply the last N.
         """
         if training:
-            # Detached at store: the same-step gradient runs through the live
-            # q/k/v path, not through retained graphs of past steps (#3).
-            self._h_cache.append(h_or_logits.detach())
+            # T9.8: тензоры h больше не хранятся (кольцо K/V — выход оператора,
+            # записанный LogitAttention.push_kv). Здесь — только метаданные
+            # (длина окна + novelty) для M34-политики удержания.
             self._h_lens.append(int(h_or_logits.shape[1]))
             self._h_scores.append(float(noveltysafe(novelty)))
-            self._evict(self._h_cache, self._h_lens, self._h_scores,
-                        kv=self._kv_h)
+            self._evict(self._h_lens, self._h_scores, kv=self._kv_h)
         else:
             # Store compressed logits (no gradient)
             compressed = self._compress(h_or_logits)
             self._logit_cache.append(compressed)
             self._l_lens.append(int(compressed['shape'][1]))
             self._l_scores.append(float(noveltysafe(novelty)))
-            self._evict(self._logit_cache, self._l_lens, self._l_scores)
+            self._evict(self._l_lens, self._l_scores)
 
         self._position += 1
 
-    def _evict(self, cache: list, lens: list, scores: list,
+    def _evict(self, lens: list, scores: list,
                kv: Optional[list] = None) -> None:
         """M34 ring policy. Hard cap first (max_entries, oldest — legacy
         semantics preserved as a ceiling), then the τ-horizon: while the span
@@ -153,18 +157,16 @@ class LogitCache(nn.Module):
         (novelty * exp(-age_tokens/tau), tau = horizon/2 — the same order as
         the VSA slow scale). The newest entry is never dropped (it carries the
         same-step gradient and the freshest context)."""
-        while len(cache) > self.max_entries:
-            cache.pop(0)
-            if lens:
-                lens.pop(0)
+        while len(lens) > self.max_entries:
+            lens.pop(0)
             if scores:
                 scores.pop(0)
-            if kv is not None and len(kv) > len(cache):
+            if kv is not None and len(kv) > len(lens):
                 kv.pop(0)
-        if self.horizon_tokens <= 0 or len(cache) <= 1:
+        if self.horizon_tokens <= 0 or len(lens) <= 1:
             return
         tau = max(self.horizon_tokens / 2.0, 1.0)
-        while sum(lens) > self.horizon_tokens and len(cache) > 1:
+        while sum(lens) > self.horizon_tokens and len(lens) > 1:
             ages, acc = [], 0
             for ln in reversed(lens):
                 ages.append(acc)
@@ -172,14 +174,13 @@ class LogitCache(nn.Module):
             ages.reverse()
             j = min(range(len(scores)),
                     key=lambda i: scores[i] * math.exp(-ages[i] / tau))
-            if j == len(cache) - 1:
+            if j == len(lens) - 1:
                 break                      # cannot evict the newest entry
-            del cache[j]
             del lens[j]
             del scores[j]
             if kv is not None and j < len(kv):
                 del kv[j]
-            while kv is not None and len(kv) > len(cache):
+            while kv is not None and len(kv) > len(lens):
                 kv.pop(0)
 
     def retrieve(self, n: int = None, training: bool = True) -> Optional[torch.Tensor]:
@@ -187,17 +188,15 @@ class LogitCache(nn.Module):
 
         Args:
             n: number of recent entries to retrieve (None = all within window)
-            training: if True, retrieve h; if False, retrieve logits
+            training: T9.8 — the h-store removed (the operator's K/V ring is the
+                training memory; `kv_window` is the read). training=True returns
+                None (kept for API compatibility with dev scripts).
 
         Returns:
-            (B, M, D) hidden states or (B, M, V) logits
+            (B, M, V) compressed logits for training=False; None for training=True
         """
         if training:
-            if not self._h_cache:
-                return None
-            entries = self._h_cache[-n:] if n else self._h_cache
-            # Every entry is already detached at store time.
-            return torch.cat(entries, dim=1)
+            return None          # T9.8: h-кольцо снято (мёртвый груз 252MB)
         else:
             if not self._logit_cache:
                 return None
@@ -243,7 +242,8 @@ class LogitCache(nn.Module):
         self._kv_h.append((k, v))
         while len(self._kv_h) > self.max_entries:
             self._kv_h.pop(0)
-        while len(self._kv_h) > len(self._h_cache):
+        # T9.8: метаданные — первичный счётчик кольца (тензоров h больше нет)
+        while len(self._kv_h) > len(self._h_lens):
             self._kv_h.pop(0)
 
     def kv_window(self, n: int = None):
@@ -252,7 +252,6 @@ class LogitCache(nn.Module):
 
     def clear(self) -> None:
         """Clear the cache."""
-        self._h_cache.clear()
         self._logit_cache.clear()
         self._p_cache.clear()
         self._kv_h.clear()
@@ -263,12 +262,12 @@ class LogitCache(nn.Module):
         self._position = 0
 
     def size_mb(self, training: bool = True) -> float:
-        """Estimate cache size in megabytes."""
+        """Estimate cache size in megabytes (T9.8: трейн — K/V-кольцо)."""
         if training:
-            if not self._h_cache:
+            if not self._kv_h:
                 return 0.0
-            # h: (B, L, D) × float32 × number of entries
-            total_bytes = sum(h.numel() * 4 for h in self._h_cache)
+            total_bytes = sum(k.numel() * 4 + v.numel() * 4
+                              for k, v in self._kv_h)
         else:
             if not self._logit_cache:
                 return 0.0
@@ -278,7 +277,11 @@ class LogitCache(nn.Module):
         return total_bytes / (1024 * 1024)
 
     def __len__(self) -> int:
-        return max(len(self._h_cache), len(self._logit_cache), len(self._p_cache))
+        # T9.8: метаданные (lens) — первичный счётчик записей (K/V пушится в том
+        # же forward ПОСЛЕ store, поэтому без lens первый forward не увидел бы
+        # запись и кольцо не заполнилось бы никогда); тензоры — в _kv_h.
+        return max(len(self._h_lens), len(self._kv_h),
+                   len(self._logit_cache), len(self._p_cache))
 
 
 class LogitAttention(nn.Module):
@@ -294,11 +297,18 @@ class LogitAttention(nn.Module):
 
     def __init__(self, D: int, V: int, n_heads: int = 8,
                  max_cache_len: int = 1024, codes: torch.Tensor | None = None,
-                 sparsity: float = 1.0):
+                 sparsity: float = 1.0, kv_dim: int = 0):
         super().__init__()
         self.D = D
         self.V = V
         self.n_heads = n_heads
+        # T9.8 (оператор): K/V-кольцо полноразмерное (2·D на токен = 504MB при
+        # 64 окнах) — при том, что «оператор» должен хранить свой ВЫХОД, а не
+        # состояние. kv_dim>0 — low-rank пространство внимания (обе стороны:
+        # трейн и инференс — одно пространство, train/inference-выравнивание);
+        # 0 = D (прежнее поведение, бит-совместимо).
+        self.kv_dim = int(kv_dim) if int(kv_dim or 0) > 0 else int(D)
+        assert self.kv_dim % n_heads == 0, f'kv_dim={self.kv_dim} % {n_heads} != 0'
         # ── audit decision #3: code-space logit projections ──
         # The old K/V/logit→hidden maps were V×D (3×65536×2560 ≈ 503M dead
         # params, contradicting README §1.1 'no big d×vocab matrices'). The
@@ -315,34 +325,33 @@ class LogitAttention(nn.Module):
             self.codes_t = None
             self.K_bits = None
         self._bit_norm = float(max(sparsity, 1e-6))
-        self.head_dim = D // n_heads
-        assert D % n_heads == 0, f"D={D} must be divisible by n_heads={n_heads}"
+        self.head_dim = self.kv_dim // n_heads
 
         # Projections for h (training mode)
-        self.q_proj = nn.Linear(D, D, bias=False)
-        self.k_proj_h = nn.Linear(D, D, bias=False)  # h → D
-        self.v_proj_h = nn.Linear(D, D, bias=False)  # h → D
+        self.q_proj = nn.Linear(D, self.kv_dim, bias=False)
+        self.k_proj_h = nn.Linear(D, self.kv_dim, bias=False)  # h → kv
+        self.v_proj_h = nn.Linear(D, self.kv_dim, bias=False)  # h → kv
 
         # Projections for the CODE-SPACE logit summary (inference mode):
-        # (…,K) → D instead of the retired V×D matrices.
+        # (…,K) → kv instead of the retired V×D matrices.
         if self.codes_t is not None:
-            self.k_proj_l = nn.Linear(self.K_bits, D, bias=False)
-            self.v_proj_l = nn.Linear(self.K_bits, D, bias=False)
+            self.k_proj_l = nn.Linear(self.K_bits, self.kv_dim, bias=False)
+            self.v_proj_l = nn.Linear(self.K_bits, self.kv_dim, bias=False)
         else:
             self.k_proj_l = None
             self.v_proj_l = None
 
-        self.out_proj = nn.Linear(D, D, bias=False)
+        self.out_proj = nn.Linear(self.kv_dim, D, bias=False)
 
         # LayerNorm for stability
-        self.k_norm = nn.LayerNorm(D)
-        self.v_norm = nn.LayerNorm(D)
+        self.k_norm = nn.LayerNorm(self.kv_dim)
+        self.v_norm = nn.LayerNorm(self.kv_dim)
 
         # Learned temperature
         self.log_tau = nn.Parameter(torch.tensor(0.0))
 
         # Position encoding
-        self.pos_enc = nn.Embedding(max_cache_len, D)
+        self.pos_enc = nn.Embedding(max_cache_len, self.kv_dim)
 
         # Gate: how much to use cache vs direct
         self.cache_gate = nn.Sequential(
@@ -471,7 +480,7 @@ class LogitAttention(nn.Module):
         attn_weights = F.softmax(attn_weights, dim=-1)
 
         attn_output = torch.matmul(attn_weights, V_cache)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, L, D)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, L, self.kv_dim)
         output = self.out_proj(attn_output)
 
         # Gate: blend cache output with direct path
@@ -510,11 +519,13 @@ class LogitCacheAttention(nn.Module):
                  max_entries: int = 64, n_heads: int = 8,
                  scheduled_sampling_ratio: float = 0.05,
                  codes: torch.Tensor | None = None, sparsity: float = 1.0,
-                 mode: str = 'topk', horizon_tokens: int = 0):
+                 mode: str = 'topk', horizon_tokens: int = 0,
+                 kv_dim: int = 0):
         super().__init__()
         self.cache = LogitCache(V, D, max_entries, n_scales=4,
                                 horizon_tokens=horizon_tokens)
-        self.attention = LogitAttention(D, V, n_heads, codes=codes, sparsity=sparsity)
+        self.attention = LogitAttention(D, V, n_heads, codes=codes,
+                                        sparsity=sparsity, kv_dim=kv_dim)
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
         self.mode = str(mode)
         # M56c: how many times the R1 inference-mode actually fired (rides in

@@ -224,7 +224,7 @@ stream-bound state written during forward, with rotation coverage:
 | 11 | `layers[*].b_i/b_d` — **Parameters** rewritten in-place each train step by AdaptiveController | stack.py:299-306 (`fill_` / `data.lerp_`) | no (params) | NO (not doc state; flagged for agent 2b) | not written (adaptive=False) |
 | 12 | `layers[*]._pi_v` power-iteration vector | losses.py:144-147 | no | NO | re-seeded only on shape change |
 | 13 | spiral/traj bind `_step_count` etc. | bind.py:397,602-603 | plain/buffers | **NO** | YES (buffers) |
-| 14 | `logit_cache` ring (`_h_cache,_logit_cache,_kv_h,_position`) | logit_cache.py:67-72,91-103 | no | YES — `clear()` covers all four (173-178) ✓ | cleared before+after ✓ |
+| 14 | `logit_cache` ring (`_h_lens,_logit_cache,_kv_h,_position`; T9.8: тензоров h нет) | logit_cache.py:67-72,91-103 | no | YES — `clear()` covers all four (173-178) ✓ | cleared before+after ✓ |
 | 15 | `reasoning_buffer/count` | stack.py:664-666 | no | YES via `reset_reasoning()` (900-903) ✓ | guarded off (234,664) ✓ |
 | 16 | `model._phase_ratio_ema/_std` | train.py:194-195,559-562 | plain lists | no (not doc state) | n/a |
 

@@ -465,6 +465,12 @@ class WideBindConfig:
     logit_cache_n_heads: int = 8         # attention heads for logit cache
     logit_cache_scheduled_sampling: float = 0.05  # R1: probability of inference-mode during training (0.05 = 5%)
     logit_cache_reset_on_resume: bool = True  # R6: clear cache on resume/LR-reset
+    # T9.8 (оператор): кэш должен хранить ВЫХОД оператора, а не состояние.
+    # Тренировочное чтение уже использует write-time K/V (audit #3), но K/V
+    # были полноразмерными (2·D на токен = 504MB при 64 окнах); low-rank kv_dim
+    # даёт то же для обеих сторон (трейн/инференс — одно пространство).
+    # 0 = D (прежнее поведение, бит-совместимо); A/B-рука: 64 (×40 меньше).
+    logit_cache_kv_dim: int = 0
     # T9.5 (оператор 2026-09-19): кэш — двусторонний KV-аналог (тренировка:
     # копит последовательности и внимает; инференс: полное внимание).
     # ДИАГНОЗ УТОЧНЁН замером: σ(bias)=4.5e-5 — ложный индикатор (weight-терм

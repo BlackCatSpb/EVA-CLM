@@ -199,6 +199,7 @@ class EVAStack(nn.Module):
                 sparsity=float(getattr(cfg, 'code_sparsity', 4)),
             horizon_tokens=(int(getattr(cfg, 'cache_horizon_tokens', 0))
                             or int(cfg.tau_max)),   # M34: auto = top VSA scale
+            kv_dim=int(getattr(cfg, 'logit_cache_kv_dim', 0) or 0),  # T9.8 low-rank K/V
         ) if getattr(cfg, 'logit_cache_enabled', True) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,

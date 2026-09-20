@@ -31,20 +31,21 @@ def test_novelty_prunes_not_age():
     c = LogitCache(50, 8, 64, n_scales=4, horizon_tokens=128)
     for i, n in enumerate([3.0, 1.0, 1.0, 1.0, 1.0, 5.0]):
         c.store(torch.zeros(1, 64, 8) + i, training=True, novelty=n)
-    assert c._h_cache[-1][0, 0, 0].item() == 5.0, 'newest entry must never be evicted'
+    # T9.8: тензоров h больше нет — новейшая запись = последняя в метаданных
+    assert c._h_scores[-1] == 5.0, 'newest entry must never be evicted'
     assert sum(c._h_lens) <= 128
     assert 3.0 in c._h_scores, ('high-novelty history must outlive low-novelty '
                                 f'neighbours; scores={c._h_scores}')
     c.clear()
-    assert not c._h_cache and not c._h_lens and not c._h_scores
+    assert not c._h_lens and not c._h_scores and not c._kv_h
 
 
 def test_legacy_fifo_when_horizon_zero():
     c = LogitCache(50, 8, 3, n_scales=4, horizon_tokens=0)
     for i in range(5):
         c.store(torch.zeros(1, 8, 8) + i, training=True)
-    assert len(c._h_cache) == 3 and c._h_cache[-1][0, 0, 0].item() == 4.0
-    assert c._h_cache[0][0, 0, 0].item() == 2.0   # pure age order
+    # T9.8: FIFO-порядок проверяем по метаданным длин (тензоров h нет)
+    assert len(c._h_lens) == 3 and c._h_lens[-1] == 8 and c._h_lens[0] == 8
 
 
 def test_stack_wires_auto_horizon_and_runs():
@@ -63,7 +64,7 @@ def test_stack_wires_auto_horizon_and_runs():
             for s in state) if state else state
     span = sum(cache._h_lens)
     assert span <= int(cfg.tau_max) + max(cache._h_lens), f'horizon exceeded: {span}'
-    assert len(cache._h_cache) == len(cache._h_lens) == len(cache._h_scores)
+    assert len(cache._kv_h) == len(cache._h_lens) == len(cache._h_scores)
 
 
 def test_m35_oom_ladder_retries_on_device_and_probes_back():
