@@ -950,6 +950,12 @@ def training_telemetry(model) -> dict:
         rr = getattr(att, '_last_read_ratio', None)
         if rr is not None:
             out['cache_read_ratio'] = float(rr)
+        # T9.15: масса внимания по шкалам многоразрешающего кэша — «читает ли
+        # модель coarse» (пусто/0 — рука выключена). Формат: "0.62|0.21|..."
+        _mm = getattr(att, '_last_ms_mass', None)
+        if _mm is not None and torch.is_tensor(_mm) and _mm.numel():
+            out['cache_ms_mass'] = '|'.join(
+                f'{float(v):.4f}' for v in _mm.detach().cpu().flatten())
         try:
             out['cache_gate_bias'] = float(torch.sigmoid(
                 att.cache_gate[-2].bias).detach())
