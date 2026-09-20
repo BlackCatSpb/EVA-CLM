@@ -391,11 +391,6 @@ class WideBindConfig:
     # mirror-gated MLP modulation (mlp_mod) actually scales the SwiGLU gate and
     # mod_scale_mlp receives a CE-gradient path (can open/close). 0 disables.
     mlp_gate_b_init: float = 0.25
-    # DepthController cap (0 = full depth = n_layers). The controller only OPENS
-    # layers on a val plateau; the 2026-09-20 run opened 24/24 on a rising val
-    # (slope +0.158 within 1 sigma) and the next eval collapsed (8.65 -> 10.59).
-    # Set e.g. 20 to cap the ladder at the last healthy depth.
-    depth_max: int = 0
     # Per-depth MLP gradient boost (fix for vanishing gradient to deep MLP):
     # scales MLP gradient by exp(mlp_depth_lr_exp * layer_idx). 0 = disabled.
     # Calibrated to the real (trained) gradient profile: ~13x collapse L0->mid
