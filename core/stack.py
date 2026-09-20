@@ -201,6 +201,10 @@ class EVAStack(nn.Module):
                             or int(cfg.tau_max)),   # M34: auto = top VSA scale
             kv_dim=int(getattr(cfg, 'logit_cache_kv_dim', 0) or 0),  # T9.8 low-rank K/V
             sentence_ring=bool(getattr(cfg, 'logit_cache_sentence_ring', True)),  # T9.9
+            ms_spans=tuple(int(_s) for _s in str(            # T9.15: многоразрешающий
+                getattr(cfg, 'logit_cache_ms_spans', '') or '').replace(' ', '')
+                .split(',') if _s.isdigit() and int(_s) > 0),
+            ms_max=int(getattr(cfg, 'logit_cache_ms_max', 16) or 16),
         ) if getattr(cfg, 'logit_cache_enabled', True) else None
     
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,

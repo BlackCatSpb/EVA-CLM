@@ -55,7 +55,8 @@ class LogitCache(nn.Module):
 
     def __init__(self, V: int, D: int, max_entries: int = 64,
                  n_scales: int = 4, device: torch.device = torch.device('cpu'),
-                 horizon_tokens: int = 0):
+                 horizon_tokens: int = 0, ms_spans: tuple = (),
+                 ms_max: int = 16):
         super().__init__()
         self.V = V
         self.D = D
@@ -102,6 +103,14 @@ class LogitCache(nn.Module):
         # прошлые предложения релевантны»). Пишется на границах SEP (id=2).
         self._kv_sent: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self._sent_lens: List[int] = []
+        # T9.15: многоразрешающий уровень — пулы K/V на фиксированных шкалах τ
+        # (по кольцу на шкалу; порядок — хронологический, как у ring/sent).
+        self.ms_spans: Tuple[int, ...] = tuple(
+            int(s) for s in (ms_spans or ()) if int(s) > 0)
+        self.ms_max: int = int(ms_max)
+        self._kv_ms: Dict[int, List[Tuple[torch.Tensor, torch.Tensor]]] = {
+            s: [] for s in self.ms_spans}
+        self._ms_lens: Dict[int, List[int]] = {s: [] for s in self.ms_spans}
         self._position = 0
 
     def get_k(self, scale_idx: int = 0) -> int:
@@ -273,6 +282,34 @@ class LogitCache(nn.Module):
         """Пулированные K/V предложений (хронологически, ≤ n)."""
         return self._kv_sent[-n:] if n else list(self._kv_sent)
 
+    def push_kv_ms(self, span: int, k: torch.Tensor, v: torch.Tensor,
+                   n_tokens: int) -> None:
+        """T9.15: запись пулированного K/V шкалы (k/v: (B, 1, kv)).
+
+        Аналогично sentence-ring: при смене B/kv кольцо пересобирается, а не
+        перепроецируется (кодировки привязаны к форме)."""
+        ring = self._kv_ms.get(int(span))
+        if ring is None:
+            return
+        if ring and (ring[0][0].shape[0] != k.shape[0]
+                     or ring[0][0].shape[2] != k.shape[2]):
+            ring.clear()
+            self._ms_lens[int(span)].clear()
+        ring.append((k, v))
+        self._ms_lens[int(span)].append(int(n_tokens))
+        _cap = self.ms_max if self.ms_max > 0 else self.max_entries
+        while len(ring) > _cap:
+            ring.pop(0)
+            if self._ms_lens[int(span)]:
+                self._ms_lens[int(span)].pop(0)
+
+    def kv_ms_window(self, span: int, n: int = None):
+        """Пулы K/V шкалы (хронологически, ≤ n)."""
+        ring = self._kv_ms.get(int(span))
+        if not ring:
+            return []
+        return ring[-n:] if n else list(ring)
+
     def clear(self) -> None:
         """Clear the cache."""
         self._logit_cache.clear()
@@ -280,6 +317,9 @@ class LogitCache(nn.Module):
         self._kv_h.clear()
         self._kv_sent.clear()       # T9.9: sentence-ring
         self._sent_lens.clear()
+        for _s in getattr(self, '_kv_ms', {}):       # T9.15: multi-scale rings
+            self._kv_ms[_s].clear()
+            self._ms_lens[_s].clear()
         self._h_scores.clear()          # M34
         self._h_lens.clear()
         self._l_scores.clear()
@@ -289,12 +329,16 @@ class LogitCache(nn.Module):
     def size_mb(self, training: bool = True) -> float:
         """Estimate cache size in megabytes (T9.8: трейн — K/V-кольцо)."""
         if training:
-            if not self._kv_h and not self._kv_sent:
+            if not self._kv_h and not self._kv_sent and not any(
+                    self._kv_ms.values()):
                 return 0.0
             total_bytes = sum(k.numel() * 4 + v.numel() * 4
                               for k, v in self._kv_h)
             total_bytes += sum(k.numel() * 4 + v.numel() * 4
                                for k, v in self._kv_sent)
+            for _ring in self._kv_ms.values():      # T9.15
+                total_bytes += sum(k.numel() * 4 + v.numel() * 4
+                                   for k, v in _ring)
         else:
             if not self._logit_cache:
                 return 0.0
@@ -325,10 +369,13 @@ class LogitAttention(nn.Module):
     def __init__(self, D: int, V: int, n_heads: int = 8,
                  max_cache_len: int = 1024, codes: torch.Tensor | None = None,
                  sparsity: float = 1.0, kv_dim: int = 0,
-                 sentence_ring: bool = True):
+                 sentence_ring: bool = True, ms_spans: tuple = ()):
         super().__init__()
         # T9.9 шаг 2: sentence-ring — второй уровень чтения (пулы предложений)
         self.sentence_ring: bool = bool(sentence_ring)
+        # T9.15: многоразрешающий уровень — фиксированные шкалы τ
+        self.ms_spans: Tuple[int, ...] = tuple(
+            sorted(int(s) for s in (ms_spans or ()) if int(s) > 0))
         self.D = D
         self.V = V
         self.n_heads = n_heads
@@ -402,6 +449,21 @@ class LogitAttention(nn.Module):
         self._last_gate_mean: Optional[torch.Tensor] = None
         self._last_read_ratio: Optional[torch.Tensor] = None
 
+        # T9.15: level-эмбеддинги (0 = окно/база, 1..k = шкалы) — внимание
+        # должно различать масштаб записи; и онлайн-аккумуляторы пер-шкальных
+        # пулов (bottom-up: атомы 8 → ×4 → …). Аккумуляторы не в state_dict —
+        # эфемерны между шагами (чекпойнт их не несёт; после resume пулы
+        # набираются заново — как sentence-ring).
+        if self.ms_spans:
+            self.ms_emb = nn.Embedding(len(self.ms_spans) + 1, self.kv_dim)
+            nn.init.normal_(self.ms_emb.weight, std=0.02)
+        else:
+            self.ms_emb = None
+        self._ms_acc_k: Dict[int, torch.Tensor] = {}
+        self._ms_acc_v: Dict[int, torch.Tensor] = {}
+        self._ms_acc_n: Dict[int, int] = {}
+        self._last_ms_mass: Optional[torch.Tensor] = None
+
     def set_gate_schedule(self, step: Optional[int], ramp: int = 0,
                           bias_final: float = -2.0) -> None:
         """T9.5: расписание открытия гейта (A/B-рука; ramp=0 — выкл).
@@ -431,6 +493,61 @@ class LogitAttention(nn.Module):
         """Per-bit evidence of a logit field, in the head's sparse block code.
         (…,V) → (…,K); fixed codebook matmul, O(1) parameters, tanh-bounded."""
         return torch.tanh(logits / 10.0) @ self.codes_t / self._bit_norm
+
+    # ── T9.15: сборка многоразрешающих пулов (bottom-up от атомов) ──
+    def _push_multiscale(self, cache: 'LogitCache', k_new: torch.Tensor,
+                         v_new: torch.Tensor) -> None:
+        """Атомы младшей шкалы = непересекающиеся блоки span[0] внутри окна
+        (окно кратно 8, поэтому локальное выравнивание = глобальному при
+        stride окна, кратном span[0]). Старшие шкалы набираются из 4 младших
+        пулов МЕЖДУ шагами (аккумуляторы); пишутся только завершённые —
+        причинность сохраняется на уровне пулов."""
+        spans = self.ms_spans
+        if not spans:
+            return
+        B, L, kv = k_new.shape
+        s0 = spans[0]
+        nb = L // s0
+        if nb <= 0:
+            return
+        _ak = k_new[:, :nb * s0].reshape(B, nb, s0, kv).mean(dim=2)
+        _av = v_new[:, :nb * s0].reshape(B, nb, s0, kv).mean(dim=2)
+        for b in range(nb):
+            self._ms_feed(cache, s0, _ak[:, b], _av[:, b], s0)
+
+    def _ms_feed(self, cache: 'LogitCache', span: int, k1: torch.Tensor,
+                 v1: torch.Tensor, n_tok: int) -> None:
+        """Накопить единицу (k1/v1: (B, kv)) в шкалу span; при заполнении —
+        пул (детached), запись в кольцо и передача наверх (×4)."""
+        spans = self.ms_spans
+        _k = k1.unsqueeze(1)
+        _v = v1.unsqueeze(1)
+        cur = self._ms_acc_k.get(span)
+        if cur is None or cur.shape != _k.shape or cur.device != _k.device:
+            self._ms_acc_k[span] = _k.detach()
+            self._ms_acc_v[span] = _v.detach()
+            self._ms_acc_n[span] = int(n_tok)
+        else:
+            self._ms_acc_k[span] = cur + _k.detach()
+            self._ms_acc_v[span] = self._ms_acc_v[span] + _v.detach()
+            self._ms_acc_n[span] = self._ms_acc_n.get(span, 0) + int(n_tok)
+        if self._ms_acc_n[span] < span:
+            return
+        cnt = max(1, self._ms_acc_n[span])
+        # пул = среднее ЕДИНИЦ уровня (не токенов): атом уровня 0 — 1 единица,
+        # старшие — span / (предыдущая шкала) единиц (×4)
+        _i = spans.index(span)
+        _unit_tok = spans[_i - 1] if _i > 0 else span
+        _units = max(1, cnt // max(1, _unit_tok))
+        mk = (self._ms_acc_k[span] / _units).detach()
+        mv = (self._ms_acc_v[span] / _units).detach()
+        self._ms_acc_k[span] = None
+        self._ms_acc_v[span] = None
+        self._ms_acc_n[span] = 0
+        cache.push_kv_ms(span, mk, mv, cnt)
+        if _i + 1 < len(spans):
+            self._ms_feed(cache, spans[_i + 1], mk.squeeze(1), mv.squeeze(1),
+                          cnt)
 
     def forward(self, h: torch.Tensor, cache: LogitCache,
                 training: bool = True,
@@ -501,6 +618,9 @@ class LogitAttention(nn.Module):
                         _mk[:, _s, :].view(B, 1, -1).detach(),
                         _mv[:, _s, :].view(B, 1, -1).detach(),
                         int(_cnt[:, _s].max().item()))
+            # T9.15: многоразрешающие пулы (сборка снизу вверх от атомов)
+            if self.ms_spans:
+                self._push_multiscale(cache, k_new, v_new)
         else:
             # M18: 'profile' mode — cache carries write-time p; read is
             # p -> (K,V), zero V-space work. Legacy top-k path kept verbatim
@@ -530,11 +650,32 @@ class LogitAttention(nn.Module):
             V_cache = torch.cat([V_cache] + [p[1] for p in _sp], dim=1)
             M = K.shape[1]
 
+        # T9.15: многоразрешающий уровень — пулы шкал + обучаемые level-теги.
+        # Модель сама выбирает разрешение: внимание видит и окна, и пулы, а
+        # уровень записи помечен (ms_emb), поэтому «насколько доверять coarse»
+        # — свободный параметр модели, а не наш.
+        _base_M = M
+        _ms_ids: List[int] = []
+        if training and self.ms_spans and getattr(cache, '_kv_ms', None):
+            for _j, _s in enumerate(self.ms_spans):
+                _ring = cache.kv_ms_window(_s, n=min(len(cache._kv_ms[_s]), 512))
+                if not _ring:
+                    continue
+                K = torch.cat([K] + [p[0] for p in _ring], dim=1)
+                V_cache = torch.cat([V_cache] + [p[1] for p in _ring], dim=1)
+                _ms_ids += [_j + 1] * len(_ring)
+            M = K.shape[1]
+
         # position ids modulo the embedding table (the old arange(M) raised
         # IndexError once the entry-window exceeded max_cache_len at L>2)
         positions = (torch.arange(M, device=h.device)
                      % self.pos_enc.num_embeddings).unsqueeze(0).expand(B, -1)
         K = K + self.pos_enc(positions)
+        if self.ms_emb is not None and _ms_ids:
+            _lvl = torch.zeros(M, dtype=torch.long, device=h.device)
+            _lvl[_base_M:] = torch.tensor(_ms_ids, dtype=torch.long,
+                                          device=h.device)
+            K = K + self.ms_emb(_lvl).unsqueeze(0)
 
         # Multi-head attention
         Q = Q.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
@@ -561,6 +702,20 @@ class LogitAttention(nn.Module):
                 self._last_gate_mean = gate.detach().mean()
                 _d = (gate * (output - h)).detach()
                 self._last_read_ratio = (_d.norm() / (h.detach().norm() + 1e-9))
+                # T9.15: доля внимания по уровням (0=база, 1..k=шкалы) —
+                # «читает ли модель coarse» видно в телеметрии.
+                if self.ms_emb is not None and _ms_ids:
+                    _aw = attn_weights.mean(dim=1)              # (B, L, M)
+                    _tot = _aw.sum().clamp_min(1e-9)
+                    _mass, _off = [], _base_M
+                    for _j, _s in enumerate(self.ms_spans):
+                        _n = _ms_ids.count(_j + 1)
+                        if _n:
+                            _mass.append((_aw[..., _off:_off + _n].sum()
+                                          / _tot).detach())
+                            _off += _n
+                    if _mass:
+                        self._last_ms_mass = torch.stack(_mass)
         output = gate * output + (1 - gate) * h
 
         if return_attention:
@@ -587,13 +742,16 @@ class LogitCacheAttention(nn.Module):
                  scheduled_sampling_ratio: float = 0.05,
                  codes: torch.Tensor | None = None, sparsity: float = 1.0,
                  mode: str = 'topk', horizon_tokens: int = 0,
-                 kv_dim: int = 0, sentence_ring: bool = True):
+                 kv_dim: int = 0, sentence_ring: bool = True,
+                 ms_spans: tuple = (), ms_max: int = 16):
         super().__init__()
         self.cache = LogitCache(V, D, max_entries, n_scales=4,
-                                horizon_tokens=horizon_tokens)
+                                horizon_tokens=horizon_tokens,
+                                ms_spans=ms_spans, ms_max=ms_max)  # T9.15
         self.attention = LogitAttention(D, V, n_heads, codes=codes,
                                         sparsity=sparsity, kv_dim=kv_dim,
-                                        sentence_ring=sentence_ring)
+                                        sentence_ring=sentence_ring,
+                                        ms_spans=ms_spans)  # T9.15
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
         self.mode = str(mode)
         # M56c: how many times the R1 inference-mode actually fired (rides in
