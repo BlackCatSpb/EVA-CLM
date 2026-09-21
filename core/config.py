@@ -136,6 +136,29 @@ class WideBindConfig:
     head_phantom_thr: float = 1.1  # M55b: RELATIVE lacuna (ell/EMA) above which a
                                    # position is observed (the absolute ell is ~0.97
                                    # for ANY realistic state: the readout spans K of D)
+                                   # T9.7b: this is now the STATIC FALLBACK only —
+                                   # the default mode 'noise' self-calibrates (1.1
+                                   # sat above the whole signal range, p99 ~1.08).
+    head_phantom_thr_mode: str = 'noise'  # T9.7b: 'noise' = the observation bar is
+                                   # 1 + max(floor, k*MAD) over the BASE rate, with
+                                   # MAD from the recent per-call salience maxima
+                                   # (clamped). Not a quantile: no guaranteed firing
+                                   # rate; on a calm stream the width collapses and
+                                   # only a genuine exceedance over the base fires.
+                                   # 'static' = head_phantom_thr.
+    head_phantom_thr_k: float = 2.0       # robust deviations above the BASE rate
+    head_phantom_thr_floor: float = 0.002  # the minimum excess over the base
+    head_phantom_thr_lo: float = 1.0005   # clamp floor (degenerate-width guard)
+    head_phantom_thr_hi: float = 1.10     # clamp ceiling
+    head_phantom_thr_min_samples: int = 16  # ring samples before 'noise' takes over
+    # T9.7b: the salience ladder (the head's "contradiction ladder"). Default =
+    # the cache ms-ladder (8/32/128/512/2048/8192, ×4) so the salience horizons
+    # are ALIGNED with the ms-cache scales; () -> tau_api.VSA_LADDER (4 rungs).
+    head_lacuna_ladder: tuple = (8.0, 32.0, 128.0, 512.0, 2048.0, 8192.0)
+    head_lacuna_gate_tau: float = 128.0   # rung read by the lacuna/temper gates
+                                          # (≈ the old single-EMA ~100 drop-in)
+    head_phantom_base_tau: float = 0.0    # rung read by the phantom observation
+                                          # (0 = the longest rung = the base rate)
     head_lacuna_ema: float = tau_api.period(100)  # M55b: the self-calibration EMA decay
     # (T8: каденция — период 100 наблюдений, объявлен через tau_api.period)
     head_phantom_every: int = 25  # M54: observe cadence (steps)

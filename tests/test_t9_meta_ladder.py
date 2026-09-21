@@ -34,12 +34,28 @@ def test_ladder_scales_from_tau_api():
     cfg, m = _model()
     hd = _head(m)
     tau = hd._ladder_tau
-    assert tau.numel() == len(tau_api.VSA_LADDER), 'лестница не 4-шкальная'
-    for i, t in enumerate(tau_api.VSA_LADDER):
+    # T9.7b: the ladder comes from the config and is ALIGNED with the cache
+    # ms-ladder (8/32/128/512/2048/8192); tau_api.VSA_LADDER is the fallback.
+    assert tau.numel() == len(cfg.head_lacuna_ladder), 'лестница не из конфига'
+    for i, t in enumerate(cfg.head_lacuna_ladder):
         assert abs(float(tau[i]) - t) < 1e-6, f'шкала {i} ≠ {t}'
+    assert float(tau[-1]) == 8192.0, 'верхняя шкала не 8192'
     d = hd._ladder_decay
-    assert abs(float(d[0]) - torch.exp(torch.tensor(-1.0 / tau_api.VSA_LADDER[0]))) < 1e-6
+    assert abs(float(d[0]) - torch.exp(torch.tensor(-1.0 / tau[0]))) < 1e-6
     assert float(d[0]) < float(d[-1]), 'быстрая шкала должна затухать быстрее'
+
+
+def test_ladder_falls_back_to_vsa_ladder():
+    torch.manual_seed(0)
+    cfg = EVAConfig(n_layers=2, D=128, mlp_groups=4, code_dim=16, code_sparsity=4,
+                    vocab=400, save_dir='.', logit_cache_enabled=False,
+                    memory_bank=False, intent_bridge=True, vsa_decay_floor_k=2.0,
+                    gradient_checkpointing=False)
+    cfg.head_lacuna_ladder = ()
+    hd = EVAStack(cfg).train().lm_head
+    assert hd._ladder_tau.numel() == len(tau_api.VSA_LADDER)
+    for i, t in enumerate(tau_api.VSA_LADDER):
+        assert abs(float(hd._ladder_tau[i]) - t) < 1e-6
 
 
 def test_ladder_updates_in_training_only():
@@ -126,4 +142,5 @@ def test_telemetry_keys():
     m(h, None, step=1, tokens=x)
     tt = training_telemetry(m)
     assert 'meta_lad' in tt, f'нет meta_lad в tele: {sorted(tt)}'
-    assert tt['meta_lad'].count('|') == 3, f'meta_lad не 4-шкальный: {tt["meta_lad"]}'
+    assert tt['meta_lad'].count('|') == hd.ell_ladder.numel() - 1, \
+        f'meta_lad не совпадает с длиной лестницы: {tt["meta_lad"]}'

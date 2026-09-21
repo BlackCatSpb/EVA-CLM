@@ -315,6 +315,47 @@ class PartitionedHead(nn.Module):
         return scores @ self.codes.T + self.token_bias.unsqueeze(0).unsqueeze(0)
 
 
+def ladder_rung(taus: torch.Tensor, tau: float) -> int:
+    """T9.7b: the index of the rung closest to `tau` in LOG space.
+
+    The gates read different rungs of the same salience ladder by their τ:
+    lacuna/temper — the ~100-128 rung (the old single-EMA drop-in), the phantom
+    observation — the longest rung (the base rate). `tau <= 0` selects the
+    longest rung explicitly (the base), independent of the ladder length.
+    """
+    n = int(taus.numel())
+    if n <= 0:
+        return 0
+    if tau is None or float(tau) <= 0.0:
+        return n - 1
+    d = (torch.log(taus.float()) - math.log(float(tau))).abs()
+    return int(torch.argmin(d).item())
+
+
+def noise_threshold(ring: torch.Tensor, n: int, k: float, floor: float,
+                    lo: float, hi: float, min_samples: int, fallback: float) -> float:
+    """T9.7b: the phantom observation threshold from the recent salience maxima.
+
+    `1 + max(floor, k*MAD(ring))`, clamped to [lo, hi] — novelty is measured
+    against the BASE RATE (ell_rel == 1), with the multiple set by the stream's
+    own robust noise. This is deliberately NOT a quantile: it does not
+    guarantee a firing rate. On a calm stream the width collapses and only a
+    genuine exceedance over the base fires; on a volatile stream the bar rises
+    with the noise, so "novelty" always means "above the current noise floor".
+
+    The legacy constant (1.1) sat ABOVE the whole signal range (p99 ~1.08) and
+    killed the lacuna -> phantom -> UCL lifecycle at birth (ph_obs=0 forever).
+    Before `min_samples` ring entries the static `fallback` is used (warmup).
+    """
+    if int(n) < int(min_samples):
+        return float(fallback)
+    w = ring[:int(n)].float()
+    med = float(torch.quantile(w, 0.5))
+    mad = float(torch.quantile((w - med).abs(), 0.5))
+    thr = 1.0 + max(float(floor), float(k) * mad)
+    return float(min(max(thr, float(lo)), float(hi)))
+
+
 class SigmoidCodedHead(nn.Module):
     def __init__(self, cfg: EVAConfig, embed_basis: Optional[nn.Parameter] = None,
                  rope: Optional[nn.Module] = None) -> None:
@@ -371,25 +412,41 @@ class SigmoidCodedHead(nn.Module):
             # re-calibrates within ~1000 steps after a resume).
             self.lacuna_ema: float = float(getattr(cfg, 'head_lacuna_ema', 0.99))
             self.register_buffer('ell_ema', torch.zeros(1), persistent=False)
-            # T9.7 (мета-архитектура): VSA-ЛЕСТНИЦА ПРОТИВОРЕЧИЙ вместо одной
-            # EMA. 4 регистра на канонических τ-шкалах (tau_api.VSA_LADDER):
-            # спайк(8)/вспышка(32)/тренд(128)/база(512). salience_i = ell/L_i —
-            # относительная новизна на горизонте. Гейты читают разные шкалы:
-            # lacuna/temper — середина (дроп-ин к прежней EMA ~100), наблюдение
-            # фантома — адаптивный p95 по салиентности (см. ниже). Буферы
-            # non-persistent: рекалибруются на резюме (как ell_ema).
+            # T9.7 (мета-архитектура): ЛЕСТНИЦА ПРОТИВОРЕЧИЙ вместо одной EMA.
+            # Регистры на τ-шкалах; по умолчанию — лестница кэша
+            # (cfg.head_lacuna_ladder: 8/32/128/512/2048/8192, ×4), т.е. горизонты
+            # салиентности выровнены с ms-шкалами кэша; fallback — tau_api.VSA_LADDER.
+            # salience_i = ell/L_i — относительная новизна на горизонте. Гейты
+            # читают РАЗНЫЕ шкалы по τ: lacuna/temper — ближайшую к
+            # head_lacuna_gate_tau (≈128, дроп-ин к прежней EMA ~100), наблюдение
+            # фантома — ближайшую к head_phantom_base_tau (0 = самая длинная,
+            # базовая ставка). Буферы non-persistent: рекалибруются на резюме.
             from . import tau_api as _tau_api
-            _lad = torch.tensor(_tau_api.VSA_LADDER, dtype=torch.float32)
+            _lad_cfg = getattr(cfg, 'head_lacuna_ladder', None)
+            _lad_t = tuple(float(x) for x in _lad_cfg) if _lad_cfg else ()
+            _lad = torch.tensor(_lad_t if _lad_t else tuple(_tau_api.VSA_LADDER),
+                                dtype=torch.float32)
             self.register_buffer('_ladder_tau', _lad, persistent=False)
             self.register_buffer('_ladder_decay', torch.exp(-1.0 / _lad),
                                  persistent=False)
             self.register_buffer('ell_ladder', torch.zeros(_lad.numel()),
                                  persistent=False)
-            # T9.7: адаптивный порог наблюдения фантома — p95 салиентности в
-            # скользящем окне (64 observe-вызова). Константа 1.1 оказалась
-            # ВЫШЕ диапазона сигнала (lacuna_rel ~1.00-1.02) ⇒ ph_obs=0 во всех
-            # прогонах, лестница «фантом↔UCL» мертва с рождения. Порог больше
-            # не константа: он не может «застрять» выше сигнала по построению.
+            self._gate_rung: int = ladder_rung(
+                _lad, float(getattr(cfg, 'head_lacuna_gate_tau', 128.0)))
+            self._base_rung: int = ladder_rung(
+                _lad, float(getattr(cfg, 'head_phantom_base_tau', 0.0) or 0.0))
+            # T9.7b: порог наблюдения фантома. Константа 1.1 оказалась ВЫШЕ
+            # диапазона сигнала (lacuna_rel ~1.00-1.08) ⇒ ph_obs=0 во всех
+            # прогонах, лестница «фантом↔UCL» мертва с рождения. Теперь порог
+            # самокалибрующийся: 'noise' = median + k·MAD по кольцу максимумов
+            # салиентности (см. noise_threshold), 'static' = head_phantom_thr.
+            self._thr_mode: str = str(getattr(cfg, 'head_phantom_thr_mode', 'noise'))
+            self._thr_k: float = float(getattr(cfg, 'head_phantom_thr_k', 2.0))
+            self._thr_floor: float = float(getattr(cfg, 'head_phantom_thr_floor', 0.002))
+            self._thr_lo: float = float(getattr(cfg, 'head_phantom_thr_lo', 1.0005))
+            self._thr_hi: float = float(getattr(cfg, 'head_phantom_thr_hi', 1.10))
+            self._thr_min_samples: int = int(
+                getattr(cfg, 'head_phantom_thr_min_samples', 16))
             self.register_buffer('_sal_ring', torch.zeros(64), persistent=False)
             self.register_buffer('_sal_ptr', torch.zeros(1, dtype=torch.long),
                                  persistent=False)
@@ -605,8 +662,8 @@ class SigmoidCodedHead(nn.Module):
         # (дрейфует за сигналом — на стационарном входе 16 наблюдений; зависит
         # от batch; 5% гарантированы по построению). Базовая ставка не дрейфует
         # от спайков по построению лестницы.
-        _mid = self.ell_ladder[self.ell_ladder.numel() // 2]
-        _slow = self.ell_ladder[-1]
+        _mid = self.ell_ladder[self._gate_rung]
+        _slow = self.ell_ladder[self._base_rung]
         ell_rel = (ell / (_mid + 1e-6)).clamp(0.0, 5.0)
         ell_rel_slow = (ell / (_slow + 1e-6)).clamp(0.0, 5.0)
         if self.training:
@@ -639,29 +696,13 @@ class SigmoidCodedHead(nn.Module):
                 # not per-forward: the forward count per step (~8) made the
                 # slot life shorter than the confirmation time by arithmetic).
                 if int(self._pb_step.item()) % self.phantom_every == 0:
-                    # T9.7: порог наблюдения — СТАРАЯ шкала лестницы (базовая
-                    # ставка) × head_phantom_thr: спайк относительно базы, не
-                    # рабочего уровня. Ring — только телеметрия (p50/p90/p99
-                    # фактической салиентности), гейтинг от него не зависит.
-                    _sal = float(ell_rel_slow.detach().max())
-                    if not math.isfinite(_sal):
-                        _sal = 0.0                      # R1: NaN-яд
-                    _n = int(min(int(self._sal_ptr.item()), self._sal_ring.numel()))
-                    self._sal_ring[int(self._sal_ptr.item()) % self._sal_ring.numel()] = _sal
-                    self._sal_ptr += 1
-                    if _n >= 8:
-                        _win = self._sal_ring[:min(_n + 1, self._sal_ring.numel())].float()
-                        _q = torch.quantile(_win, torch.tensor(
-                            [0.5, 0.9, 0.99], device=_win.device, dtype=_win.dtype))
-                        self._sal_q = (float(_q[0]), float(_q[1]), float(_q[2]))
-                    _thr = self.phantom_thr
-                    _obs_e, _obs_ell = e_l, ell_rel_slow
-                    _skip_obs = False
                     # T9.9 шаг 2: sentence-level — наблюдения по ПУЛАМ предложений
                     # (семантические единицы; сглаживает per-position хвост и
                     # лечит порог: сравнивается средняя салиентность сегмента).
                     # R1/R2-ревью: режим ДЕТЕРМИНИРОВАН — при наличии токенов
                     # неполнооконные вызовы (L=1 _last_conf и пр.) не наблюдаем.
+                    _obs_e, _obs_ell = e_l, ell_rel_slow
+                    _skip_obs = False
                     if (self._phantom_sent_level and self._tokens is not None
                             and e_l.dim() == 3
                             and int(self._tokens.shape[1]) == int(e_l.shape[1])):
@@ -691,6 +732,32 @@ class SigmoidCodedHead(nn.Module):
                             _obs_e, _obs_ell = _e_sent, _l_sent
                     elif self._phantom_sent_level and self._tokens is not None:
                         _skip_obs = True
+                    # T9.7b: the salience ring stores the SAME quantity the gate
+                    # thresholds (the loudest sentence pool of this call), so the
+                    # noise calibration is distribution-consistent with observe().
+                    _sal = float(_obs_ell.detach().max())
+                    if not math.isfinite(_sal):
+                        _sal = 0.0                      # R1: NaN-яд
+                    self._sal_ring[int(self._sal_ptr.item()) % self._sal_ring.numel()] = _sal
+                    self._sal_ptr += 1
+                    _n = int(min(int(self._sal_ptr.item()), self._sal_ring.numel()))
+                    if _n >= 8:
+                        _win = self._sal_ring[:min(_n, self._sal_ring.numel())].float()
+                        _q = torch.quantile(_win, torch.tensor(
+                            [0.5, 0.9, 0.99], device=_win.device, dtype=_win.dtype))
+                        self._sal_q = (float(_q[0]), float(_q[1]), float(_q[2]))
+                    # T9.7b: the observation threshold. 'noise' = the robust
+                    # upper tail of the recent maxima (median + k*MAD, clamped):
+                    # novelty vs the CURRENT noise floor, self-calibrating — not
+                    # a quantile (no guaranteed firing rate) and not the legacy
+                    # 1.1 (which sat above the whole signal range: p99 ~1.08).
+                    if self._thr_mode == 'noise':
+                        _thr = noise_threshold(
+                            self._sal_ring, _n, self._thr_k, self._thr_floor,
+                            self._thr_lo, self._thr_hi, self._thr_min_samples,
+                            self.phantom_thr)
+                    else:
+                        _thr = float(self.phantom_thr)
                     if not _skip_obs:
                         _pb.observe(_obs_e, _obs_ell, _thr)
                     self._meta_thr = _thr
