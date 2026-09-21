@@ -628,7 +628,9 @@ class EVABlock(nn.Module):
 
         # Prediction-error-aware decay modulation (before decay expansion).
         # Centered: pen=0 → factor 1.0 (memory untouched), pen↑ → toward 0.5.
-        if pen is not None:
+        if pen is not None and getattr(self, '_pen_decay_on', True):
+            # P3-1 (regulator ledger): _pen_decay_on=False is the identity clamp
+            # of the surprise-gated decay (default True = the old path verbatim).
             # B18b: pen enters as a DEVIATION from its running EMA baseline —
             # at typical surprise the factor is exactly 1.0 (the old absolute
             # form sat at ~0.91 at rest and multiplied away another decade of
@@ -842,7 +844,10 @@ class EVABlock(nn.Module):
         with torch.autocast(device_type=h.device.type, enabled=False):
             h_dct = _ln(h).float() @ self.V_dct.T
             if self._tau_norm is not None:
-                _cheb_damp = math.cos(math.pi * self._tau_norm / 2.0)
+                # P3-1 (regulator ledger): _damp_on=False is the identity clamp
+                # of the spectral branch (default True = bit-for-bit the old path).
+                _cheb_damp = (math.cos(math.pi * self._tau_norm / 2.0)
+                              if getattr(self, '_damp_on', True) else 1.0)
             else:
                 _cheb_damp = 1.0
             h_dct = h_dct * self.lambda_k.float() * float(spectral_mod) * _cheb_damp

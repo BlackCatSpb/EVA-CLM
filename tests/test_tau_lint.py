@@ -48,6 +48,8 @@ REGISTRY = {
     ('maturation.py', 'matur_ema'): ('cadence', 'matur_ema — pred-error EMA (гладкость)'),
     ('stack.py', '0.999'): ('cadence', 'vsa_b_d_smooth + _bus_rms — горизонты статистик'),
     ('training_control.py', 'scale_ema_decay'): ('cadence', 'scale_ema — горизонт балансера'),
+    ('param_writers.py', '0.999'): ('registry', 'P3-3: сам реестр двойных писателей — '
+                                    'τ_ctrl и цитаты настроек писателей (источник истины, не магия)'),
 }
 
 HARD_ALPHA = re.compile(r'(0\.9\s*[,/]|0\.99\b|0\.999\b)')
