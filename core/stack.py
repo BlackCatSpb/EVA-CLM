@@ -429,14 +429,35 @@ class EVAStack(nn.Module):
                         # missed this call site: it warned on every fire)
                         _sim = float((_kn @ _dk.detach()).abs().max())
                         if _sim < 0.9:
-                            _ucl.birth_from_direction(_d, confidence=0.6)
+                            # P3-2: the birth ledger gates + registers the birth
+                            # (model._birth_ledger is set by the trainer; None = off)
+                            _bl = getattr(self, '_birth_ledger', None)
+                            if _bl is None or _bl.allow_birth(_d, _st):
+                                if _ucl.birth_from_direction(_d, confidence=0.6):
+                                    if _bl is not None:
+                                        _dn = torch.nn.functional.normalize(
+                                            _d.detach().float().reshape(-1), dim=-1)
+                                        _slot = int((torch.nn.functional.normalize(
+                                            _ucl.concept_vals.detach().float(), dim=-1)
+                                            @ _dn.to(_ucl.concept_vals.device)
+                                        ).abs().argmax())
+                                        _bl.record('ucl', _d, _st,
+                                                   r=_ucl.D + _ucl.bridge_dim,
+                                                   slot=_slot)
                 # (C) the phantom channel grows from the UCL's active concepts
                 if (_ucl is not None and _head.Kp > 0
                         and _st % max(1, int(getattr(_head, 'phantom_every', 25)) * 100) == 0):
                     _dirs = _ucl.active_directions(min_conf=0.5)
+                    _prev_kp = int(_head._kp_active.item())
                     _grew = _head.grow_phantom_bits(_dirs)
                     if _grew:
                         self._m59_grew = int(getattr(self, '_m59_grew', 0)) + _grew
+                        _bl = getattr(self, '_birth_ledger', None)
+                        if _bl is not None:
+                            for _j in range(_prev_kp, _prev_kp + _grew):
+                                _bl.record('phantom_bit',
+                                           _head.phantom_basis.data[_j], _st,
+                                           r=_head.D + _head.K, slot=_j)
         # M55a: the one-step-stale lacuna (the streaming convention) drives the
         # memory-search broadening; the memory read direction feeds the head's
         # contradiction tempering.
