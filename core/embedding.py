@@ -530,6 +530,26 @@ class SigmoidCodedHead(nn.Module):
         self._temper_active: bool = self.temper_on
         self.token_bias: nn.Parameter = nn.Parameter(torch.zeros(cfg.vocab))
         self.normalize: bool = bool(getattr(cfg, 'head_normalize', True))
+        # ─── P1-2: the rank-r pairwise (Ising) channel ───────────────────────
+        # The PoB family q ∝ exp(Σ_k c_vk u_k) cannot express ANY intra-code
+        # correlation; the ceiling probe measured the price at ~4.2 nat on
+        # bigrams (and rank-16 closes ~67% of it for 2Kr = 2048 params). The
+        # term is Σ_s (c_v·(u⊙α_s))·(c_v·(u⊙β_s)) with α_s/β_s ∈ R^K. Identity
+        # at init: pair_V2 = 0 (V1 small-random keeps the V2-gradient alive).
+        self.pair_r: int = int(getattr(cfg, 'head_pair_rank', 0) or 0)
+        if self.pair_r > 0:
+            assert self.normalize, 'the pair channel requires head_normalize=True'
+            _gp = torch.Generator().manual_seed(11)
+            self.pair_V1: nn.Parameter = nn.Parameter(
+                torch.randn(self.K, self.pair_r, generator=_gp) * 0.02)
+            self.pair_V2: nn.Parameter = nn.Parameter(
+                torch.zeros(self.K, self.pair_r))
+            _cw = self.codes.sum(dim=-1)
+            assert bool((_cw == _cw[0]).all()), 'pair channel needs constant-weight codes'
+            self.register_buffer(
+                '_pair_idx',
+                self.codes.nonzero()[:, 1].reshape(-1, int(_cw[0].item())),
+                persistent=False)
 
     def _gates(self, h: torch.Tensor, temp_factor: Optional[torch.Tensor] = None,
                bus_bias: Optional[torch.Tensor] = None, return_data: bool = False):
@@ -848,6 +868,24 @@ class SigmoidCodedHead(nn.Module):
             self._noise_gen = g
         return torch.randn(x.shape, generator=g, device=x.device, dtype=x.dtype)
 
+    def _pair_term(self, u: torch.Tensor) -> torch.Tensor:
+        """P1-2: the rank-r pairwise term over the S active bits per token.
+
+        u: (..., K) -> (..., V). Computed per V-chunk with the active-bit index
+        (S gathers per token instead of the dense K×r matmul: ~10x cheaper).
+        """
+        idx = self._pair_idx
+        V, S = idx.shape
+        out = u.new_zeros(*u.shape[:-1], V)
+        step = 4096
+        for s0 in range(0, V, step):
+            ic = idx[s0:s0 + step]                       # (c, S)
+            ug = u[..., ic]                              # (..., c, S)
+            t1 = (ug.unsqueeze(-1) * self.pair_V1[ic]).sum(dim=-2)   # (..., c, r)
+            t2 = (ug.unsqueeze(-1) * self.pair_V2[ic]).sum(dim=-2)
+            out[..., s0:s0 + ic.shape[0]] = (t1 * t2).sum(dim=-1)
+        return out
+
     def forward(self, h: torch.Tensor, bus_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if h.dim() == 2:
             h = h.unsqueeze(1)
@@ -873,6 +911,9 @@ class SigmoidCodedHead(nn.Module):
         logits: torch.Tensor = (u @ self.codes.T
                                 + (base[..., None] if not self.normalize else 0.0)
                                 + self.token_bias)
+        if self.pair_r > 0:
+            # P1-2: the rank-r pairwise correction (identity while V2 == 0)
+            logits = logits + self._pair_term(u)
         if self.temper_on and getattr(self, '_temper_active', True):
             _md = getattr(self, '_mem_dir', None)
             if _md is not None and _md.shape[-1] == self.D:

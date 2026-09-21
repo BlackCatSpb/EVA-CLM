@@ -61,6 +61,15 @@ def test_p0_1_telemetry_reports_and_resets_the_flag():
     assert not bool(b._scan_floor_bound), 'the flag is sticky per log interval'
 
 
+def test_p2_1_minimal_cfg_switches_the_addons_off():
+    from core.config import EVAConfig
+    c = EVAConfig.minimal(D=64, vocab=64)
+    assert c.logit_cache_enabled is False and c.memory_bank is False
+    assert c.head_lacuna is False and c.head_srl is False and c.head_temper is False
+    assert c.head_pair_rank == 0 and c.bind_twist_mode == 'trajectory_spiral'
+    assert EVAConfig(D=64, vocab=64).head_pair_rank == 0   # off by default
+
+
 def test_p0_5c_ar_sentence_accumulator_pools_on_sep():
     torch.manual_seed(0)
     att = LogitAttention(D=16, V=64, n_heads=2, kv_dim=8, codes=None,

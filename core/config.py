@@ -73,6 +73,12 @@ class WideBindConfig:
                                   # 0 disables
     head_u_wall_u0: float = 6.0   # M52a: the wall's threshold
     head_lacuna: bool = True      # M52b: lacuna residual + phantom channel
+    head_pair_rank: int = 0       # P1-2: rank-r pairwise (Ising) channel of the
+                                  # head — 0 = off (identity at init, A/B arm 16).
+                                  # The probe (scripts/probe_head_ceiling.py)
+                                  # measured the bit-independence price at
+                                  # ~4.2 nat/bigram and a rank-16 channel closing
+                                  # ~67% of it for 2Kr = 2048 params.
     head_phantom_bits: int = 32   # M52b: K_p (the phantom basis rank)
     head_phantom_max: int = 64    # M59c (link C): the phantom channel's CAPACITY —
                                   # the active count grows in place from
@@ -625,6 +631,39 @@ class WideBindConfig:
     data_dir: str = ''
     save_dir: str = 'checkpoints'
     log_dir: str = 'logs'
+
+    @classmethod
+    def minimal(cls, **kw):
+        """P2-1 (proposed patches): the bare trunk for the ablation.
+
+        embed + block (conv + bind + VSA + spectral + MLP + mirror core) +
+        coded head; every cognitive add-on off. For A/B science only — the
+        attribution of the thesis ("code-state superposition > attention")
+        needs the minimal arm and a same-budget baseline on the same stream.
+        """
+        cfg = cls(**kw)
+        cfg.variable_precision = False
+        cfg.explicit_reasoning = False
+        cfg.triad_reason = False
+        cfg.private_mem = False
+        cfg.meta_trust = False
+        cfg.collective_layer = False
+        cfg.unified_concept_layer = False
+        cfg.logit_cache_enabled = False
+        cfg.memory_bank = False
+        cfg.cov_memory = False
+        cfg.bridge_conn = 0.0
+        cfg.intent_bridge = False
+        cfg.bridge_glu = False
+        cfg.head_lacuna = False
+        cfg.head_srl = False
+        cfg.head_temper = False
+        cfg.head_pair_rank = 0
+        cfg.maturation_enabled = False
+        cfg.softmax_free = True
+        cfg.bind_twist_mode = 'trajectory_spiral'   # the bind core stays
+        cfg.lambda_d_enabled = False                # flat schedules, less coupling
+        return cfg
 
     def __post_init__(self):
 

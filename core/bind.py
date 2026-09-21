@@ -1,4 +1,4 @@
-﻿"""EVA: bind module."""
+"""EVA: bind module."""
 
 from __future__ import annotations
 from typing import Optional, Tuple, List
