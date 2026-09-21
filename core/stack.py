@@ -1008,6 +1008,15 @@ class EVAStack(nn.Module):
         self._last_salience = None
         if getattr(self, 'bridge', None) is not None:
             self.bridge.bridge_stream.zero_()
+        # F1b (math audit): the mirrors' streaming phase + hp carry belong to
+        # the same "new document => cold streams" contract; a stale phase would
+        # index the positional mask mid-document and a stale hp_prev would
+        # predict across the boundary.
+        for _l in self.layers:
+            _m = getattr(_l, 'mirror', None)
+            if _m is not None:
+                _m._stream_phase = 0
+                _m._hp_prev_cache = None
 
     def embed_tokens(self, tokens):
         """Token indices -> D-space vectors."""

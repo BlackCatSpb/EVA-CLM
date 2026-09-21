@@ -303,49 +303,6 @@ class LambdaConfig:
         """w_d init std: λ⁻⁴ ≈ 0.087 at d=3."""
         return max(0.01, self.lam_inv_4)
 
-    # ─── Spectral radius diagnostic ───────────────────────────────
-
-def spectral_radius(model, h, n_steps=20, n_iters=1):
-    """Power iteration estimate of ρ(J) where J = ∂F/∂h at h.
-    
-    ρ(J) ≈ lim_{n→∞} ‖J^n v‖ / ‖J^{n-1} v‖ via power iteration.
-    Uses torch.autograd.functional.jvp for O(D) per step (no D×D matrix).
-    
-    Edge of chaos: ρ ≈ 1.0 (Langton, 1990).
-    Training (teacher forcing): ρ ≈ 1.0 expected.
-    Inference (autoregressive): ρ > 1 → exponential error growth.
-    
-    Args:
-        model: EVAStack or any nn.Module
-        h: (B, L, D) input tensor with requires_grad=True
-        n_steps: power iteration steps
-        n_iters: repeat with new random v and average (for reliability)
-    
-    Returns:
-        float: estimated spectral radius
-    """
-    device = h.device
-    dtype = h.dtype
-    rhos = []
-    with torch.no_grad():
-        for _ in range(n_iters):
-            v = torch.randn_like(h)
-            for _ in range(n_steps):
-                _, jvp = torch.autograd.functional.jvp(
-                    lambda z: model(z, state=None)[0], h, v,
-                    create_graph=False)
-                v = jvp / (jvp.norm() + 1e-10)
-            _, jvp = torch.autograd.functional.jvp(
-                lambda z: model(z, state=None)[0], h, v,
-                create_graph=False)
-            # Rayleigh quotient: ρ ≈ (Jv)·v / ‖v‖²
-            rho = (jvp * v).sum() / (v * v).sum().clamp(min=1e-10)
-            rhos.append(rho.abs().item())
-    return sum(rhos) / len(rhos)
-
-
-# ─── Comparison helpers ────────────────────────────────────────
-
     def summary(self) -> dict:
         """Return all derived values as a flat dict."""
         return {k: getattr(self, k) for k in dir(self)
@@ -390,3 +347,44 @@ def spectral_radius(model, h, n_steps=20, n_iters=1):
         ]
         for name, old, new in pairs:
             print(f'  {name:<35} {old:>10.4f} {new:>10.4f}')
+
+
+# ─── Spectral radius diagnostic ───────────────────────────────
+
+def spectral_radius(model, h, n_steps=20, n_iters=1):
+    """Power iteration estimate of ρ(J) where J = ∂F/∂h at h.
+    
+    ρ(J) ≈ lim_{n→∞} ‖J^n v‖ / ‖J^{n-1} v‖ via power iteration.
+    Uses torch.autograd.functional.jvp for O(D) per step (no D×D matrix).
+    
+    Edge of chaos: ρ ≈ 1.0 (Langton, 1990).
+    Training (teacher forcing): ρ ≈ 1.0 expected.
+    Inference (autoregressive): ρ > 1 → exponential error growth.
+    
+    Args:
+        model: EVAStack or any nn.Module
+        h: (B, L, D) input tensor with requires_grad=True
+        n_steps: power iteration steps
+        n_iters: repeat with new random v and average (for reliability)
+    
+    Returns:
+        float: estimated spectral radius
+    """
+    device = h.device
+    dtype = h.dtype
+    rhos = []
+    with torch.no_grad():
+        for _ in range(n_iters):
+            v = torch.randn_like(h)
+            for _ in range(n_steps):
+                _, jvp = torch.autograd.functional.jvp(
+                    lambda z: model(z, state=None)[0], h, v,
+                    create_graph=False)
+                v = jvp / (jvp.norm() + 1e-10)
+            _, jvp = torch.autograd.functional.jvp(
+                lambda z: model(z, state=None)[0], h, v,
+                create_graph=False)
+            # Rayleigh quotient: ρ ≈ (Jv)·v / ‖v‖²
+            rho = (jvp * v).sum() / (v * v).sum().clamp(min=1e-10)
+            rhos.append(rho.abs().item())
+    return sum(rhos) / len(rhos)

@@ -211,7 +211,14 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
     head = model.lm_head
     tb = getattr(head, 'token_bias', None)
     for step in range(max_new_tokens):
-        ctx = tokens[-L:].unsqueeze(0)
+        # F1a (math audit): feed ONLY the new token with the carried state.
+        # The old sliding window (tokens[-L:]) re-fed every token L times, so
+        # the VSA memory received L writes per token (measured: the slow scale
+        # inflated x3.52 at L=8) — the generating model was not the function
+        # validated on the hold-out (which is teacher-forced, non-overlapping).
+        # True L=1 streaming + the carried state matches the training contract;
+        # the mirror's hp_prev/phase carry (F1b) makes it consistent.
+        ctx = tokens[-1:].unsqueeze(0)
         
         if reset_reasoning:
             model.reset_reasoning()

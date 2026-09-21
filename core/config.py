@@ -68,19 +68,12 @@ class WideBindConfig:
     head_bus_cap: float = 3.0     # M61: scale-invariant cap on the intent stencil
                                   # (|bus_bias| RMS; 0 disables) — the 165-spike:
                                   # zt += bus_bias was the unbounded channel
-    head_bus_cap: float = 3.0     # M61: scale-invariant cap on the intent stencil
-                                  # (|bus_bias| RMS; 0 disables) — the 165-spike:
-                                  # zt += bus_bias was the unbounded channel
     head_u_wall: float = 1e-3     # M52a: soft wall on the head's bit log-odds
                                   # (keeps the CE gradient alive at |u|>u0);
                                   # 0 disables
     head_u_wall_u0: float = 6.0   # M52a: the wall's threshold
     head_lacuna: bool = True      # M52b: lacuna residual + phantom channel
     head_phantom_bits: int = 32   # M52b: K_p (the phantom basis rank)
-    head_phantom_max: int = 64    # M59c (link C): the phantom channel's CAPACITY —
-                                  # the active count grows in place from
-                                  # head_phantom_bits up to this as the concepts
-                                  # accumulate (no shape changes ever)
     head_phantom_max: int = 64    # M59c (link C): the phantom channel's CAPACITY —
                                   # the active count grows in place from
                                   # head_phantom_bits up to this as the concepts
@@ -104,12 +97,6 @@ class WideBindConfig:
                                   # 11.47 -> 22.39, measured); 0 = from the start
     head_phantom_after: int = 1045  # M53c: the bank observes from this step (at
                                     # init every residual is noise)
-    mem_lacuna_k: float = 0.5     # M55a: memory-search broadening on the lacuna
-                                  # (attn temp *= 1 + k*lacuna; 0 disables)
-    head_temper: bool = True      # M55a: contradiction tempering (head<->memory)
-    head_temper_k: float = 0.5    # M55a: logits /= (1 + k*chi)
-    head_temper_cos: float = 0.3  # M55a: chi = relu(cos_thr - cos(implied, mem))
-    head_temper_after: int = 1045  # M55a: warmup (the memory is noise at init)
     mem_lacuna_k: float = 0.5     # M55a: memory-search broadening on the lacuna
                                   # (attn temp *= 1 + k*lacuna; 0 disables)
     head_temper: bool = True      # M55a: contradiction tempering (head<->memory)
@@ -283,7 +270,6 @@ class WideBindConfig:
     collective_maturity_thresh: float = 0.12
 
     log_scale_l2_weight: float = 0.01  # L2 on exp(log_scale) > 10 to prevent gradient explosion
-    orth_weight: float = 0.0  # ortho-gran loss; 0=off (32x D²=4096² gram graphs cost 2GB+ VRAM)
     div_weight: float = 10.0   # sigmoid-bounded log_scale divergence. NOTE
                                # (M64.10/T13): in the align mode every aux term
                                # (including this one) goes through the spectral

@@ -438,10 +438,34 @@ class GroupedCognitiveMirror(nn.Module):
 
         # ─── Bipolar pos_id binding: hp = hp ⊛ pos_id ───
         # Детерминированный буфер позиционных кодов (broadcast на B, G).
-        hp = hp * self._pos_id_buf[:, :L]
-        
+        # F1b (math audit): the mask index must be the WINDOW-RELATIVE phase, not
+        # always 0. In training L = seq_len and the phase is 0..L-1 (unchanged,
+        # bit-for-bit). At L=1 streaming the old form read _pos_id_buf[:, :1]
+        # for EVERY token — the position phase froze at 0 and the hp path
+        # diverged ~150% from training. The phase is carried across eval calls
+        # and advanced by L, so a 384-token window reproduces the training
+        # indexing exactly (p0=0) and streaming walks 0,1,2,... modulo seq_len.
+        if self.training:
+            hp = hp * self._pos_id_buf[:, :L]
+        else:
+            _p0 = int(getattr(self, '_stream_phase', 0)) % max(1, int(self.seq_len))
+            _idx = (torch.arange(L, device=hp.device) + _p0) % max(1, int(self.seq_len))
+            hp = hp * self._pos_id_buf[:, _idx]
+            self._stream_phase = (_p0 + L) % max(1, int(self.seq_len))
+
         # hp_prev shared by sym_k and pred_error
-        hp_prev = torch.cat([torch.zeros_like(hp[:, 0:1]), hp[:, :-1]], dim=1)
+        # F1b (math audit): at L=1 the window-internal shift is a ZERO vector, so
+        # pred_k = 0 and pred_error froze at a constant (measured 0.25) — the
+        # mirror's temporal signals degenerated. At eval the last hp of the
+        # previous call is carried; training keeps the teacher-forced form.
+        _hp_prev_c = getattr(self, '_hp_prev_cache', None)
+        if (not self.training) and _hp_prev_c is not None \
+                and tuple(_hp_prev_c.shape) == (hp.shape[0], 1, hp.shape[2], hp.shape[3]):
+            hp_prev = torch.cat([_hp_prev_c.to(hp.dtype), hp[:, :-1]], dim=1)
+        else:
+            hp_prev = torch.cat([torch.zeros_like(hp[:, 0:1]), hp[:, :-1]], dim=1)
+        if not self.training:
+            self._hp_prev_cache = hp[:, -1:].detach()
         
         # ─── Slow signals (lo half of K-space) ───
         # Temporal: deviation from memory centroid
@@ -850,7 +874,12 @@ class GroupedCognitiveMirror(nn.Module):
                     self._pm_coh.fill_(1.0 if _ms >= self._pm_coh_gate_std else 0.0)
         
         # Linear projection + skip connection
-        linear = torch.einsum('blgk,gkd->blgd', delta, self.W_out)  # (B, L, G, d)
+        # F3 (math audit): the tie is IN-GRAPH — W_out (a buffer) was synced
+        # from W_proj under no_grad, so the reconstruction gradient never
+        # reached W_proj ("K-space autoencoder" was true by value, false by
+        # gradient). W_proj.permute(0,2,1) has exactly W_out's shape (G,k,d).
+        _w_out = self.W_proj.permute(0, 2, 1) if self.tie_mirror_proj else self.W_out
+        linear = torch.einsum('blgk,gkd->blgd', delta, _w_out)  # (B, L, G, d)
         skip_alpha = torch.exp(self.log_skip_alpha).view(1, 1, G, 1)
         # Audit M4: the global shrink 1/(1+0.1·‖δ‖) damped the mirror exactly
         # when correction was most needed (large δ = high surprise). δ is

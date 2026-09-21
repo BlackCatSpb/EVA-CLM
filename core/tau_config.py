@@ -133,7 +133,9 @@ class TauConfig(nn.Module):
         # layers clamped to exactly 1.0 (96% of dev draws) — killing U3/U5/U7/U10
         # resolution at depth AND tieing the deepest schedules. Normalizing by the
         # final cumsum keeps strict monotonicity (ratio of increasing sums) and
-        # makes the span endpoints exact, so the [0,1] clamp never binds.
+        # makes the TOP endpoint exact (τ_last = τ_max); the bottom is only
+        # approached (measured 9.51 vs τ_min=8 — F5b, math audit: the increments
+        # are positive by construction, so the first rung sits above τ_min).
         log_tau = self._log_tau_min + self._log_tau_range * (cs / cs[-1].clamp_min(1e-8))
         return torch.exp(log_tau)
 

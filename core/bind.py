@@ -126,7 +126,7 @@ class BottleneckBind(nn.Module):
             nn.init.xavier_uniform_(self.W_out, gain=0.5)
             self._tied = tie_bind
             if self._tied:
-                self.W_proj.register_forward_pre_hook(self._tie_hook)
+                self._hook = self.W_proj.register_forward_pre_hook(self._tie_hook)
 
         # --- gated aperture ---
         if self.gated:
@@ -145,6 +145,19 @@ class BottleneckBind(nn.Module):
         with torch.no_grad():
             self.W_out.data.copy_(self.W_proj.weight.data)
 
+    def _out_weight(self) -> torch.Tensor:
+        """F3 (math audit): the true tie is IN-GRAPH.
+
+        The old pre-hook copied W_proj.weight.data into W_out under no_grad,
+        so the output path's gradient (measured ||dL/dW_out||≈51.5) landed in a
+        Parameter whose value was overwritten on the next forward — it never
+        reached W_proj, and W_out's Adam moments evolved for nothing. Using
+        W_proj.weight directly (identical shape (K,D)) restores the tie for
+        BOTH the value and the gradient. The hook is kept so the (unused)
+        W_out stays a truthful mirror for checkpoints/diagnostics.
+        """
+        return self.W_proj.weight if self._tied else self.W_out
+
     def _cross(self, left: torch.Tensor, right: torch.Tensor, shift: int) -> torch.Tensor:
         return left * torch.roll(right, shifts=int(shift), dims=-1)
 
@@ -159,7 +172,7 @@ class BottleneckBind(nn.Module):
         # --- OFF: legacy diagonal ---
         if self.mode == "off":
             prod = (hp * self.w_u[0]) * (hp * self.w_v[0])
-            return prod @ self.W_out
+            return prod @ self._out_weight()
 
         # --- SHIFT: simple sum of S shifted products ---
         if self.mode == "shift":
@@ -179,7 +192,7 @@ class BottleneckBind(nn.Module):
                     if g is not None:
                         prod = prod * g[:, :, s]
                     acc = prod if acc is None else acc + prod
-                return acc @ self.W_out
+                return acc @ self._out_weight()
 
         # --- CASCADE: Fibonacci-nested ---
         if self.mode == "cascade":
@@ -217,7 +230,7 @@ class BottleneckBind(nn.Module):
                         w = w * g[:, :, n-1]
                     term = a[n] * w.unsqueeze(-1)
                     m = term if m is None else m + term
-                return m @ self.W_out
+                return m @ self._out_weight()
 
 
 
@@ -355,8 +368,13 @@ class TrajectorySpiralBind(nn.Module):
         self._tied: bool = False
         circ_conv: torch.Tensor = torch.tensor(
             [[(n - t) % K for n in range(K)] for t in range(K)], dtype=torch.long)
+        # F6 (math audit): the correlation index must be (t + n), not (t - n).
+        # With (t - n) the einsum returned the CIRCULARLY REVERSED b:
+        # unbind(a, bind(a, b)) = K * b[(-n) mod K] (measured cos with
+        # reverse(b) = 0.79, with b = -0.07). The manifold branch
+        # (TrajectoryManifoldBind) then clustered flipped transitions.
         circ_corr: torch.Tensor = torch.tensor(
-            [[(t - n) % K for n in range(K)] for t in range(K)], dtype=torch.long)
+            [[(t + n) % K for n in range(K)] for t in range(K)], dtype=torch.long)
         self.register_buffer('_circ_conv_idx', circ_conv, persistent=False)
         self.register_buffer('_circ_corr_idx', circ_corr, persistent=False)
 

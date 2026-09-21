@@ -17,6 +17,9 @@ from .vsa_utils import dct_basis, fib_sigmoid_init
 # ─── Module-level prefix scan (hoisted from EVABlock.forward) ───
 
 _EPS_SCAN = 1e-6
+# F2 (math audit): the tail-referenced fp32 scan is safe only while
+# CHUNK*|floor_log| < ln(FLT_MAX) = 88.7; the block clamps its floor to this.
+_SCAN_LOG_MAX = 88.7
 
 
 def _stream_cap(x, cap):
@@ -52,10 +55,14 @@ def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None,
 
         intra_t = (cd_t/cd_last) * cumsum_i( b_i * cd_last/cd_i )
 
-    so EVERY operand is bounded by |b| (all exponents are <=0): no reciprocal
-    of a tiny cum_decay ever materializes, forward AND backward are fp32-stable
-    at any ladder floor, and no fp64 graph is needed anywhere (the M20
-    measurement: naive fp64 scans pinned ~8.5GB on the A100 — the B19 incident).
+    so EVERY weighted input is bounded by |b| (the exponents of the weighted
+    inputs are <=0): no reciprocal of a tiny cum_decay ever materializes,
+    forward AND backward are fp32-stable at any ladder floor, and no fp64 graph
+    is needed anywhere (the M20 measurement: naive fp64 scans pinned ~8.5GB on
+    the A100 — the B19 incident). NOTE (F2, math audit): the PREFACTOR
+    e^{A_t−A_last} >= 1 grows with the chunk range (it is not <=0); finiteness
+    requires CHUNK*|floor_log| < 88.7, enforced by the floor clamp in
+    EVABlock.forward (_SCAN_LOG_MAX).
     The old naive form overflowed in the backward at the production fast-floor
     values (1/cd ~ 1e25-1e27): the step-0 NaN-gradient source that poisoned the
     run (live logs 2026-09-13: 192 non-finite grads at step 0 despite M25).
@@ -675,6 +682,14 @@ class EVABlock(nn.Module):
         _fl18 = None
         if self._vsa_floor_k > 0:
             _fl18 = (self._vsa_floor_k * torch.log(d_s.clamp(min=_EPS_SCAN).double())).view(1, 1, S, 1)
+            # F2 (math audit): the tail-referenced fp32 scan is finite only
+            # while CHUNK*|floor_log| < ln(FLT_MAX) = 88.7. tau_s comes from a
+            # learnable parameter WITHOUT clamps, so a drift toward fast
+            # forgetting (tau_s < 32*k/88.7 ≈ 0.72 at k=2) would push
+            # e^{A_t-A_last} past fp32 -> inf*0 = NaN (measured: tau_s=0.3 NaN).
+            # Bound the floor itself — the binding constraint on |log_a|; a
+            # no-op in the healthy regime (tau_s ~ 8..512).
+            _fl18 = _fl18.clamp_min(-_SCAN_LOG_MAX / float(CHUNK))
         # M26: floored scans are tail-referenced fp32 (finite fwd+bwd at any
         # floor); floor-off stays the legacy fp64 exactness path. No per-layer
         # precision decision, no GPU sync, no fp64 graph.
