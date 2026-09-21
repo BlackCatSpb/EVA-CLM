@@ -116,6 +116,7 @@ class GroupedCognitiveMirror(nn.Module):
     """
     def __init__(self, D: int, G: int = 32, k: int = 32, log_scale_init_std: float = 0.05,
                  delta_var_ema_min: float = 0.8, delta_var_ema_max: float = 0.99, tie_mirror_proj: bool = False,
+                 tie_grad: bool = False,
                  layer_idx: int = 0, n_layers: int = 32, has_private_mem: bool = False,
                  expert_asymmetry: bool = False, meta_trust: bool = False,
                  gate_bias_scale: float = 0.0, seq_len: int = 256,
@@ -133,6 +134,10 @@ class GroupedCognitiveMirror(nn.Module):
         self.d: int = D // G
         self.seq_len: int = seq_len
         self.tie_mirror_proj: bool = tie_mirror_proj
+        # P0-2 (F3) A/B: True — tie в графе (градиент реконструкции течёт в
+        # W_proj), False — чтение буфера W_out (прежнее поведение: forward
+        # побитово тот же, градиент выходного пути мёртв).
+        self._tie_grad: bool = bool(tie_grad)
         self.bridge_glu: bool = bridge_glu
         # φ — единая когнитивная координата глубины (логарифмическая)
         phi: float = math.log(1 + layer_idx) / math.log(max(n_layers, 2))
@@ -884,7 +889,8 @@ class GroupedCognitiveMirror(nn.Module):
         # from W_proj under no_grad, so the reconstruction gradient never
         # reached W_proj ("K-space autoencoder" was true by value, false by
         # gradient). W_proj.permute(0,2,1) has exactly W_out's shape (G,k,d).
-        _w_out = self.W_proj.permute(0, 2, 1) if self.tie_mirror_proj else self.W_out
+        _w_out = (self.W_proj.permute(0, 2, 1)
+                  if (self.tie_mirror_proj and self._tie_grad) else self.W_out)
         linear = torch.einsum('blgk,gkd->blgd', delta, _w_out)  # (B, L, G, d)
         skip_alpha = torch.exp(self.log_skip_alpha).view(1, 1, G, 1)
         # Audit M4: the global shrink 1/(1+0.1·‖δ‖) damped the mirror exactly

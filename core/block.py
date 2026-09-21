@@ -284,6 +284,7 @@ class EVABlock(nn.Module):
             log_scale_init_std=cfg.log_scale_init_std,
             delta_var_ema_min=cfg.delta_var_ema_min, delta_var_ema_max=cfg.delta_var_ema_max,
             tie_mirror_proj=cfg.tie_mirror_proj,
+            tie_grad=bool(getattr(cfg, 'tie_grad', False)),
             layer_idx=layer_idx, n_layers=cfg.n_layers,
             has_private_mem=getattr(cfg, 'private_mem', False),
             expert_asymmetry=getattr(cfg, 'expert_asymmetry', False),

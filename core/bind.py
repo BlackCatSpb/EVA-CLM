@@ -125,6 +125,10 @@ class BottleneckBind(nn.Module):
             self.W_out = nn.Parameter(torch.empty(K, D))
             nn.init.xavier_uniform_(self.W_out, gain=0.5)
             self._tied = tie_bind
+            # P0-2 (F3) A/B: True — in-graph tie (градиент выходного пути течёт
+            # в W_proj), False — прежнее чтение W_out (значения те же: хук
+            # синхронизирует W_out с W_proj^T, но градиент выходного пути мёртв).
+            self._tie_grad: bool = bool(getattr(cfg, 'tie_grad', False))
             if self._tied:
                 self._hook = self.W_proj.register_forward_pre_hook(self._tie_hook)
 
@@ -156,7 +160,8 @@ class BottleneckBind(nn.Module):
         BOTH the value and the gradient. The hook is kept so the (unused)
         W_out stays a truthful mirror for checkpoints/diagnostics.
         """
-        return self.W_proj.weight if self._tied else self.W_out
+        return (self.W_proj.weight if (self._tied and self._tie_grad)
+                else self.W_out)
 
     def _cross(self, left: torch.Tensor, right: torch.Tensor, shift: int) -> torch.Tensor:
         return left * torch.roll(right, shifts=int(shift), dims=-1)

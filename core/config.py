@@ -38,6 +38,13 @@ class WideBindConfig:
 
     tie_bind: bool = True  # True = W_out = W_proj^T (autoencoder bind bottleneck)
     tie_mirror_proj: bool = True  # True = mirror W_out = W_proj^T (per-expert K-space AE)
+    # P0-2 (F3) A/B-ручка: True = tie IN-GRAPH (градиент выходного пути течёт в
+    # W_proj; измерено: h_norm ×15 и u-насыщение 0.66 на резюме 7040 — новая
+    # тропа на 11k-шаговом чекпойнте взрывоопасна), False = прежнее чтение
+    # буфера/зеркала (значения те же — буфер синхронизирован с W_proj^T — но
+    # градиент выходного пути мёртв). Default False: смена градиентной тропы
+    # на резюме — только осознанным A/B.
+    tie_grad: bool = False
 
     # Variable Precision Memory
     variable_precision: bool = True   # add exact sequence memory on top of VSA (canonical Colab stack)
