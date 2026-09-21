@@ -920,6 +920,16 @@ def training_telemetry(model) -> dict:
                 hs.append(float(-(p * (p + 1e-9).log()).sum()))
     if srs:
         out['sr_wproj'] = sum(srs) / len(srs)
+    # P0-1 (F2, math audit): did the learnable VSA ladder leave the fp32-safe
+    # zone (tau_s < 0.5*k) during this log interval? Sticky flags on the blocks,
+    # reset here after reporting (the clamp itself is in EVABlock.forward).
+    _sb = 0
+    for l in layers:
+        if bool(getattr(l, '_scan_floor_bound', False)):
+            _sb += 1
+            l._scan_floor_bound = False
+    if _sb:
+        out['scan_floor_bound'] = _sb
     if als:
         out['alpha_std'] = sum(als) / len(als)
     if hs:

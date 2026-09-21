@@ -198,42 +198,48 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
     
     tokens = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
     
-    # Generate
+    # ─── Generate: prefill (one prompt window) + incremental L=1 decode ───
+    # P0-6 (F1b, math audit): the old loop re-fed the whole sliding window with
+    # the carried state, so VSA/bank/UCL received ~L writes per token (measured:
+    # the slow scale inflated x3.52 at L=8; at L=384 proportionally worse) and
+    # the generating model was NOT the function validated on the hold-out.
+    # Prefill once, then feed exactly one new token per step — the same write
+    # pattern as the training loop.
     state = None
     gs = None            # T9.11: кросс-слойный self-model EMA — вести между
     intent_state = None  # шагами (как в тренировке), иначе контекст зеркала рвётся
     allow_write = continuous_learn or None
     rb = None
-    
+
     mind_log = []
-    
+
     recent = []
     head = model.lm_head
     tb = getattr(head, 'token_bias', None)
+
+    # Prefill: the prompt as ONE window; the recurrent state starts cold.
+    ctx = tokens[-L:].unsqueeze(0)
+    h = model.embed_tokens(ctx)
+    out, state, gs, rb = model(h, None, global_state=None, adaptive=False,
+                               context_mem=context_mem, allow_write=allow_write,
+                               step=base_step, intent_state=intent_state,
+                               tokens=ctx)
+    intent_state = getattr(model, '_last_intent_state', None)
+    model.observe_output(head(out))
+    # P0-5: AR opt-in for the mirror hp/phase carry and the embedding's
+    # sentence masks (the same switch LiveInference flips).
+    for _l in model.layers:
+        _mm = getattr(_l, 'mirror', None)
+        if _mm is not None:
+            _mm._ar_mode = True
+    if getattr(model, 'embed', None) is not None:
+        model.embed._ar_mode = True
+
     for step in range(max_new_tokens):
-        # F1a (math audit): feed ONLY the new token with the carried state.
-        # The old sliding window (tokens[-L:]) re-fed every token L times, so
-        # the VSA memory received L writes per token (measured: the slow scale
-        # inflated x3.52 at L=8) — the generating model was not the function
-        # validated on the hold-out (which is teacher-forced, non-overlapping).
-        # True L=1 streaming + the carried state matches the training contract;
-        # the mirror's hp_prev/phase carry (F1b) makes it consistent.
-        ctx = tokens[-1:].unsqueeze(0)
-        
         if reset_reasoning:
             model.reset_reasoning()
             rb = None
-        h = model.embed_tokens(ctx)
-        out, state, gs, rb = model(h, state, global_state=gs, adaptive=False,
-                                  context_mem=context_mem, allow_write=allow_write,
-                                  step=base_step + step,
-                                  intent_state=intent_state,
-                                  reasoning_buffer=rb[0] if rb is not None else None,
-                                  reasoning_count=rb[1] if rb is not None else None,
-                                  tokens=ctx)
-        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
-        model.observe_output(out)  # salience of THIS step -> next step's intent
-        
+
         if show_mind and step % 10 == 0:
             info = model.layers[0].mirror.debug_mind()
             info['step'] = step
@@ -242,7 +248,7 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
                 print(f'  step {step}: mem_norm={info.get("private_mem_norm",0):.4f} '
                       f'w_help={info.get("w_help",0):.4f} '
                       f'trust_diag={info.get("trust_diag_mean",0):.4f}')
-        
+
         logits = head(out[:, -1:, :])[0, 0]
         if tb is not None and bias_alpha != 1.0:
             logits = (logits - tb) + bias_alpha * tb
@@ -263,11 +269,24 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
                 logits[logits < vals[-1:]] = -float('inf')
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, 1)
-        
+
         recent.append(next_token.item())
         if len(recent) > rep_window:
             recent.pop(0)
         tokens = torch.cat([tokens, next_token], dim=0)
+
+        # Incremental decode: ONE new token per step, the state carried.
+        tok1 = next_token.view(1, 1)
+        h1 = model.embed_tokens(tok1)
+        out, state, gs, rb = model(h1, state, global_state=gs, adaptive=False,
+                                   context_mem=context_mem, allow_write=allow_write,
+                                   step=base_step + step + 1,
+                                   intent_state=intent_state,
+                                   reasoning_buffer=rb[0] if rb is not None else None,
+                                   reasoning_count=rb[1] if rb is not None else None,
+                                   tokens=tok1)
+        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
+        model.observe_output(head(out))  # salience of THIS step -> next intent
     
     if show_mind and mind_log:
         import json

@@ -351,7 +351,7 @@ class LambdaConfig:
 
 # ─── Spectral radius diagnostic ───────────────────────────────
 
-def spectral_radius(model, h, n_steps=20, n_iters=1):
+def spectral_radius(model, h, n_steps=20, n_iters=3):
     """Power iteration estimate of ρ(J) where J = ∂F/∂h at h.
     
     ρ(J) ≈ lim_{n→∞} ‖J^n v‖ / ‖J^{n-1} v‖ via power iteration.
@@ -365,13 +365,12 @@ def spectral_radius(model, h, n_steps=20, n_iters=1):
         model: EVAStack or any nn.Module
         h: (B, L, D) input tensor with requires_grad=True
         n_steps: power iteration steps
-        n_iters: repeat with new random v and average (for reliability)
+        n_iters: repeat with new random v and average (for reliability;
+                 1 is noisy for a non-Hermitian J — P0-4)
     
     Returns:
         float: estimated spectral radius
     """
-    device = h.device
-    dtype = h.dtype
     rhos = []
     with torch.no_grad():
         for _ in range(n_iters):

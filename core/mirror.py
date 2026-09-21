@@ -282,6 +282,15 @@ class GroupedCognitiveMirror(nn.Module):
         self.register_buffer('_cached_pred_error_norm_buf', torch.zeros(1, seq_max), persistent=False)
         _pos_g: torch.Generator = torch.Generator().manual_seed(12345)
         self.register_buffer('_pos_id_buf', torch.sign(torch.randn(1, 4096, 1, k, generator=_pos_g)), persistent=False)
+        # P2-2.4 (math audit): the positional table is 4096 wide — a longer
+        # sequence used to be a silent index error.
+        assert int(seq_max) <= int(self._pos_id_buf.shape[1]), \
+            f'seq_len={seq_max} exceeds the positional table ({self._pos_id_buf.shape[1]})'
+        # P0-5a (F1a): the AR streaming carry — the previous token's hp and the
+        # window-relative mask phase. Registered buffers => covered by the M8
+        # snapshot/restore and by reset_stream_bufs (new document = cold streams).
+        self.register_buffer('_stream_hp_prev', torch.zeros(1, 1, G, k), persistent=False)
+        self.register_buffer('_pos_ptr', torch.zeros(1, dtype=torch.long), persistent=False)
         # Gate EMA: gradual wakeup for mirror, cold-start at zero (self-adaptive per-expert warmup)
         self.register_buffer('_gate_ema', torch.zeros(G), persistent=True)
         # Alpha override: set to 0.5 during warmup to force large pred_error
@@ -437,35 +446,32 @@ class GroupedCognitiveMirror(nn.Module):
         mc_k = torch.einsum('b l gd,gdk->b l gk', mc_g, self.W_proj)
 
         # ─── Bipolar pos_id binding: hp = hp ⊛ pos_id ───
-        # Детерминированный буфер позиционных кодов (broadcast на B, G).
-        # F1b (math audit): the mask index must be the WINDOW-RELATIVE phase, not
-        # always 0. In training L = seq_len and the phase is 0..L-1 (unchanged,
-        # bit-for-bit). At L=1 streaming the old form read _pos_id_buf[:, :1]
-        # for EVERY token — the position phase froze at 0 and the hp path
-        # diverged ~150% from training. The phase is carried across eval calls
-        # and advanced by L, so a 384-token window reproduces the training
-        # indexing exactly (p0=0) and streaming walks 0,1,2,... modulo seq_len.
-        if self.training:
-            hp = hp * self._pos_id_buf[:, :L]
+        # P0-5a (F1a, math audit): the mask index is the WINDOW-RELATIVE phase.
+        # Training and windowed eval read 0..L-1 exactly as before (bit-for-bit);
+        # in the AR decode (L=1, _ar_mode) the phase is carried and wraps at
+        # seq_len, so streaming stays inside the trained mask distribution
+        # (the old form read position 0 for every token — hp diverged ~150%).
+        _ar1 = ((not self.training) and bool(getattr(self, '_ar_mode', False))
+                and L == 1)
+        if _ar1:
+            _pmax = max(1, min(int(self.seq_len), int(self._pos_id_buf.shape[1])))
+            _p = int(self._pos_ptr.item()) % _pmax
+            hp = hp * self._pos_id_buf[:, _p:_p + 1]
+            self._pos_ptr += 1
         else:
-            _p0 = int(getattr(self, '_stream_phase', 0)) % max(1, int(self.seq_len))
-            _idx = (torch.arange(L, device=hp.device) + _p0) % max(1, int(self.seq_len))
-            hp = hp * self._pos_id_buf[:, _idx]
-            self._stream_phase = (_p0 + L) % max(1, int(self.seq_len))
+            hp = hp * self._pos_id_buf[:, :L]
 
         # hp_prev shared by sym_k and pred_error
-        # F1b (math audit): at L=1 the window-internal shift is a ZERO vector, so
+        # P0-5a: at L=1 the window-internal shift is identically ZERO, so
         # pred_k = 0 and pred_error froze at a constant (measured 0.25) — the
-        # mirror's temporal signals degenerated. At eval the last hp of the
-        # previous call is carried; training keeps the teacher-forced form.
-        _hp_prev_c = getattr(self, '_hp_prev_cache', None)
-        if (not self.training) and _hp_prev_c is not None \
-                and tuple(_hp_prev_c.shape) == (hp.shape[0], 1, hp.shape[2], hp.shape[3]):
-            hp_prev = torch.cat([_hp_prev_c.to(hp.dtype), hp[:, :-1]], dim=1)
+        # mirror's temporal signals degenerated. The AR carry supplies the
+        # previous token's hp; training keeps the teacher-forced window form.
+        if _ar1 and tuple(self._stream_hp_prev.shape) == (hp.shape[0], 1, hp.shape[2], hp.shape[3]):
+            hp_prev = torch.cat([self._stream_hp_prev.to(hp.dtype), hp[:, :-1]], dim=1)
         else:
             hp_prev = torch.cat([torch.zeros_like(hp[:, 0:1]), hp[:, :-1]], dim=1)
-        if not self.training:
-            self._hp_prev_cache = hp[:, -1:].detach()
+        if _ar1:
+            self._stream_hp_prev.copy_(hp[:, -1:].detach())
         
         # ─── Slow signals (lo half of K-space) ───
         # Temporal: deviation from memory centroid
@@ -1022,7 +1028,9 @@ class GroupedCognitiveMirror(nn.Module):
     def reset_stream_bufs(self) -> None:
         """M41: shrink the write-side stream buffers to the init baseline.
         Called from EVAStack.reset_cache() (document/rollback boundary) so
-        diagnostic buffers cannot hold a grown footprint across regimes."""
+        diagnostic buffers cannot hold a grown footprint across regimes.
+        P0-5d (F1a): also drops the AR streaming carry (previous-token hp and
+        the positional phase) — the same "new document => cold streams" rule."""
         buf = self._cached_hp_buf
         L0 = int(getattr(self, '_buf_init_L', buf.shape[1]))
         if buf.shape[0] != 1 or buf.shape[1] != L0:
@@ -1030,6 +1038,8 @@ class GroupedCognitiveMirror(nn.Module):
             self._cached_hp_buf = torch.zeros(1, L0, G, k, device=dev)
             self._cached_pred_k_buf = torch.zeros(1, L0, G, k, device=dev)
             self._cached_pred_error_norm_buf = torch.zeros(1, L0, device=dev)
+        self._stream_hp_prev.zero_()
+        self._pos_ptr.zero_()
 
     def cache_grad_norms(self, grad_h: Optional[torch.Tensor] = None) -> None:
         """Call after backward: store per-subspace gradient norm.

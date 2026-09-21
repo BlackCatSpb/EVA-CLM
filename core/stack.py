@@ -1008,15 +1008,18 @@ class EVAStack(nn.Module):
         self._last_salience = None
         if getattr(self, 'bridge', None) is not None:
             self.bridge.bridge_stream.zero_()
-        # F1b (math audit): the mirrors' streaming phase + hp carry belong to
-        # the same "new document => cold streams" contract; a stale phase would
-        # index the positional mask mid-document and a stale hp_prev would
-        # predict across the boundary.
+        # F1a/P0-5d (math audit): the mirrors' AR streaming carry (previous hp +
+        # positional phase) belongs to the same "new document => cold streams"
+        # contract; a stale phase would index the mask mid-document and a stale
+        # hp would predict across the boundary.
         for _l in self.layers:
             _m = getattr(_l, 'mirror', None)
-            if _m is not None:
-                _m._stream_phase = 0
-                _m._hp_prev_cache = None
+            if _m is not None and hasattr(_m, 'reset_stream_bufs'):
+                _m.reset_stream_bufs()
+        # P0-5b: the embedding's AR sentence-relative counter (same contract).
+        _emb = getattr(self, 'embed', None)
+        if _emb is not None and hasattr(_emb, '_sent_rel_ptr'):
+            _emb._sent_rel_ptr.zero_()
 
     def embed_tokens(self, tokens):
         """Token indices -> D-space vectors."""
@@ -1191,6 +1194,10 @@ class EVAStack(nn.Module):
         """Clear the logit cache (for new sequence)."""
         if self.logit_cache is not None:
             self.logit_cache.cache.clear()
+            # P0-5c: the AR sentence accumulator lives on the attention module
+            _att = getattr(self.logit_cache, 'attention', None)
+            if _att is not None and hasattr(_att, 'reset_sent_acc'):
+                _att.reset_sent_acc()
         # M58b: the block-level trajectory carry and the head's live pins
         # survive a rollback otherwise (the mirror loop below only scrubs the
         # mirror's own attrs).

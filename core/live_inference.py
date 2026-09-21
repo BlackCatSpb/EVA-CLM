@@ -165,6 +165,11 @@ class LiveInference:
         # (plain eval() no longer triggers it; train/eval feature parity restored)
         for _mm in [l.mirror for l in model.layers if getattr(l, 'mirror', None) is not None]:
             _mm._ar_mode = True
+        # P0-5b (F1a, math audit): the embedding's sentence masks need the same
+        # AR opt-in (L=1 otherwise gives rel≡0/bos≡True for every token).
+        _emb = getattr(model, 'embed', None)
+        if _emb is not None:
+            _emb._ar_mode = True
 
         if monitor:
             self.monitor: Optional[MirrorMonitor] = MirrorMonitor(model, max_history=max_history)

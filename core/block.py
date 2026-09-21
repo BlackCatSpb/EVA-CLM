@@ -302,6 +302,7 @@ class EVABlock(nn.Module):
         # ─── VSA Memory (multi-scale VSA: S=4 фиксированных τ) ───
         self._n_scales = 4
         self._vsa_floor_k = float(getattr(cfg, 'vsa_decay_floor_k', 2.0))  # B18
+        self._scan_floor_bound = False   # P0-1 (F2): sticky "tau_s clamped" flag
         self.register_buffer('_pen_ema', torch.zeros(()), persistent=True)  # B18b
         # U1: τ-consistent VSA scales. This copy is the TRAINABLE ladder for
         # standalone blocks (tau_s=None); inside EVAStack the live source is
@@ -582,6 +583,17 @@ class EVABlock(nn.Module):
         # ─── VSA Memory (multi-scale: S=4 фиксированных τ) ───
         S = self._n_scales
         tau_s = torch.exp(self._vsa_tau_log) if tau_s is None else tau_s
+        # P0-1 (F2, math audit): the tail-referenced fp32 scan is finite only
+        # while CHUNK*|floor_log| < ln(FLT_MAX)=88.7, floor_log = -k/tau_s
+        # => tau_s > 32k/88.7 ≈ 0.36k. The clamp lives HERE (the single tau_s
+        # entry point) so the SEMANTIC time constant is bounded, not just the
+        # exponent range; the ladder leaving the safe zone is telemetered.
+        if self._vsa_floor_k > 0:
+            _tau_safe = 0.5 * self._vsa_floor_k          # k=2 => tau_s >= 1.0
+            _bound = bool((tau_s < _tau_safe).any())
+            tau_s = tau_s.clamp(min=_tau_safe)
+            if self.training and _bound:
+                self._scan_floor_bound = True
         d_s = torch.exp(-1.0 / tau_s.to(device))  # (S,) — τ-scales from learnable param
         # Surprisal-gated write: i_gate = softplus(linear + γ·||ê||₂)
         h_v = _ln(h)

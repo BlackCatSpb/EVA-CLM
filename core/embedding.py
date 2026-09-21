@@ -144,6 +144,10 @@ class PartitionedEmbedding(nn.Module):
         # сигнал выучивается с нуля (градиент течёт через CE).
         self._sent_on = bool(getattr(cfg, 'sent_boundary_emb', True))
         self._sent_pos_max = int(getattr(cfg, 'sent_pos_max', 64))
+        # P0-5b (F1a): the AR sentence-relative counter (non-persistent buffer =>
+        # snapshot/restore covered); reset by EVAStack.reset_streams().
+        self.register_buffer('_sent_rel_ptr', torch.zeros(1, dtype=torch.long),
+                             persistent=False)
         if self._sent_on:
             self.sent_eos_emb = nn.Parameter(torch.zeros(D))
             self.sent_bos_emb = nn.Parameter(torch.zeros(D))
@@ -167,6 +171,25 @@ class PartitionedEmbedding(nn.Module):
         rel = (idx - last_prev - 1).clamp(min=0, max=self._sent_pos_max - 1)
         bos = (rel == 0)
         return sep, bos, rel
+
+    def sent_masks_stream(self, tokens: torch.Tensor):
+        """P0-5b (F1a, math audit): the L=1 AR equivalent of `sent_masks`.
+
+        At L=1 the window-internal computation gives rel == 0 / bos == True for
+        EVERY token (the sentence position is lost). The training contract is
+        reproduced by carrying the sentence-relative counter:
+        rel(SEP) = its sentence's length − 1, reset after SEP, bos = (rel == 0)
+        (including consecutive SEPs). Only the AR decode calls this.
+        """
+        assert tokens.shape == (1, 1), 'sent_masks_stream expects B=L=1 (AR decode)'
+        sep = (tokens == 2)
+        rel = self._sent_rel_ptr.clamp(max=self._sent_pos_max - 1)
+        bos = (rel == 0)
+        if bool(sep.any()):
+            self._sent_rel_ptr.zero_()
+        else:
+            self._sent_rel_ptr += 1
+        return sep, bos, rel.view(1, 1)
     
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         # Защита от токенов ≥ vocab (device-side assert в gather): фон-клип
@@ -201,7 +224,13 @@ class PartitionedEmbedding(nn.Module):
         out: torch.Tensor = (codes.unsqueeze(-1) * self.basis.view(1, 1, self.K, -1)).reshape(B, L, -1)
         # T9.9: сигнал границ предложений — во ВСЁМ стволе (см. __init__).
         if self._sent_on:
-            _sep, _bos, _rel = self.sent_masks(tokens)
+            # P0-5b: in the AR decode (L=1) the window-internal masks degenerate
+            # (rel≡0/bos≡True); the carried variant reproduces the training
+            # contract. Non-AR paths are bit-for-bit unchanged.
+            if (not self.training) and bool(getattr(self, '_ar_mode', False)) and L == 1:
+                _sep, _bos, _rel = self.sent_masks_stream(tokens)
+            else:
+                _sep, _bos, _rel = self.sent_masks(tokens)
             out = out + self.sent_eos_emb.view(1, 1, -1) * _sep.unsqueeze(-1).to(out.dtype)
             out = out + self.sent_bos_emb.view(1, 1, -1) * _bos.unsqueeze(-1).to(out.dtype)
             out = out + self.sent_pos_emb(_rel).to(out.dtype)

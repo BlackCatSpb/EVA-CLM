@@ -386,6 +386,15 @@ class LogitAttention(nn.Module):
         # 0 = D (прежнее поведение, бит-совместимо).
         self.kv_dim = int(kv_dim) if int(kv_dim or 0) > 0 else int(D)
         assert self.kv_dim % n_heads == 0, f'kv_dim={self.kv_dim} % {n_heads} != 0'
+        # P0-5c (F1a, math audit): the AR (L=1) sentence-pool accumulator. The
+        # windowed scatter path pools single tokens in streaming (a "sentence"
+        # of one) — the accumulator restores the training contract: pool over
+        # the whole sentence, push it on SEP. Buffers => M8 snapshot-covered.
+        self.register_buffer('_sent_acc_k', torch.zeros(1, 1, self.kv_dim),
+                             persistent=False)
+        self.register_buffer('_sent_acc_v', torch.zeros(1, 1, self.kv_dim),
+                             persistent=False)
+        self.register_buffer('_sent_acc_n', torch.zeros(1), persistent=False)
         # ── audit decision #3: code-space logit projections ──
         # The old K/V/logit→hidden maps were V×D (3×65536×2560 ≈ 503M dead
         # params, contradicting README §1.1 'no big d×vocab matrices'). The
@@ -549,6 +558,12 @@ class LogitAttention(nn.Module):
             self._ms_feed(cache, spans[_i + 1], mk.squeeze(1), mv.squeeze(1),
                           cnt)
 
+    def reset_sent_acc(self) -> None:
+        """P0-5c: drop the AR sentence accumulator (new document = cold cache)."""
+        self._sent_acc_k.zero_()
+        self._sent_acc_v.zero_()
+        self._sent_acc_n.zero_()
+
     def forward(self, h: torch.Tensor, cache: LogitCache,
                 training: bool = True,
                 return_attention: bool = False,
@@ -591,33 +606,48 @@ class LogitAttention(nn.Module):
             M = K.shape[1]
             # T9.9 шаг 2: sentence-ring — пул K/V по предложениям (mean по
             # токенам сегмента; пишутся только ЗАВЕРШЁННЫЕ сегменты — с SEP).
-            if (self.sentence_ring and tokens is not None
-                    and int(tokens.shape[1]) == int(h.shape[1])):
-                _sep = (tokens == 2)
-                # SEP принадлежит ЗАВЕРШАЕМОМУ предложению: exclusive cumsum
-                _sid = torch.cumsum(_sep.long(), dim=1) - _sep.long()   # (B, L)
-                _ns = int(_sid.max().item()) + 1
-                _kv = k_new.shape[-1]
-                _sk = torch.zeros(B, _ns, _kv, device=h.device, dtype=k_new.dtype)
-                _sv = torch.zeros_like(_sk)
-                _sk.scatter_add_(1, _sid.unsqueeze(-1).expand(-1, -1, _kv), k_new)
-                _sv.scatter_add_(1, _sid.unsqueeze(-1).expand(-1, -1, _kv), v_new)
-                _cnt = torch.zeros(B, _ns, device=h.device, dtype=k_new.dtype)
-                _cnt.scatter_add_(1, _sid, torch.ones_like(_sid, dtype=k_new.dtype))
-                _mk = _sk / _cnt.clamp_min(1.0).unsqueeze(-1)
-                _mv = _sv / _cnt.clamp_min(1.0).unsqueeze(-1)
-                # завершённые сегменты = sid НА позициях SEP (по всем батчам —
-                # union; запись (B,1,kv), чтобы чтение не рассинхронилось при B>1)
-                # R1/R2-ревью: только сегменты, завершённые во ВСЕХ батчах
-                # (иначе — нулевые/чужие пулы при B>1)
-                _valid = (_cnt > 0).all(dim=0)
-                for _s in torch.unique(_sid[_sep]).tolist():
-                    if not bool(_valid[_s]):
-                        continue
-                    cache.push_kv_sent(
-                        _mk[:, _s, :].view(B, 1, -1).detach(),
-                        _mv[:, _s, :].view(B, 1, -1).detach(),
-                        int(_cnt[:, _s].max().item()))
+            if self.sentence_ring and tokens is not None:
+                if int(h.shape[1]) == 1 and int(h.shape[0]) == 1:
+                    # P0-5c (F1a): the AR decode accumulates the sentence and
+                    # pushes the pool on SEP (see __init__).
+                    self._sent_acc_k += k_new.detach()
+                    self._sent_acc_v += v_new.detach()
+                    self._sent_acc_n += 1.0
+                    if bool((tokens == 2).any()):
+                        _n = self._sent_acc_n.clamp_min(1.0).view(-1, 1, 1)
+                        cache.push_kv_sent(
+                            (self._sent_acc_k / _n).detach(),
+                            (self._sent_acc_v / _n).detach(),
+                            int(self._sent_acc_n.max().item()))
+                        self._sent_acc_k.zero_()
+                        self._sent_acc_v.zero_()
+                        self._sent_acc_n.zero_()
+                elif int(tokens.shape[1]) == int(h.shape[1]):
+                    _sep = (tokens == 2)
+                    # SEP принадлежит ЗАВЕРШАЕМОМУ предложению: exclusive cumsum
+                    _sid = torch.cumsum(_sep.long(), dim=1) - _sep.long()   # (B, L)
+                    _ns = int(_sid.max().item()) + 1
+                    _kv = k_new.shape[-1]
+                    _sk = torch.zeros(B, _ns, _kv, device=h.device, dtype=k_new.dtype)
+                    _sv = torch.zeros_like(_sk)
+                    _sk.scatter_add_(1, _sid.unsqueeze(-1).expand(-1, -1, _kv), k_new)
+                    _sv.scatter_add_(1, _sid.unsqueeze(-1).expand(-1, -1, _kv), v_new)
+                    _cnt = torch.zeros(B, _ns, device=h.device, dtype=k_new.dtype)
+                    _cnt.scatter_add_(1, _sid, torch.ones_like(_sid, dtype=k_new.dtype))
+                    _mk = _sk / _cnt.clamp_min(1.0).unsqueeze(-1)
+                    _mv = _sv / _cnt.clamp_min(1.0).unsqueeze(-1)
+                    # завершённые сегменты = sid НА позициях SEP (по всем батчам —
+                    # union; запись (B,1,kv), чтобы чтение не рассинхронилось при B>1)
+                    # R1/R2-ревью: только сегменты, завершённые во ВСЕХ батчах
+                    # (иначе — нулевые/чужие пулы при B>1)
+                    _valid = (_cnt > 0).all(dim=0)
+                    for _s in torch.unique(_sid[_sep]).tolist():
+                        if not bool(_valid[_s]):
+                            continue
+                        cache.push_kv_sent(
+                            _mk[:, _s, :].view(B, 1, -1).detach(),
+                            _mv[:, _s, :].view(B, 1, -1).detach(),
+                            int(_cnt[:, _s].max().item()))
             # T9.15: многоразрешающие пулы (сборка снизу вверх от атомов)
             if self.ms_spans:
                 self._push_multiscale(cache, k_new, v_new)
