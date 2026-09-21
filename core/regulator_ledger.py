@@ -141,6 +141,16 @@ def build_registry(model, cfg) -> List[Reg]:
         cfg.w_mem2v_scale_min, cfg.w_mem2v_scale_max = box['v']
 
     R.append(Reg('mem2v_adapt', _m2v_enter, _m2v_leave))
+    # ─── P4: новые каналы (identity-зажимы; регистрируются только у ВКЛючённых
+    # A/B-рук — выключенная рука и так identity, мерить её = шум в DORMANT) ───
+    if getattr(model, 'inner_eye', None) is not None:
+        R.append(_multi('inner_eye',
+                        [_attr_reg(f'ie_L{i}', l.mirror, '_inner_eye', None)
+                         for i, l in enumerate(model.layers)]))
+    if hd is not None and getattr(hd, '_temper_rel', False):
+        R.append(_attr_reg('chi_temper', hd, '_temper_rel', False))
+    if hd is not None and getattr(hd, '_chi_sal', False):
+        R.append(_attr_reg('chi_sal', hd, '_chi_sal', False))
     return R
 
 

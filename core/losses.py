@@ -498,4 +498,13 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             # L2 penalty toward zero (uniform ladder)
             _tau_dev_reg = dev.pow(2).mean() * 0.01
             aux_dict['tau_dev_reg'] = _tau_dev_reg
+    # ─── P4-2: MetaHead — читаемость внутренних сигналов из h ───
+    # Зонд: при meta_head_grad=False h.detach() ⇒ градиент терма живёт только
+    # в параметрах meta_head (ствол не тронут); маршрут — BYPASS_AUX (прямой
+    # backward, из spectral-align исключён: общий ‖g_aux‖ не сдвигается).
+    if getattr(stack, 'meta_head', None) is not None:
+        from .meta_head import meta_targets, meta_loss
+        _mt = meta_targets(stack, h)
+        _hin = h if getattr(stack.cfg, 'meta_head_grad', False) else h.detach()
+        aux_dict['meta_read'] = meta_loss(stack.meta_head(_hin), _mt)
     return ce_loss, aux_dict

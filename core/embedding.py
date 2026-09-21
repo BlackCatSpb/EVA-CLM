@@ -463,6 +463,14 @@ class SigmoidCodedHead(nn.Module):
                                  persistent=False)
             self.register_buffer('ell_ladder', torch.zeros(_lad.numel()),
                                  persistent=False)
+            # P4-3: τ-лестница противоречий — точный двойник ell_ladder
+            # (самокалибровка: гейты читают ОТНОСИТЕЛЬНОЕ превышение над
+            # собственным рабочим уровнем). Non-persistent: рекалибруется.
+            self.register_buffer('_chi_ladder', torch.zeros(_lad.numel()),
+                                 persistent=False)
+            self._chi_in: Optional[torch.Tensor] = None   # кладёт стек (mean по слоям)
+            self._temper_rel: bool = bool(getattr(cfg, 'head_temper_rel', False))
+            self._chi_sal: bool = bool(getattr(cfg, 'phantom_chi_salience', False))
             self._gate_rung: int = ladder_rung(
                 _lad, float(getattr(cfg, 'head_lacuna_gate_tau', 128.0)))
             self._base_rung: int = ladder_rung(
@@ -692,6 +700,17 @@ class SigmoidCodedHead(nn.Module):
         # M55b: the RELATIVE novelty (self-calibrating): ~1 for the running
         # level, > 1 for a spike. The gate and the bank read this, not ell.
         with torch.no_grad():
+            # P4-3: лестница противоречий — lazy-init в ОБОИХ режимах (свежая
+            # модель не должна взрывать относительную форму на eval), двигает
+            # её только training (доктрина изоляции eval M8/M55c).
+            _chi = getattr(self, '_chi_in', None)
+            if _chi is not None and torch.is_tensor(_chi):
+                _cm = _chi.detach().float().mean()
+                if float(self._chi_ladder.sum()) <= 0.0:
+                    self._chi_ladder.fill_(_cm)
+                elif self.training:
+                    self._chi_ladder.mul_(self._ladder_decay).add_(
+                        (1.0 - self._ladder_decay) * _cm)
             if float(self.ell_ema) <= 0.0:
                 # lazy init in BOTH modes (a fresh model must not saturate the
                 # gate at eval) ...
@@ -730,17 +749,22 @@ class SigmoidCodedHead(nn.Module):
         _pt = torch.tanh(e_in @ self.phantom_basis[:_kp].T)  # (...,Kp_active)
         g = torch.sigmoid(self.lacuna_w * (ell_rel - 1.0) + self.lacuna_b)
         p = _pt * g
+        # M64.10 (the liveness census): the phantom basis / lacuna params
+        # sit at a COLD START — phantom_mix is zero-init (identity by
+        # design), so d L/d(basis) = dL/dp @ mix = 0 until the mix leaves
+        # zero (its own gradient is nonzero: the wake-up path, verified).
+        # ph_sat = mean(tanh^2) tracks the OTHER risk (the un-normalized
+        # lacuna, ~0.31 at init — moderate, not blocking).
+        # P4-2: телеметрия обновляется в ОБОИХ режимах (это диагностика
+        # последнего forward, не running-статистика: M8-изоляция eval'а не
+        # нарушена — буферы ell_ema/лестницы по-прежнему двигает только train).
+        # Раньше eval читал значения, застывшие с последнего train-шага, и
+        # eval-логи/`_lac` были stale; теперь — та же 1-шаговая семантика.
+        self._last_ph_sat = float(_pt.detach().pow(2).mean())
+        self._last_lacuna = ell.detach().mean()
+        self._last_lacuna_rel = ell_rel.detach().mean()
+        self._last_lacuna_gate = g.detach().mean()
         if self.training:
-            # M64.10 (the liveness census): the phantom basis / lacuna params
-            # sit at a COLD START — phantom_mix is zero-init (identity by
-            # design), so d L/d(basis) = dL/dp @ mix = 0 until the mix leaves
-            # zero (its own gradient is nonzero: the wake-up path, verified).
-            # ph_sat = mean(tanh^2) tracks the OTHER risk (the un-normalized
-            # lacuna, ~0.31 at init — moderate, not blocking).
-            self._last_ph_sat = float(_pt.detach().pow(2).mean())
-            self._last_lacuna = ell.detach().mean()
-            self._last_lacuna_rel = ell_rel.detach().mean()
-            self._last_lacuna_gate = g.detach().mean()
             self._last_p = p                                  # live: the L1 aux
             _pb = getattr(self, 'phantom_bank', None)
             if _pb is not None and getattr(self, '_pb_active', True):
@@ -788,6 +812,15 @@ class SigmoidCodedHead(nn.Module):
                     # thresholds (the loudest sentence pool of this call), so the
                     # noise calibration is distribution-consistent with observe().
                     _sal = float(_obs_ell.detach().max())
+                    if self._chi_sal:
+                        # P4-3: противоречие — тоже новизна (одна из памятей
+                        # ошибается): max двух салиентностей, нормированный на
+                        # рабочий уровень χ-лестницы (относительная форма).
+                        _chin = getattr(self, '_chi_in', None)
+                        if _chin is not None and torch.is_tensor(_chin):
+                            _cs = self._chi_ladder[self._base_rung]
+                            _sal = max(_sal, float(_chin.detach().max()
+                                                   / (_cs + 1e-6)))
                     if not math.isfinite(_sal):
                         _sal = 0.0                      # R1: NaN-яд
                     self._sal_ring[int(self._sal_ptr.item()) % self._sal_ring.numel()] = _sal
@@ -930,6 +963,17 @@ class SigmoidCodedHead(nn.Module):
                 _h_impl = (_a.unsqueeze(-1) * self.readout).reshape(*u.shape[:-1], self.D)
                 _cos = F.cosine_similarity(_h_impl, _md.reshape(_h_impl.shape), dim=-1, eps=1e-6)
                 _chi = F.relu(self.temper_cos - _cos).unsqueeze(-1)
+                if self._temper_rel:
+                    # P4-3 A/B: относительная форма — сложить межшкальное χ
+                    # (тоже «превышение») и нормировать сумму на рабочий уровень
+                    # χ-лестницы (гейт-ступень τ≈128). Форма из патча: абсолютный
+                    # масштаб меняется — это и есть предмет A/B.
+                    _chin = getattr(self, '_chi_in', None)
+                    if (_chin is not None and torch.is_tensor(_chin)
+                            and _chin.numel() == _chi.numel()):
+                        _chi = _chi + _chin.reshape(_chi.shape)
+                    _mid = self._chi_ladder[self._gate_rung]
+                    _chi = (_chi / (_mid + 1e-6)).clamp(0.0, 5.0)
                 if self.training:
                     self._last_conflict = _chi.detach().mean()
                 logits = logits / (1.0 + self.temper_k * _chi)

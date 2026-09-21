@@ -80,6 +80,23 @@ class EVAStack(nn.Module):
         # _w_alpha_expert below referenced them only inside the if — build crash)
         self._n_experts = int(self.layers[0].mirror.G)
         self._K_max = max(int(l.mirror.k) for l in self.layers)
+        # ─── P4-1: InnerEye — общий модуль обучаемой интроспекции ───
+        # Модуль владеет стек (параметры в state_dict один раз), зеркала держат
+        # простую ссылку через object.__setattr__ (иначе параметры задвоятся).
+        self.inner_eye = None
+        if getattr(cfg, 'inner_eye', False):
+            from .inner_eye import InnerEye
+            _G_max = max(int(l.mirror.G) for l in self.layers)
+            self.inner_eye = InnerEye(G=_G_max)
+            for _l in self.layers:
+                object.__setattr__(_l.mirror, '_inner_eye', self.inner_eye)
+        # ─── P4-2: MetaHead — зонд читаемости внутренних сигналов из h ───
+        # Zero-init выхода; при meta_head_grad=False вход h.detach() (ствол не
+        # меняется). Терм идёт через BYPASS_AUX (прямой backward, см. losses).
+        self.meta_head = None
+        if getattr(cfg, 'meta_head', False):
+            from .meta_head import MetaHead
+            self.meta_head = MetaHead(cfg.D)
         if self.intent_bridge:
             # Per-head intent probe: h -> (G, k) per expert. Mirror k VARIES
             # per layer, so we project to G*K_max and slice per layer below.
@@ -467,6 +484,10 @@ class EVAStack(nn.Module):
             # M55b: the RELATIVE excess, not the absolute ell (~0.97 always):
             # the broadening must fire on a novelty spike, not on every step.
             _lac = max(0.0, float(getattr(_head, '_last_lacuna_rel', 1.0) or 1.0) - 1.0)
+        # P4-1: лакуна как признак InnerEye (1-step stale — та же конвенция)
+        if self.inner_eye is not None:
+            for _l in self.layers:
+                _l.mirror._head_ell = _lac
 
         new_state = []
         pred_errs = []  # per-layer pred_error_norm means for the maturation controller
@@ -758,6 +779,16 @@ class EVAStack(nn.Module):
         if _reasoning_attr:
             self._reasoning_buffer = reasoning_buffer
             self._reasoning_count = reasoning_count
+
+        # ─── P4-3: межшкальное χ (mean по слоям) → голова/зеркала ───
+        # Ставится ПОСЛЕ цикла слоёв и ДО любых вызовов головы в этом forward.
+        if (getattr(self.cfg, 'contradiction_field', False) and _head is not None):
+            _xt = [getattr(l, '_chi_time', None) for l in self.layers]
+            _xt = [t for t in _xt if isinstance(t, torch.Tensor)
+                   and tuple(t.shape[:2]) == (h.shape[0], h.shape[1])]
+            _head._chi_in = (torch.stack(_xt).mean(0) if _xt else None)
+            for _l in self.layers:            # P4-1: признак χ_l (опц.)
+                _l.mirror._chi_l = _head._chi_in
 
         # ─── Триада: Рассудок как участник (замыкание петли) ───
         # После прохода верификатор оценивает уверенность (_last_conf). Если она
@@ -1187,6 +1218,15 @@ class EVAStack(nn.Module):
         cfl = getattr(h, '_last_conflict', None)
         if cfl is not None:
             out['conflict'] = float(cfl)
+        # P4-3: межшкальное χ — текущее значение и рабочие уровни лестницы
+        _chin = getattr(h, '_chi_in', None)
+        if isinstance(_chin, torch.Tensor):
+            out['chi_time'] = float(_chin.detach().mean())
+            _cl = getattr(h, '_chi_ladder', None)
+            if isinstance(_cl, torch.Tensor):
+                out['chi_ladder'] = '|'.join(f'{float(x):.4f}' for x in _cl)
+                _mid = float(_cl[_cl.numel() // 2]) if _cl.numel() else 0.0
+                out['chi_rel_mean'] = float(_chin.detach().mean() / (_mid + 1e-6))
         srl = getattr(h, '_last_srl', None)
         if isinstance(srl, dict):
             for k, v in srl.items():

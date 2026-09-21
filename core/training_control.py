@@ -226,6 +226,13 @@ class LossBalancer:
     # глушится ровно тогда, когда нужна — замер 2026-09-19: wall=250 при
     # u_max 197→592). Свой масштаб 1.0, без sign-маски и CE-бонда.
     SAFETY_AUX = ('head_wall',)
+    # P4-2: probe-термы (MetaHead) — прямой градиент БЕЗ CE-маски/бонда.
+    # Причина структурная: параметры зонда НЕ входят в CE-граф (gce=None), и
+    # любой маскирующий маршрут обнуляет их вклад — align: `p.grad = zeros`
+    # при gce=None; bypass: sign-маска (0*gb>0)=False. Safety-маршрут (прямой
+    # backward через _add_safety) — единственный, доносящий градиент до
+    # параметров зонда; при meta_head_grad=False граф терма их и не покидает.
+    PROBE_AUX = ('meta_read',)
     # M64.12: the default kill-switch watch list (the aux keys the loops log)
     AUX_TERMS = ('branch', 'bridge_conn', 'div', 'decorr', 'diversity', 'balance',
                  'gate_l1', 'reinforce', 'signal_ent', 'alpha_novelty', 'pred',
@@ -479,7 +486,7 @@ class LossBalancer:
         # при aux_kill_disable стена отключалась бы ровно при насыщении
         # (proj≈0 в Schmitt-логике).
         safety: Dict[str, Any] = {}
-        for _k in self.safety_aux:
+        for _k in tuple(self.safety_aux) + tuple(self.PROBE_AUX):
             _v = aux_dict.get(_k)
             if isinstance(_v, torch.Tensor) and _v.requires_grad:
                 safety[_k] = aux_dict.pop(_k)

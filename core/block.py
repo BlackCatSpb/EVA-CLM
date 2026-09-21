@@ -303,6 +303,14 @@ class EVABlock(nn.Module):
         self._n_scales = 4
         self._vsa_floor_k = float(getattr(cfg, 'vsa_decay_floor_k', 2.0))  # B18
         self._scan_floor_bound = False   # P0-1 (F2): sticky "tau_s clamped" flag
+        # ─── P4-3: межшкальное противоречие (fast vs slow VSA) ───
+        # Монитор смены режима: косинус между быстрым [0:S/2] и медленным
+        # [S/2:] чтениями относительно собственной EMA (самокалибровка — на
+        # D-мерных косинусах абсолютный порог не работает, M55b). Считается
+        # под no_grad (граф не держим), буфер non-persistent (resume-safe).
+        self._chi_time_on: bool = bool(getattr(cfg, 'contradiction_field', False))
+        self._chi_time: Optional[torch.Tensor] = None
+        self.register_buffer('_cos_fs_ema', torch.ones(()), persistent=False)
         self.register_buffer('_pen_ema', torch.zeros(()), persistent=True)  # B18b
         # U1: τ-consistent VSA scales. This copy is the TRAINABLE ladder for
         # standalone blocks (tau_s=None); inside EVAStack the live source is
@@ -723,6 +731,24 @@ class EVABlock(nn.Module):
         # Weighted combination: sigmoid per scale per channel (no sum-to-1)
         w = torch.sigmoid(self.scale_w)  # (S, D)
         mem_all = (mem_all_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (B, L, D)
+        # ─── P4-3: fast [0:S/2] vs slow [S/2:] — расхождение направлений ───
+        # Быстрое чтение говорит X, медленное несёт Y ⇒ смена режима. Монитор:
+        # no_grad (граф не удерживаем — сигнал идёт в буферы/телеметрию, не в CE).
+        if self._chi_time_on and S >= 2:
+            with torch.no_grad():
+                _wf = w[:S // 2].unsqueeze(0).unsqueeze(0)
+                _ws = w[S // 2:].unsqueeze(0).unsqueeze(0)
+                _fast = (mem_all_vec[:, :, :S // 2] * _wf).sum(dim=2)
+                _slow = (mem_all_vec[:, :, S // 2:] * _ws).sum(dim=2)
+                _valid = ((_fast.norm(dim=-1) > 1e-4) & (_slow.norm(dim=-1) > 1e-4))
+                _cfs = F.cosine_similarity(_fast, _slow, dim=-1, eps=1e-6)
+                if self.training and bool(_valid.any()):
+                    self._cos_fs_ema.mul_(0.999).add_(
+                        _cfs[_valid].detach().mean(), alpha=0.001)
+                _chi_t = F.relu(1.0 - _cfs / (self._cos_fs_ema + 1e-6))
+                self._chi_time = torch.where(
+                    _valid, _chi_t.clamp(0.0, 5.0),
+                    torch.zeros_like(_chi_t)).detach()
         mem_leaf = (mem_leaf_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (B, L, D) — без кросс-чанк контекста
         # Dual read: leaf = within-chunk state, ctx = CROSS-chunk state only.
         # Audit M3: the old form multiplied mem_all by both w_q and w_q_ctx —

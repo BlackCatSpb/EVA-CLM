@@ -50,6 +50,8 @@ REGISTRY = {
     ('training_control.py', 'scale_ema_decay'): ('cadence', 'scale_ema — горизонт балансера'),
     ('param_writers.py', '0.999'): ('registry', 'P3-3: сам реестр двойных писателей — '
                                     'τ_ctrl и цитаты настроек писателей (источник истины, не магия)'),
+    ('inner_eye.py', '0.99'): ('cadence', 'P4-1: _o_rms_ema — горизонт RMS-статистики '
+                              'выхода eye (~100 шагов; тот же класс, что _ig_norm_ema/_ctr_norm_ema)'),
 }
 
 HARD_ALPHA = re.compile(r'(0\.9\s*[,/]|0\.99\b|0\.999\b)')

@@ -194,7 +194,10 @@ _GATE_PARTS = frozenset({'w_gate', 'b_gate', 'w_delta_gate', 'b_delta_gate',
                          # intent-bridge gate authorities: previously reached
                          # the gate bucket only through the '.w_i'/'.b_i'
                          # substring accident (b_intent even hit VSA first)
-                         'w_intent', 'b_intent', 'w_sal'})
+                         'w_intent', 'b_intent', 'w_sal',
+                         # P4-1: InnerEye — контроллер гейта (маршрут λ¹, как
+                         # прочие контроллеры; ядра учатся медленнее)
+                         'inner_eye'})
 
 
 def _role_lr_mult(name: str, lam: Any, readout_mult: float = 0.0) -> float:

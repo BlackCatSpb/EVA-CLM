@@ -109,6 +109,14 @@ class WideBindConfig:
     head_temper_k: float = 0.5    # M55a: logits /= (1 + k*chi)
     head_temper_cos: float = 0.3  # M55a: chi = relu(cos_thr - cos(implied, mem))
     head_temper_after: int = 1045  # M55a: warmup (the memory is noise at init)
+    # ─── P4-3 (ContradictionField): межшкальный детектор + потребители ───
+    contradiction_field: bool = False  # fast-vs-slow VSA детектор (буферы +
+                                       # телеметрия; forward не меняет)
+    head_temper_rel: bool = False      # A/B: относительная форма χ по _chi_ladder
+                                       # (сложение с межшкальным χ + нормировка
+                                       # на собственный рабочий уровень)
+    phantom_chi_salience: bool = False  # A/B: противоречие как новизна для
+                                        # наблюдения фантома (max двух салиентностей)
     head_phantom_slots: int = 16  # M54: the phantom-concept bank slots
     head_phantom_merge: float = 0.7  # M54: cosine >= merge -> the same phantom
     head_phantom_merge_lo: float = 0.2  # M64 (M63-C): the soft route — cosine
@@ -631,6 +639,12 @@ class WideBindConfig:
     data_dir: str = ''
     save_dir: str = 'checkpoints'
     log_dir: str = 'logs'
+    # ─── P4: прямая работа с состояниями (по заявке автора; все default off) ───
+    inner_eye: bool = False       # P4-1: обучаемая добавка к гейту зеркала
+                                  # (общий модуль на слои, zero-init ⇒ identity)
+    meta_head: bool = False       # P4-2: зонд читаемости внутренних сигналов из h
+    meta_head_grad: bool = False  # False = чистый зонд (h.detach, ствол не трогаем);
+                                  # True = aux-канал «learning to introspect» (A/B)
 
     @classmethod
     def minimal(cls, **kw):
@@ -658,6 +672,11 @@ class WideBindConfig:
         cfg.head_lacuna = False
         cfg.head_srl = False
         cfg.head_temper = False
+        cfg.head_temper_rel = False
+        cfg.phantom_chi_salience = False
+        cfg.contradiction_field = False
+        cfg.inner_eye = False
+        cfg.meta_head = False
         cfg.head_pair_rank = 0
         cfg.maturation_enabled = False
         cfg.softmax_free = True

@@ -987,6 +987,40 @@ class GroupedCognitiveMirror(nn.Module):
             # Meta-pressure authority = complement of intent_alpha (fast/memory
             # suppression is a shallow-layer mechanism; deep layers rely on intent).
             gate_logits = gate_logits - (1.0 - self._intent_alpha) * p
+        # ─── P4-1: InnerEye — обучаемая добавка к гейту (паттерн ig-канала) ───
+        # Признаки DETACHED: eye учит свою функцию состояния, градиент внутрь
+        # статистик зеркала не идёт (и граф не удерживается — память).
+        # Zero-init выхода ⇒ на init добавка ровно 0 (identity).
+        _ie = getattr(self, '_inner_eye', None)
+        if _ie is not None:
+            _z = torch.zeros(B, L, G, 1, device=h.device, dtype=h.dtype)
+            _dis = (disagreement.unsqueeze(-1)
+                    if self._has_private_mem else _z)
+            _gr = grad_mod_input(self._prev_grad_norm, self._grad_norm_ema,
+                                 self.grad_mod_bias).view(1, 1, G, 1).expand(B, L, G, 1)
+            _lsd = (self.log_scale.mean(dim=-1)
+                    - self.log_scale.mean()).view(1, 1, G, 1).expand(B, L, G, 1)
+            _pen = pred_error_norm.view(B, L, 1, 1).expand(B, L, G, 1)
+            _sal = (salience.view(B, L, 1, 1).expand(B, L, G, 1)
+                    if isinstance(salience, torch.Tensor)
+                    and tuple(salience.shape[:2]) == (B, L) else _z)
+            _ell = getattr(self, '_head_ell', None)
+            _ellf = (_z + float(_ell)) if _ell is not None else _z
+            _matf = ((_z + float(maturity.detach())) if maturity is not None
+                     else _z)
+            feats = torch.cat([
+                pred_error.abs().mean(dim=-1, keepdim=True),
+                delta.pow(2).mean(dim=-1, keepdim=True).sqrt(),
+                _dis,
+                self._delta_var.view(1, 1, G, 1).expand(B, L, G, 1),
+                _gr,
+                _lsd,
+                hp.pow(2).mean(dim=-1, keepdim=True).sqrt(),
+                self._gate_ema.view(1, 1, G, 1).expand(B, L, G, 1),
+                _pen, _sal, _ellf, _matf,
+            ], dim=-1).detach()                                  # (B,L,G,12)
+            ie_o = _ie(feats.to(h.dtype), self._tau_norm_layer)
+            gate_logits = gate_logits + ie_o * self._intent_alpha
         # Anti-collapse governor: bump gate when log-scale flattens.
         # Amplitude = τ-authority (intent_alpha); 0.05/3.0 are degenerate-bypass
         # guards, not tunable scales (fires only under log-scale collapse).
