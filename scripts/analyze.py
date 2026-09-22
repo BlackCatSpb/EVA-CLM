@@ -1220,6 +1220,43 @@ def run_head(model, ckpt, args, tok):
     print(f'    KL natural||OFF = {(pn * torch.log2(pn / po)).sum().item():.4f} bit | '
           f'KL OFF||natural = {(po * torch.log2(po / pn)).sum().item():.4f} bit')
 
+    # ─── EXT_GEN_13640 §4: head-geometry ряд (величина контекстного вклада) ───
+    # std(u_ctx) = std(z/T) без bit_bias — прямая магнитуда контекста; чтение vs
+    # лакуна: ||P·h|| (проекция h на read-подпространство) против ||e_l||;
+    # геометрия tied-базиса (F-норма и разброс по строкам); gain и T.
+    head_geo = None
+    try:
+        head = model.lm_head
+        with torch.no_grad():
+            w0 = torch.tensor(ids[:L], dtype=torch.long)
+            h_emb = model.embed_tokens(w0.unsqueeze(0))
+            out, *_ = model(h_emb, None, adaptive=False)
+            h2 = out[0].reshape(-1, out.shape[-1])
+            zt, z_data, e_l = head._gates(h2, return_data=True)
+            u_std = float(z_data.std())
+            P_h = (z_data.unsqueeze(-1) * head.readout).reshape(h2.shape[0], -1)
+            read_norm = float(P_h.norm(dim=-1).mean())
+            lac_norm = float(e_l.norm(dim=-1).mean())
+            R = head.readout.data
+            basis_f = float(R.norm())
+            row = R.norm(dim=-1)
+            tb_std = float(head.token_bias.data.std())
+            gain = (float(head.emphasis_gain.item())
+                    if hasattr(head, 'emphasis_gain') else float('nan'))
+            T_mean = float(torch.exp(head.log_temp.data).mean())
+        print(f'\n  HEAD GEOMETRY (EXT §4): std(u_ctx)={u_std:.4f} | '
+              f'||P·h||={read_norm:.3f} ||e_l||={lac_norm:.3f} '
+              f'(ratio {read_norm / (lac_norm + 1e-9):.2f}) | '
+              f'||basis||_F={basis_f:.3f} row[min={float(row.min()):.3f} '
+              f'max={float(row.max()):.3f}] | std(token_bias)={tb_std:.4f} | '
+              f'gain={gain:+.4f} T_mean={T_mean:.4f}')
+        head_geo = {'u_ctx_std': u_std, 'read_norm': read_norm, 'lacuna_norm': lac_norm,
+                    'ratio': read_norm / (lac_norm + 1e-9), 'basis_f': basis_f,
+                    'basis_row_min': float(row.min()), 'basis_row_max': float(row.max()),
+                    'tb_std': tb_std, 'gain': gain, 'T_mean': T_mean}
+    except Exception as _ge:
+        print(f'  HEAD GEOMETRY: n/a ({_ge})')
+
     return {
         'log_temp': log_temp, 't_eff': t_eff,
         'token_bias_top': [tok.decode([int(i)]) for i in torch.topk(tb, 5).indices.tolist()],
@@ -1230,6 +1267,7 @@ def run_head(model, ckpt, args, tok):
         'posmap': bins_out,
         'ab': {m: {'top1': v[0], 'H': v[1], 's_top1': v[2], 's_H': v[3]}
                for m, v in res.items()},
+        'geometry': head_geo,
     }
 
 
@@ -2298,6 +2336,18 @@ white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color
         ch.append('<div class="dim">token_bias top: ' +
                   ', '.join(H.escape(repr(t)) for t in head['token_bias_top']) +
                   f' &nbsp; log_temp={head["log_temp"]:.4f} t_eff={head["t_eff"]:.4f}</div>')
+        geo = head.get('geometry')
+        if geo:
+            _gc = 'r' if geo['gain'] < 0 else 'g'
+            ch.append('<div>HEAD GEOMETRY (EXT §4): '
+                      f'std(u_ctx)=<b>{geo["u_ctx_std"]:.4f}</b> &nbsp; '
+                      f'||P·h||={geo["read_norm"]:.3f} ||e_l||={geo["lacuna_norm"]:.3f} '
+                      f'(ratio {geo["ratio"]:.2f}) &nbsp; '
+                      f'||basis||_F={geo["basis_f"]:.3f} '
+                      f'[{geo["basis_row_min"]:.3f}..{geo["basis_row_max"]:.3f}] &nbsp; '
+                      f'std(token_bias)={geo["tb_std"]:.4f} &nbsp; '
+                      f'emphasis_gain=<b class="{_gc}">{geo["gain"]:+.4f}</b> '
+                      f'T_mean={geo["T_mean"]:.4f}</div>')
 
     ch.append('<h2>ALL PARAMETERS (grouped — ВСЕ, вкл. новые)</h2>')
     ch.append('<table><tr><th>name</th><th>shape</th><th>n</th><th>mean</th>'
