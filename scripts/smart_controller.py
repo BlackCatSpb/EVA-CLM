@@ -241,6 +241,20 @@ def smart_generate(model, prompt, controller, max_new_tokens=64, rep_window=8,
     from scripts.generate import load_russian_tokenizer
     controller.no_trunc = no_trunc
     model.eval()
+    # P0-6 (F1b): prefill + incremental L=1 decode — the SAME pattern as
+    # generate() and the training loop. The old loop re-fed the whole sliding
+    # window with the carried state, so VSA/bank/UCL/cache received ~L writes
+    # per token (the math audit measured the slow VSA scale x3.52 at L=8; at
+    # L=384 proportionally worse) and the generating model was NOT the function
+    # validated on the hold-out. This smart path had missed the fix.
+    for _l in model.layers:
+        _mm = getattr(_l, 'mirror', None)
+        if _mm is not None:
+            _mm._ar_mode = True
+    if getattr(model, 'embed', None) is not None:
+        model.embed._ar_mode = True
+    if hasattr(model, '_last_salience'):
+        model._last_salience = None
     tok = load_russian_tokenizer()
     det = lambda ids: tok.decode(ids, skip_special_tokens=True)
     ids = tok.encode(prompt).ids
@@ -259,21 +273,20 @@ def smart_generate(model, prompt, controller, max_new_tokens=64, rep_window=8,
 
     out_ids = list(ids)
     n = len(model.layers)
+
+    # Prefill: the prompt as ONE window; the recurrent state starts cold.
+    ctx = tokens[-L:].unsqueeze(0)
+    h = model.embed_tokens(ctx)
+    out, state, gs, rb = model(h, None, global_state=None, adaptive=False,
+                               context_mem=context_mem, allow_write=allow_write,
+                               step=base_step, intent_state=None, tokens=ctx)
+    intent_state = getattr(model, '_last_intent_state', None)  # T9.11
+    model.observe_output(head(out))   # salience of the prompt's last token
+
     for step in range(max_new_tokens):
-        ctx = tokens[-L:].unsqueeze(0)
-        h = model.embed_tokens(ctx)
         if reset_reasoning:
             model.reset_reasoning()
             rb = None
-        out, state, gs, rb = model(h, state, global_state=gs, adaptive=False,
-                                  context_mem=context_mem, allow_write=allow_write,
-                                  step=base_step + step,
-                                  intent_state=intent_state,
-                                  reasoning_buffer=rb[0] if rb is not None else None,
-                                  reasoning_count=rb[1] if rb is not None else None,
-                                  tokens=ctx)
-        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
-        model.observe_output(out)
         logits = head(out[:, -1:, :])[0, 0]
         if not torch.isfinite(logits).all():
             logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
@@ -315,4 +328,17 @@ def smart_generate(model, prompt, controller, max_new_tokens=64, rep_window=8,
             controller.recent = controller.recent[-max_recent:]
         out_ids.append(nt)
         tokens = torch.cat([tokens, torch.tensor([nt], dtype=torch.long, device=device)])
+
+        # P0-6: incremental decode — ONE new token per step, the state carried.
+        tok1 = torch.tensor([[nt]], dtype=torch.long, device=device)
+        h1 = model.embed_tokens(tok1)
+        out, state, gs, rb = model(h1, state, global_state=gs, adaptive=False,
+                                   context_mem=context_mem, allow_write=allow_write,
+                                   step=base_step + step + 1,
+                                   intent_state=intent_state,
+                                   reasoning_buffer=rb[0] if rb is not None else None,
+                                   reasoning_count=rb[1] if rb is not None else None,
+                                   tokens=tok1)
+        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
+        model.observe_output(head(out))  # salience of THIS step -> next intent
     return det(out_ids), controller.decisions
