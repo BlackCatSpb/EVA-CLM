@@ -416,6 +416,21 @@ class SigmoidCodedHead(nn.Module):
         _p = prop.clamp(1e-7, 1 - 1e-7)
         self.bit_bias: nn.Parameter = nn.Parameter(torch.log(_p / (1 - _p)))
         self.log_temp: nn.Parameter = nn.Parameter(torch.zeros(self.K))
+        # ─── EXT/аудит: полный линейный readout (D -> K) — A/B-рука ───
+        # Структурно текущее чтение блочно-диагональное: бит k видит только свой
+        # срез h[k*d:(k+1)*d] (40 из 2560 измерений). Замер 13640: реконструкция
+        # через readout захватывает ~2.6% энергии h = уровень СЛУЧАЙНОЙ орт-проекции
+        # (1/d) ⇒ геометрия чтения не сонастроена с h. readout_full инициализируется
+        # ТОЧНО из блочно-диагонального (вне блока нули) ⇒ forward при включении
+        # идентичен, а обучаются и вне-блочные компоненты. Отвязан от embed-базиса.
+        self._read_full: bool = bool(getattr(cfg, 'head_read_full', False))
+        if self._read_full:
+            _d = int(self.readout.shape[-1])
+            _W = torch.zeros(cfg.D, self.K)
+            with torch.no_grad():
+                for _k in range(self.K):
+                    _W[_k * _d:(_k + 1) * _d, _k] = self.readout.data[_k]
+            self.readout_full: nn.Parameter = nn.Parameter(_W)
         # M52a: learnable gain on the softmax emphasis (init 1 = the old
         # behavior bit-for-bit; the model sizes the competition itself).
         self.emphasis_gain: nn.Parameter = nn.Parameter(torch.ones(1))
@@ -567,8 +582,12 @@ class SigmoidCodedHead(nn.Module):
         else:
             squeeze = False
         B, L, D = h.shape
-        h_g: torch.Tensor = h.reshape(B, L, self.K, -1)
-        z: torch.Tensor = (h_g * self.readout.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+        if self._read_full:
+            # полное линейное чтение (вне-блочные компоненты обучаемы)
+            z: torch.Tensor = (h.reshape(B * L, D) @ self.readout_full).reshape(B, L, self.K)
+        else:
+            h_g: torch.Tensor = h.reshape(B, L, self.K, -1)
+            z: torch.Tensor = (h_g * self.readout.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
         # M52a: ST clamp — forward identical, backward identity (a tau at a
         # rail keeps a nonzero gradient; the old clamp froze log_temp).
         T: torch.Tensor = torch.exp(self.log_temp)
@@ -593,7 +612,11 @@ class SigmoidCodedHead(nn.Module):
             # M52b: the lacuna — the per-block orthogonal residual. It is
             # invisible to the readout by construction (the known bits cannot
             # represent it), which is exactly why the phantom basis exists.
-            e_l = h - (z.unsqueeze(-1) * self.readout).reshape(B, L, self.D)
+            if self._read_full:
+                e_l = (h.reshape(B * L, D) - z.reshape(B * L, self.K)
+                       @ self.readout_full.T).reshape(B, L, self.D)
+            else:
+                e_l = h - (z.unsqueeze(-1) * self.readout).reshape(B, L, self.D)
             if squeeze:
                 zt = zt.squeeze(1)
                 z_data = z_data.squeeze(1)

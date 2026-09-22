@@ -647,6 +647,10 @@ class WideBindConfig:
     save_dir: str = 'checkpoints'
     log_dir: str = 'logs'
     # ─── P4: прямая работа с состояниями (по заявке автора; все default off) ───
+    head_read_full: bool = False  # EXT/аудит: полный линейный readout (D->K) вместо
+                                  # блочно-диагонального; инициализируется точно из
+                                  # блочного (вне блока нули) => forward идентичен,
+                                  # обучаются вне-блочные компоненты (+163k параметров)
     inner_eye: bool = False       # P4-1: обучаемая добавка к гейту зеркала
                                   # (общий модуль на слои, zero-init ⇒ identity)
     meta_head: bool = False       # P4-2: зонд читаемости внутренних сигналов из h
