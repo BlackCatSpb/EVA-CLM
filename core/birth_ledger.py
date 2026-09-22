@@ -166,6 +166,15 @@ class BirthLedger:
                     retired=sum(1 for e in self.entries if e['retired']),
                     blacklisted=len(self.blacklist))
 
+    def median_verdict(self) -> Optional[float]:
+        """EXT §7.4: медианный вердикт (нат) по всем записанным — контекст для
+        «retired=N»: без него число пенсий нечитаемо."""
+        vs = [v for e in self.entries for v in e.get('verdicts', [])]
+        if not vs:
+            return None
+        vs = sorted(vs)
+        return float(vs[len(vs) // 2])
+
     def state_dict(self) -> dict:
         return dict(entries=[{**e, 'd': e['d'].tolist()} for e in self.entries],
                     blacklist=[{'d': b['d'].tolist(), 'until': b['until']}

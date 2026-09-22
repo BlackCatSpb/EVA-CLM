@@ -161,6 +161,12 @@ class RegulatorLedger:
         self.regs = regs if regs is not None else build_registry(model, cfg)
         self.probe = probe
         self.batches: List = []            # [(x_a, y_a), (x_b, y_b)] — filled by the trainer
+        # EXT_GEN_13640 §7.1: батчи, НЕ встречавшиеся в обучении, и (в) «свежий
+        # документ» перед замером: без этого кольцо кэша копит probe-текст между
+        # раундами и active-нога читает почти-дубликаты (+3.9 у logit_cache
+        # частично измеряло «кэш запомнил повторяющийся текст»). Альтернация пар (б) не нужна: flush (в) достаточен, а фиксированные измерительные пары сохраняют семантику дельт.
+        self.flush_batches: List = []
+        self._round = 0
         self.per_round = per_round
         self.dwell = dwell
         self.state: Dict[str, dict] = {r.name: dict(delta_ema=0.0, n=0, off=0, on=0,
@@ -214,16 +220,17 @@ class RegulatorLedger:
         # a per-leg restore sigma_re = 0.57 nat (measured), with it — fp noise.
         snap = model.snapshot_runtime_buffers()
         ex = self._probe_state(model)
+        b0, b1 = self.batches[0], self.batches[1]
         try:
-            ce_a = self.probe(*self.batches[0])
+            ce_a = self.probe(*b0)
             self._restore_all(model, snap, ex)
-            ce_r = self.probe(*self.batches[0])     # rerun: the determinism noise (~0)
+            ce_r = self.probe(*b0)                  # rerun: the determinism noise (~0)
             self._restore_all(model, snap, ex)
-            ce_b = self.probe(*self.batches[1])     # batch swap: the natural CE spread
+            ce_b = self.probe(*b1)                  # batch swap: the natural CE spread
             self._restore_all(model, snap, ex)
             reg.identity()
             try:
-                ce_off = self.probe(*self.batches[0])
+                ce_off = self.probe(*b0)
             finally:
                 reg.restore()
         finally:
@@ -231,6 +238,12 @@ class RegulatorLedger:
         return ce_off - ce_a, abs(ce_r - ce_a), abs(ce_b - ce_a)
 
     def measure_round(self, model) -> Dict[str, float]:
+        # EXT §7.1(в): свежий документ перед замером — кольцо кэша перестаёт
+        # «помнить» probe-текст прошлых раундов (модель-состояние чистит eval).
+        if self.flush_batches:
+            for _b in self.flush_batches:
+                self.probe(*_b)
+        self._round += 1
         out = {}
         for _ in range(min(self.per_round, len(self.regs))):
             reg = self.regs[self.ptr % len(self.regs)]
@@ -262,7 +275,7 @@ class RegulatorLedger:
         return sorted(k for k, v in self.state.items() if v['status'] == 'DORMANT')
 
     def state_dict(self) -> dict:
-        return {'state': self.state, 'ptr': self.ptr,
+        return {'state': self.state, 'ptr': self.ptr, 'round': self._round,
                 'sigma_re': self.sigma_re, 'sigma_b': self.sigma_b}
 
     def load_state_dict(self, sd: Optional[dict]) -> None:
@@ -272,5 +285,6 @@ class RegulatorLedger:
             if k in self.state:
                 self.state[k].update(v)
         self.ptr = int(sd.get('ptr', 0))
+        self._round = int(sd.get('round', 0))
         self.sigma_re = sd.get('sigma_re')
         self.sigma_b = sd.get('sigma_b')
