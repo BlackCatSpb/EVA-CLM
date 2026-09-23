@@ -1127,11 +1127,77 @@ def run_live(model, cfg, batch=1, seq=128, gradinfo=True):
 
 # ─────────────────────────── HEAD ───────────────────────────
 
-def _head_forward(model, window, tok):
+def _head_forward(model, window, tok, step=0):
     with torch.no_grad():
-        h = model.embed_tokens(window.unsqueeze(0))
-        out, _, _, _ = model(h, None, adaptive=False)
+        x1 = window.unsqueeze(0)
+        h = model.embed_tokens(x1)
+        out, _, _, _ = model(h, None, adaptive=False, step=step, tokens=x1)
         return model.lm_head(out[0])
+
+
+def _bus_bias_of(model, B, L):
+    """bus_bias точно как в losses.compute_losses (стенсил шины)."""
+    if (getattr(model, 'intent_bridge', False)
+            and getattr(model, 'bus_head_proj', None) is not None
+            and getattr(model, '_last_bus', None) is not None):
+        _bus = model._last_bus.expand(B, L, -1, -1).reshape(B, L, -1)
+        return model.bus_head_proj(_bus).reshape(B * L, 1, -1)
+    return None
+
+
+def _head_eval_seq(model, ids, L, step, tb, tb_argmax, tok, posmap=None):
+    """Eval-подобный прогон: последовательные окна, состояние несётся, tokens,
+    step и bus_bias (как в реальном CE-пути). Возвращает CE(full), CE(bias-only),
+    dctx, argmax==bias, категории ctx/full, H. posmap заполняется, если задан."""
+    lz_b = float(torch.logsumexp(tb.float(), dim=-1))
+    tot_ce = tot_b = tot_n = 0.0
+    match = npos = 0
+    cats = {'ctx_word': 0, 'ctx_punct': 0, 'full_word': 0, 'full_punct': 0}
+    H_sum = 0.0
+    state = gs = None
+    with torch.no_grad():
+        model.reset_streams()
+        model.reset_cache()
+        for off in range(0, max(0, len(ids) - L), L):
+            x = torch.tensor(ids[off:off + L], dtype=torch.long).view(1, -1)
+            y = torch.tensor(ids[off + 1:off + L + 1], dtype=torch.long).view(1, -1)
+            h = model.embed_tokens(x)
+            out, state, gs, _ = model(h, state, global_state=gs,
+                                      adaptive=False, step=step, tokens=x)
+            bb = _bus_bias_of(model, 1, L)
+            lp = model.lm_head(out.reshape(-1, out.shape[-1]), bus_bias=bb)
+            tgt = y.reshape(-1)
+            idx = torch.arange(tgt.numel())
+            tot_ce += float(-lp[idx, tgt].sum())
+            tot_b += float((lz_b - tb[tgt]).sum())
+            tot_n += tgt.numel()
+            ctx = lp - tb.unsqueeze(0)
+            for pos in range(0, L, 8):
+                npos += 1
+                am = int(lp[pos].argmax())
+                match += am == tb_argmax
+                _c = _cat(int(ctx[pos].argmax()), tok)
+                cats['ctx_word'] += _c == 'word'
+                cats['ctx_punct'] += _c == 'punct'
+                _c = _cat(am, tok)
+                cats['full_word'] += _c == 'word'
+                cats['full_punct'] += _c == 'punct'
+                pv = torch.softmax(lp[pos].double(), -1)
+                H = float(-(pv * torch.log2(pv.clamp_min(1e-12))).sum())
+                H_sum += H
+                if posmap is not None:
+                    d = posmap.setdefault(pos, {'top1': 0.0, 'H': 0.0, 'cnt': 0,
+                                                'punct': 0, 'word': 0})
+                    d['top1'] += float(pv.max())
+                    d['H'] += H
+                    d['cnt'] += 1
+                    if _c == 'punct':
+                        d['punct'] += 1
+                    elif _c == 'word':
+                        d['word'] += 1
+    return dict(ce=tot_ce / max(tot_n, 1), bce=tot_b / max(tot_n, 1),
+                dctx=(tot_b - tot_ce) / max(tot_n, 1), match=match, n=npos,
+                cats=cats, H=H_sum / max(npos, 1))
 
 
 def _cat(tid, tok):
@@ -1153,37 +1219,39 @@ def run_head(model, ckpt, args, tok):
     print(f'  log_temp={log_temp:.4f} -> t_eff={t_eff:.4f} | '
           f'token_bias top: {[repr(tok.decode([int(i)])) for i in torch.topk(tb, 5).indices.tolist()]}')
 
+    # Ревью: маркер был setup- и текст-зависим (без tokens/step/состояния/bus_bias,
+    # на одном повторяющемся тексте). Теперь — eval-подобно и по нескольким
+    # текстам; агрегат + таблица по текстам.
     stats = {'match': 0, 'total': 0, 'ctx_word': 0, 'ctx_punct': 0,
              'full_word': 0, 'full_punct': 0}
     posmap = {}
-    for start in range(0, min(len(ids) - L, n_w * L), L):
-        window = torch.tensor(ids[start:start + L], dtype=torch.long)
-        logits = _head_forward(model, window, tok)
-        ctx = logits - tb.unsqueeze(0)
-        pr = F.softmax((logits.double() / t_eff), dim=-1)
-        top1 = pr.max(dim=-1)
-        H = -(pr * torch.log2(pr.clamp_min(1e-12))).sum(dim=-1)
-        for pos in range(L):
-            d = posmap.setdefault(pos, {'top1': 0.0, 'H': 0.0, 'cnt': 0, 'punct': 0, 'word': 0})
-            d['top1'] += top1.values[pos].item()
-            d['H'] += H[pos].item()
-            d['cnt'] += 1
-            if _cat(top1.indices[pos], tok) == 'punct':
-                d['punct'] += 1
-            elif _cat(top1.indices[pos], tok) == 'word':
-                d['word'] += 1
-        for pos in range(0, L, 8):
-            lt = logits[pos]
-            stats['total'] += 1
-            if int(lt.argmax()) == tb_argmax:
-                stats['match'] += 1
-            for tid, cat, k in ((int(ctx[pos].argmax()), 'ctx', 'ctx'),
-                                (int(lt.argmax()), 'full', 'full')):
-                c = _cat(tid, tok)
-                stats[f'{k}_word'] += c == 'word'
-                stats[f'{k}_punct'] += c == 'punct'
+    step0 = int(ckpt.get('step', 0) or 0) if isinstance(ckpt, dict) else 0
+    texts = [('analyzer', ids)]
+    if getattr(args, 'prompt', ''):
+        texts.append(('prompt', tok.encode(args.prompt).ids))
+    _stream = getattr(args, 'stream', '') or ''
+    if _stream and os.path.exists(_stream):
+        import numpy as _np
+        _w = _np.fromfile(_stream, dtype=_np.uint16).astype(_np.int64)
+        texts.append(('stream_head', _w[:3 * L].tolist()))
+        texts.append(('stream_eval', _w[len(_w) // 4:len(_w) // 4 + 3 * L].tolist()))
+    texts_out = []
+    for _name, _ids in texts:
+        r = _head_eval_seq(model, _ids, L, step0, tb, tb_argmax, tok,
+                           posmap=posmap if _name == 'analyzer' else None)
+        texts_out.append((_name, r))
+        stats['match'] += r['match']
+        stats['total'] += r['n']
+        for k in ('ctx_word', 'ctx_punct', 'full_word', 'full_punct'):
+            stats[k] += r['cats'][k]
+        print(f'  [{_name:12s}] CE={r["ce"]:.4f} bias-only={r["bce"]:.4f} '
+              f'dctx={r["dctx"]:+.4f} | argmax==bias {r["match"]}/{r["n"]} '
+              f'({100.0 * r["match"] / max(r["n"], 1):.0f}%) | full: '
+              f'w={r["cats"]["full_word"]} p={r["cats"]["full_punct"]} '
+              f'| H={r["H"]:.2f} bit')
 
-    print(f'\n  BIAS-DECOMP: argmax==bias в {stats["match"]}/{stats["total"]} '
+    print(f'\n  BIAS-DECOMP (агрегат, {len(texts_out)} текстов): argmax==bias '
+          f'{stats["match"]}/{stats["total"]} '
           f'({100.0 * stats["match"] / max(stats["total"], 1):.1f}%) | '
           f'ctx: word={stats["ctx_word"]} punct={stats["ctx_punct"]} | '
           f'full: word={stats["full_word"]} punct={stats["full_punct"]}')
@@ -1207,7 +1275,7 @@ def run_head(model, ckpt, args, tok):
     for mode, override in (('OFF', 0.0), ('natural', None), ('FULL', 1.0)):
         model.reasoning_scale_override = override
         model.reset_reasoning()
-        logits = _head_forward(model, win, tok)[-1]
+        logits = _head_forward(model, win, tok, step=step0)[-1]
         p = F.softmax(logits.double(), dim=-1)
         pe = F.softmax((logits.double() / t_eff), dim=-1)
         Hr = -(p * torch.log2(p.clamp_min(1e-12))).sum().item()
@@ -1230,7 +1298,8 @@ def run_head(model, ckpt, args, tok):
         with torch.no_grad():
             w0 = torch.tensor(ids[:L], dtype=torch.long)
             h_emb = model.embed_tokens(w0.unsqueeze(0))
-            out, *_ = model(h_emb, None, adaptive=False)
+            out, *_ = model(h_emb, None, adaptive=False, step=step0,
+                            tokens=w0.unsqueeze(0))
             h2 = out[0].reshape(-1, out.shape[-1])
             zt, z_data, e_l = head._gates(h2, return_data=True)
             u_std = float(z_data.std())
@@ -1263,7 +1332,10 @@ def run_head(model, ckpt, args, tok):
         'bias_decomp': {'match': stats['match'], 'total': stats['total'],
                         'pct': 100.0 * stats['match'] / max(stats['total'], 1),
                         'ctx_word': stats['ctx_word'], 'ctx_punct': stats['ctx_punct'],
-                        'full_word': stats['full_word'], 'full_punct': stats['full_punct']},
+                        'full_word': stats['full_word'], 'full_punct': stats['full_punct'],
+                        'texts': [(n, {k: r[k] for k in ('ce', 'bce', 'dctx',
+                                                         'match', 'n', 'H')})
+                                  for n, r in texts_out]},
         'posmap': bins_out,
         'ab': {m: {'top1': v[0], 'H': v[1], 's_top1': v[2], 's_H': v[3]}
                for m, v in res.items()},
@@ -2323,6 +2395,22 @@ white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color
         ch.append(f'<div>BIAS-DECOMP: argmax==bias <b class="{cls}">{bd["match"]}/{bd["total"]} '
                   f'({bd["pct"]:.1f}%)</b> &nbsp; ctx: word={bd["ctx_word"]} punct={bd["ctx_punct"]} '
                   f'&nbsp; full: word={bd["full_word"]} punct={bd["full_punct"]}</div>')
+
+        if bd.get('texts'):
+            ch.append('<table><tr><th>текст</th><th>CE</th><th>bias-only</th>'
+                      '<th>dctx</th><th>argmax==bias</th><th>H, bit</th></tr>')
+            for _n, _r in bd['texts']:
+                _p = 100.0 * _r['match'] / max(_r['n'], 1)
+                _c = 'g' if _r['dctx'] > 0 else 'r'
+                ch.append(f'<tr><td>{H.escape(_n)}</td><td>{_r["ce"]:.4f}</td>'
+                          f'<td>{_r["bce"]:.4f}</td>'
+                          f'<td><b class="{_c}">{_r["dctx"]:+.4f}</b></td>'
+                          f'<td>{_r["match"]}/{_r["n"]} ({_p:.0f}%)</td>'
+                          f'<td>{_r["H"]:.2f}</td></tr>')
+            ch.append('</table>')
+            ch.append('<div class="dim">маркер: eval-подобный setup '
+                      '(tokens+step+несённое состояние+bus_bias), несколько текстов; '
+                      'dctx&gt;0 — контекст помогает.</div>')
         ch.append('<table><tr><th>pos</th><th>top-1</th><th>H</th><th>punct%</th><th>word%</th></tr>')
         for b in head['posmap']:
             ch.append(f'<tr><td>{b["label"]}</td><td>{b["top1"]:.4f}</td><td>{b["H"]:.3f}</td>'
@@ -2390,6 +2478,8 @@ def main():
     ap.add_argument('--moves', action='store_true', help='Adam update census from optimizer state (who learns / who stalled)')
     ap.add_argument('--carry', action='store_true', help='B18 window-carry probe (two forwards, ladder reality check)')
     ap.add_argument('--depthgrad', action='store_true', help='per-layer CE-grad attenuation census (M31)')
+    ap.add_argument('--stream', type=str, default='',
+                    help='token_stream .bin для hold-out окон в HEAD-маркере')
     ap.add_argument('--log', type=str, default='',
                     help='path to Colab training log (.txt) -> полный HTML-дашборд ВСЕХ метрик')
     args = ap.parse_args()
