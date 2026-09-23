@@ -1760,3 +1760,16 @@ argmax==bias 100%, H 10.90) — setup единый. Новые факты на �
 max predMSE L3 = 85.3 (зеркало на реальном тексте ошибается сильнее, чем на
 random-входе — watch); geometry ||P*h||/||e_l|| = 0.12 ~ 1/sqrt(40) = уровень
 случайной проекции (подтверждает «readout не сонастроен с h»).
+
+
+## BirthLedger: state_dict на стек-тензор (EXT §7.2) + readout_full re-sync hook
+
+- BirthLedger.state_dict хранил d как list-of-lists (Python-списки) на каждую
+  запись — 10.5k рождений × 2560 float раздували чекпоинт на ~225MB. Теперь d
+  и d блэклиста — ОДИН стек-тензор (d_stack/l_d_stack); метаданные без
+  d. load_state_dict читает и новый формат, и легаси (d-список в записи) —
+  старые чекпоинты грузятся. +2 теста (стек/roundtrip, легаси).
+- head_read_full: _sync_readout_full_from_readout() + _load_from_state_dict:
+  при резюме из чекпоинта БЕЗ readout_full полный readout пере-собирается из
+  ЗАГРУЖЕННОГО блочного (identity-at-init), а не остаётся копией свежего инита
+  (баг найден симуляцией). +1 тест (4 в файле).

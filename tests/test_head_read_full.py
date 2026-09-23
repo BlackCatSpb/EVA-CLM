@@ -84,3 +84,26 @@ def test_lacuna_is_orthogonal_residual():
     W = m.lm_head.readout_full
     dot = (e_l.reshape(-1, 64) @ W)
     assert float(dot.abs().max()) < 1e-4, f'остаток должен быть ⟂ W: {float(dot.abs().max()):.2e}'
+
+
+def test_resume_without_readout_full_resyncs_from_loaded_readout():
+    """Резюм после первого включения флага: чекпоинт без readout_full — полный
+    readout обязан пере-собраться из ЗАГРУЖЕННОГО блочного (identity), а не
+    остаться копией свежего инита (баг найден симуляцией)."""
+    torch.manual_seed(3)
+    src = _model(False)                      # «чекпоинт» без readout_full
+    with torch.no_grad():
+        src.lm_head.readout.mul_(0.37)       # отличимая геометрия
+    torch.manual_seed(4)
+    dst = _model(True)                       # свежий инит полного readout
+    dst.load_state_dict(src.state_dict(), strict=False)
+    W = dst.lm_head.readout_full.data
+    R = dst.lm_head.readout.data
+    d, K = int(R.shape[-1]), dst.lm_head.K
+    for k in range(K):
+        assert torch.equal(W[k * d:(k + 1) * d, k], R[k]), \
+            'readout_full обязан пере-синхронизироваться из загруженного readout'
+    off = W.clone()
+    for k in range(K):
+        off[k * d:(k + 1) * d, k] = 0.0
+    assert float(off.abs().sum()) == 0.0

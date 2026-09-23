@@ -425,12 +425,9 @@ class SigmoidCodedHead(nn.Module):
         # идентичен, а обучаются и вне-блочные компоненты. Отвязан от embed-базиса.
         self._read_full: bool = bool(getattr(cfg, 'head_read_full', False))
         if self._read_full:
-            _d = int(self.readout.shape[-1])
-            _W = torch.zeros(cfg.D, self.K)
-            with torch.no_grad():
-                for _k in range(self.K):
-                    _W[_k * _d:(_k + 1) * _d, _k] = self.readout.data[_k]
-            self.readout_full: nn.Parameter = nn.Parameter(_W)
+            self.readout_full: nn.Parameter = nn.Parameter(
+                torch.zeros(cfg.D, self.K))
+            self._sync_readout_full_from_readout()
         # M52a: learnable gain on the softmax emphasis (init 1 = the old
         # behavior bit-for-bit; the model sizes the competition itself).
         self.emphasis_gain: nn.Parameter = nn.Parameter(torch.ones(1))
@@ -573,6 +570,24 @@ class SigmoidCodedHead(nn.Module):
                 '_pair_idx',
                 self.codes.nonzero()[:, 1].reshape(-1, int(_cw[0].item())),
                 persistent=False)
+
+    def _sync_readout_full_from_readout(self) -> None:
+        """Identity-at-init: readout_full = блочно-диагональная копия readout."""
+        with torch.no_grad():
+            _d = int(self.readout.shape[-1])
+            self.readout_full.zero_()
+            for _k in range(self.K):
+                self.readout_full[_k * _d:(_k + 1) * _d, _k] = self.readout.data[_k]
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Резюм после первого включения head_read_full: в чекпоинте нет
+        # readout_full (он появился вместе с флагом) — после загрузки readout
+        # пере-синхронизируем полный readout из ЗАГРУЖЕННОГО блочного (identity),
+        # иначе он остался бы копией свежего инита (найдено симуляцией).
+        _has_full = (prefix + 'readout_full') in state_dict
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        if self._read_full and not _has_full and hasattr(self, 'readout_full'):
+            self._sync_readout_full_from_readout()
 
     def _gates(self, h: torch.Tensor, temp_factor: Optional[torch.Tensor] = None,
                bus_bias: Optional[torch.Tensor] = None, return_data: bool = False):
