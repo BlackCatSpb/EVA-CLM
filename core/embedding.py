@@ -428,6 +428,8 @@ class SigmoidCodedHead(nn.Module):
             self.readout_full: nn.Parameter = nn.Parameter(
                 torch.zeros(cfg.D, self.K))
             self._sync_readout_full_from_readout()
+        # M65 (аудит 19360 §1): ST-кламп log-odds битов (см. cfg.head_u_clamp).
+        self._u_clamp: float = float(getattr(cfg, 'head_u_clamp', 0.0) or 0.0)
         # M52a: learnable gain on the softmax emphasis (init 1 = the old
         # behavior bit-for-bit; the model sizes the competition itself).
         self.emphasis_gain: nn.Parameter = nn.Parameter(torch.ones(1))
@@ -447,6 +449,14 @@ class SigmoidCodedHead(nn.Module):
                 _orth_rows(torch.randn(self._Kp_max, D, generator=_pgen)))
             self.phantom_mix: nn.Parameter = nn.Parameter(torch.zeros(self.K, self._Kp_max))
             self.register_buffer('_kp_active', torch.tensor(self.Kp, dtype=torch.long))
+            # M65 (аудит 19360 §3): EMA общего режима лакуны (центрирование
+            # наблюдения). Non-persistent: на резюме стартует с первой пробы.
+            self._lacuna_mode_decay: float = float(
+                getattr(cfg, 'phantom_lacuna_ema', 0.0) or 0.0)
+            self.register_buffer('lacuna_mode_ema', torch.zeros(D),
+                                 persistent=False)
+            self._last_lacuna_mode_norm: float = 0.0
+            self._last_lacuna_centered_rel: float = 0.0
             self.lacuna_w: nn.Parameter = nn.Parameter(torch.tensor(30.0))
             self.lacuna_b: nn.Parameter = nn.Parameter(torch.tensor(-3.0))
             # M55b: the lacuna self-calibration. The ABSOLUTE ell is ~0.97 for
@@ -675,6 +685,12 @@ class SigmoidCodedHead(nn.Module):
                         'h_norm': float(h_norm) if h_norm is not None else -1.0,
                         'sat': float(self._last_sat),
                     }
+        # M65 (аудит 19360 §1): ST-кламп log-odds — forward |u|≤U, backward
+        # identity (та же M52a-доктрина, что у T). Спайк-телеметрия выше и
+        # стена (training_control) читают СЫРОЙ u: штраф не ослабевает и
+        # телеметрия не маскируется. σ'(u) на рейле: ~4e-4 против ~e^-34.
+        if self._u_clamp > 0.0:
+            u = u + (u.clamp(-self._u_clamp, self._u_clamp) - u).detach()
         return u, base
 
     def srl(self, u0: torch.Tensor, steps: int = None, tau0: float = 1.0,
@@ -882,6 +898,30 @@ class SigmoidCodedHead(nn.Module):
                     else:
                         _thr = float(self.phantom_thr)
                     if not _skip_obs:
+                        # M65 (аудит 19360 §3): центрирование наблюдения —
+                        # вычитаем общий режим лакуны (EMA), иначе банк
+                        # кластеризует одну структурную константу
+                        # (ph_cos_p50=0.98, слияния 5552). EMA двигается только
+                        # здесь (training + каденция наблюдений) — M8-доктрина
+                        # цела; салиентность/порог не трогаем.
+                        if self._lacuna_mode_decay > 0.0:
+                            with torch.no_grad():
+                                _md = _obs_e.detach().reshape(
+                                    -1, _obs_e.shape[-1]).float()
+                                _mm = _md.mean(dim=0)
+                                if float(self.lacuna_mode_ema.abs().sum()) <= 0.0:
+                                    self.lacuna_mode_ema.copy_(_mm)
+                                else:
+                                    self.lacuna_mode_ema.mul_(
+                                        self._lacuna_mode_decay).add_(
+                                        _mm, alpha=1.0 - self._lacuna_mode_decay)
+                                _rn = float(_md.norm(dim=-1).mean())
+                                self._last_lacuna_mode_norm = float(
+                                    self.lacuna_mode_ema.norm())
+                                self._last_lacuna_centered_rel = float(
+                                    (_md - self.lacuna_mode_ema).norm(
+                                        dim=-1).mean() / (_rn + 1e-6))
+                                _obs_e = _md - self.lacuna_mode_ema
                         _pb.observe(_obs_e, _obs_ell, _thr)
                     self._meta_thr = _thr
                 # M58b (M55's consumer): the CONFIRMED phantom directions steer

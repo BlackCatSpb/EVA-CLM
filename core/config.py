@@ -79,6 +79,14 @@ class WideBindConfig:
                                   # (keeps the CE gradient alive at |u|>u0);
                                   # 0 disables
     head_u_wall_u0: float = 6.0   # M52a: the wall's threshold
+    # M65 (аудит 19360 §1): ST-кламп log-odds битов (спайк-налог). На спайках
+    # ‖h‖ (тяжёлый хвост: 245 против 15 в eval) u уходит за 12: у правильно
+    # насыщенных битов σ'(u)≈e^-34 и их CE-градиент мёртв (~40% шагов sat>0.5),
+    # log_temp/gain ползут вверх как хроническая защита. u = u + (clamp(u,±U)
+    # − u).detach(): forward |u|≤U (σ'≈4e-4 при U=8), backward — identity
+    # (M52a-доктрина, как у T). Стена и спайк-телеметрия читают СЫРОЙ u.
+    # 0 = выключено (A/B).
+    head_u_clamp: float = 0.0
     head_lacuna: bool = True      # M52b: lacuna residual + phantom channel
     head_pair_rank: int = 0       # P1-2: rank-r pairwise (Ising) channel of the
                                   # head — 0 = off (identity at init, A/B arm 16).
@@ -94,6 +102,14 @@ class WideBindConfig:
     head_phantom_noise: float = 0.05  # M52b: exploration-noise init (eta,
                                       # learnable; EVA-Ai used 0.05)
     head_phantom_l1: float = 1e-4  # M52b: light sparsity on the phantom firing
+    # M65 (аудит 19360 §3): центрирование лакуны. ph_cos_p50=0.98 — банк видит
+    # ОДНО направление (структурный сдвиг ствола ≈88% нормы e_l), семантика
+    # новизны не работает (слияния 5552, подтверждения — та же константа).
+    # При >0 — EMA общего режима лакуны (это β) вычитается из НАБЛЮДАЕМОГО
+    # вектора (салиентность/гейт/порог не трогаем); EMA двигается только в
+    # training на каденции наблюдений (M8-доктрина). Телеметрия: mode_norm,
+    # centered_rel. 0 = выключено (A/B).
+    phantom_lacuna_ema: float = 0.0
     head_srl: bool = False        # M53: compute the SRL classification telemetry
                                   # (concept/contradiction/lacuna) in the forward
     head_srl_every: int = 50      # M53e: compute the SRL telemetry every N forwards

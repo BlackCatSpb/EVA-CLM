@@ -754,7 +754,8 @@ def run_static(ckpt, cfg, model, missing, unexpected, tok=None):
                            'scale': float(model.reasoning_scale),
                            'gates': [round(float(x), 4) for x in g] if g is not None else []}
         print(f'\nREASONING: enabled_step={model.reasoning_enabled_step} '
-              f'scale={model.reasoning_scale:.4f}  last gates={g}')
+              f'scale={model.reasoning_scale:.4f}  last gates={g}  '
+              f'(буфер последнего TRAIN-шага; живые eval-гейты — A/B REASONING)')
 
     if model.layers[0].mirror._has_private_mem:
         st['inspector'] = run_inspector(model)
@@ -906,8 +907,9 @@ def run_wake(model, ckpt):
 
     g_mlp = sum(gate_mlp) / len(gate_mlp)
     g_mem = sum(gate_mem) / len(gate_mem) if gate_mem else float('nan')
-    report.append(f'  sigmoid(mod_scale_mlp) mean={g_mlp:.3f}  '
-                  f'sigmoid(mod_scale_mem) mean={g_mem:.3f}')
+    report.append(f'  sigmoid(mod_scale_mlp) gate mean={g_mlp:.3f}  '
+                  f'sigmoid(mod_scale_mem) gate mean={g_mem:.3f}  '
+                  f'(ГЕЙТ-параметр; эффективная модуляция — HEAD GEOMETRY)')
     _verdict(report, 'WAKE' if g_mlp > 0.75 else ('WATCH' if g_mlp > 0.72 else 'PASS'), [],
              f'modulation gate (marker #2, >0.75 = WAKE, baseline 0.668)')
     if abs(g_mlp - g_mem) > 0.2:
@@ -1049,7 +1051,7 @@ def run_live(model, cfg, ids=None, seq=128, gradinfo=True, step=0):
 
     sec('LIVE (реальный текст, eval-режим, eval-подобный setup)')
     print(f'  TEXT: {len(ids)} токенов / {n_win} окон | CE={ce:.4f} '
-          f'bias-only={bce:.4f} dctx={dctx:+.4f} | argmax==bias {match}/{npos} '
+          f'bias-only(h=0)={bce:.4f} dctx={dctx:+.4f} | argmax==bias {match}/{npos} '
           f'({100.0 * match / max(npos, 1):.0f}%) | H={H_sum / max(npos, 1):.2f} bit')
     print(f'INPUT/OUTPUT:  in_norm={h.norm(dim=-1).mean().item():.3f}  '
           f'out_norm={h_out.norm(dim=-1).mean().item():.3f}  '
@@ -1296,7 +1298,7 @@ def run_head(model, ckpt, args, tok):
         stats['total'] += r['n']
         for k in ('ctx_word', 'ctx_punct', 'full_word', 'full_punct'):
             stats[k] += r['cats'][k]
-        print(f'  [{_name:12s}] CE={r["ce"]:.4f} bias-only={r["bce"]:.4f} '
+        print(f'  [{_name:12s}] CE={r["ce"]:.4f} bias-only(h=0)={r["bce"]:.4f} '
               f'dctx={r["dctx"]:+.4f} | argmax==bias {r["match"]}/{r["n"]} '
               f'({100.0 * r["match"] / max(r["n"], 1):.0f}%) | full: '
               f'w={r["cats"]["full_word"]} p={r["cats"]["full_punct"]} '
@@ -1344,8 +1346,9 @@ def run_head(model, ckpt, args, tok):
               f'sampler top-1={pe.max().item():.4f} H={He:.3f} bit')
     model.reasoning_scale_override = None
     pn, po = res['natural'][4].clamp_min(1e-12), res['OFF'][4].clamp_min(1e-12)
-    print(f'    KL natural||OFF = {(pn * torch.log2(pn / po)).sum().item():.4f} bit | '
-          f'KL OFF||natural = {(po * torch.log2(po / pn)).sum().item():.4f} bit')
+    kl_no = float((pn * torch.log2(pn / po)).sum().item())
+    kl_on = float((po * torch.log2(po / pn)).sum().item())
+    print(f'    KL natural||OFF = {kl_no:.4f} bit | KL OFF||natural = {kl_on:.4f} bit')
 
     # ─── EXT_GEN_13640 §4: head-geometry ряд (величина контекстного вклада) ───
     # std(u_ctx) = std(z/T) без bit_bias — прямая магнитуда контекста; чтение vs
@@ -1372,16 +1375,34 @@ def run_head(model, ckpt, args, tok):
             gain = (float(head.emphasis_gain.item())
                     if hasattr(head, 'emphasis_gain') else float('nan'))
             T_mean = float(torch.exp(head.log_temp.data).mean())
+            # M65 (аудит 19360 §4b): σ(mod_scale_mlp) — ГЕЙТ-параметр;
+            # эффективная модуляция = base·1.5σ(msm)·(1+β·live) (лог mod_mlp).
+            # Карточка раньше показывала только гейт (0.395) при живой
+            # модуляции 0.001-0.005 — это РАЗНЫЕ величины, не противоречие.
+            _mods = [getattr(getattr(_l, 'mirror', None), '_last_mlp_mod', None)
+                     for _l in model.layers]
+            _mods = [m for m in _mods if isinstance(m, torch.Tensor)]
+            mod_eff = (float(torch.cat([m.detach().reshape(-1)
+                                        for m in _mods]).mean())
+                       if _mods else float('nan'))
+            _gmlp = [getattr(getattr(_l, 'mirror', None), 'mod_scale_mlp', None)
+                     for _l in model.layers]
+            _gmlp = [x for x in _gmlp if isinstance(x, torch.Tensor)]
+            mod_gate = (float(torch.sigmoid(torch.cat(
+                [x.detach().reshape(-1) for x in _gmlp])).mean())
+                if _gmlp else float('nan'))
         print(f'\n  HEAD GEOMETRY (EXT §4): std(u_ctx)={u_std:.4f} | '
               f'||P·h||={read_norm:.3f} ||e_l||={lac_norm:.3f} '
               f'(ratio {read_norm / (lac_norm + 1e-9):.2f}) | '
               f'||basis||_F={basis_f:.3f} row[min={float(row.min()):.3f} '
               f'max={float(row.max()):.3f}] | std(token_bias)={tb_std:.4f} | '
-              f'gain={gain:+.4f} T_mean={T_mean:.4f}')
+              f'gain={gain:+.4f} T_mean={T_mean:.4f} | '
+              f'mod gate={mod_gate:.3f} eff={mod_eff:.4f}')
         head_geo = {'u_ctx_std': u_std, 'read_norm': read_norm, 'lacuna_norm': lac_norm,
                     'ratio': read_norm / (lac_norm + 1e-9), 'basis_f': basis_f,
                     'basis_row_min': float(row.min()), 'basis_row_max': float(row.max()),
-                    'tb_std': tb_std, 'gain': gain, 'T_mean': T_mean}
+                    'tb_std': tb_std, 'gain': gain, 'T_mean': T_mean,
+                    'mod_gate': mod_gate, 'mod_eff': mod_eff}
     except Exception as _ge:
         print(f'  HEAD GEOMETRY: n/a ({_ge})')
 
@@ -1398,6 +1419,7 @@ def run_head(model, ckpt, args, tok):
         'posmap': bins_out,
         'ab': {m: {'top1': v[0], 'H': v[1], 's_top1': v[2], 's_H': v[3]}
                for m, v in res.items()},
+        'ab_kl': {'nat_off': kl_no, 'off_nat': kl_on},
         'geometry': head_geo,
     }
 
@@ -2133,7 +2155,7 @@ white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color
     cards = [
         ('Step', str(step)), ('Best val', f'{best:.4f}'),
         ('MLP W_std', f'{wake["wstd"]:.4f}'), ('dev', f'{wake["dev_mean"]:+.4f}'),
-        ('mod_mlp σ', f'{wake["g_mlp"]:.3f}'), ('mod_mem σ', f'{wake["g_mem"]:.3f}'),
+        ('mod_mlp gate σ', f'{wake["g_mlp"]:.3f}'), ('mod_mem σ', f'{wake["g_mem"]:.3f}'),
         ('slots', f'{wake["slots"]}/192'), ('full L', str(wake["full"])),
         ('births', str(wake["births"])),
     ]
@@ -2470,7 +2492,7 @@ white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color
                   f'&nbsp; full: word={bd["full_word"]} punct={bd["full_punct"]}</div>')
 
         if bd.get('texts'):
-            ch.append('<table><tr><th>текст</th><th>CE</th><th>bias-only</th>'
+            ch.append('<table><tr><th>текст</th><th>CE</th><th>bias-only(h=0)</th>'
                       '<th>dctx</th><th>argmax==bias</th><th>H, bit</th></tr>')
             for _n, _r in bd['texts']:
                 _p = 100.0 * _r['match'] / max(_r['n'], 1)
@@ -2557,7 +2579,12 @@ def run_summary(ckpt, wake=None, live=None, head=None, static=None):
         g = head['geometry']
         rows += [('log_temp', f'{head.get("log_temp", float("nan")):.4f}'),
                  ('emphasis_gain', f'{g.get("gain", float("nan")):+.3f}'),
-                 ('||P·h||/||e_l||', f'{g.get("ratio", float("nan")):.2f}')]
+                 ('||P·h||/||e_l||', f'{g.get("ratio", float("nan")):.2f}'),
+                 ('mod_mlp gate σ / eff',
+                  f'{g.get("mod_gate", float("nan")):.3f} / '
+                  f'{g.get("mod_eff", float("nan")):.4f}')]
+    if head and head.get('ab_kl'):
+        rows += [('KL reasoning nat||OFF', f'{head["ab_kl"]["nat_off"]:.2f} bit')]
     w = max(len(k) for k, _ in rows)
     for k, v in rows:
         print(f'  {k:<{w}}  {v}')

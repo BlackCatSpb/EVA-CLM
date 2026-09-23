@@ -1203,6 +1203,13 @@ class EVAStack(nn.Module):
             _v = getattr(h, _a, None)
             if _v is not None:
                 out[_k] = float(_v)
+        # M65 (аудит 19360 §3): центрирование лакуны — норма снятого режима и
+        # остаточная (центрированная) доля нормы наблюдения.
+        for _k, _a in (('lacuna_mode_norm', '_last_lacuna_mode_norm'),
+                       ('lacuna_centered_rel', '_last_lacuna_centered_rel')):
+            _v = getattr(h, _a, None)
+            if _v is not None:
+                out[_k] = float(_v)
         sat = getattr(h, '_last_sat', None)
         if sat is not None:
             out['sat'] = float(sat)
