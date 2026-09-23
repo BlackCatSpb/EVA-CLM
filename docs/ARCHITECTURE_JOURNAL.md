@@ -1733,3 +1733,30 @@ CE-пути losses.compute_losses), на ОДНОМ повторяющемся �
 (+0.025 -> +0.051 на eval-регионе), CE 7.703 -> 7.684 — 18920 честно лучше
 (сходится с val). Все прежние интерпретации BIAS-DECOMP (0%/100%) перечитать:
 они измерялись вне реального inference-пути.
+
+
+## Ревизия analyze.py: канонический LIVE, единый setup, SUMMARY, читаемый вывод
+
+Ревью оператора: «анализ размыт». Диагноз подтверждён:
+- LIVE гнал model.train() на СЛУЧАЙНЫХ токенах — predMSE/гейты/сигналы и все
+  читатели (SIGNALS/MIRROR/ANOMALY) не отражали реальный inference;
+- BRIDGE звал model(h) без tokens/step, CMP — без tokens/step;
+- вывод — без итоговой сводки; ошибки секций печатались как «[error] head: 1».
+
+Сделано:
+1. LIVE -> ОДИН канонический eval-подобный проход по РЕАЛЬНОМУ тексту
+   (--stream eval-регион, иначе analyzer-текст): tokens+step+несённое состояние+
+   bus_bias; печатает TEXT/CE/bias-only/dctx/argmax==bias/H + CE(rand, eval).
+2. BRIDGE/CMP -> tokens+step; geometry -> tokens+step.
+3. run_summary(): итоговая сводка (identity + CE/dctx/argmax/H/predMSE/gate +
+   WAKE + gain/log_temp/geometry) в конце консоли и таблицей в HTML.
+4. HTML: карточки с CE(текст)/Δctx/argmax==bias/H; summary-таблица после шапки.
+5. traceback'и в ошибках секций; posmap-бины по фактическому L; aux.get (не все
+   конфиги имеют pred-терм).
+
+Проверка: мини-чекпоинт (636k, intent_bridge) — 0 ошибок, все секции работают;
+620 тестов; реальный 18920: LIVE и HEAD дают ОДНИ числа (CE 7.6837, dctx +0.0510,
+argmax==bias 100%, H 10.90) — setup единый. Новые факты на реальном тексте:
+max predMSE L3 = 85.3 (зеркало на реальном тексте ошибается сильнее, чем на
+random-входе — watch); geometry ||P*h||/||e_l|| = 0.12 ~ 1/sqrt(40) = уровень
+случайной проекции (подтверждает «readout не сонастроен с h»).

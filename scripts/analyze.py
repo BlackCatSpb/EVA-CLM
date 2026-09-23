@@ -1000,15 +1000,57 @@ def run_wake(model, ckpt):
 # ─────────────────────────── LIVE ───────────────────────────
 
 @torch.no_grad()
-def run_live(model, cfg, batch=1, seq=128, gradinfo=True):
-    device = 'cpu'
-    model.to(device)
-    model.train()
-    x = torch.randint(0, cfg.vocab, (batch, seq), device=device)
-    h = model.embed_tokens(x)
-    h_out, _, _, _ = model(h, tokens=x)
+def run_live(model, cfg, ids=None, seq=128, gradinfo=True, step=0):
+    """LIVE: ОДИН канонический eval-подобный проход по РЕАЛЬНОМУ тексту
+    (tokens + step + несённое состояние + bus_bias), как в реальном eval.
+    Ревью: раньше секция гнала model.train() на случайных токенах — predMSE,
+    гейты и сигналы не отражали реальный inference-режим, и все читатели
+    (SIGNALS/MIRROR/ANOMALY) наследовали это искажение."""
+    L = int(cfg.seq_len)
+    if not ids:
+        print('  [warn] LIVE пропущен: нет реального текста (--stream / токенизатор)')
+        return None
+    ids = list(ids[:3 * L])
+    model.eval()
+    tb = model.lm_head.token_bias.data
+    lz_b = float(torch.logsumexp(tb.float(), dim=-1))
+    tb_am = int(tb.argmax())
+    tot_ce = tot_b = tot_n = 0.0
+    match = npos = 0
+    H_sum = 0.0
+    n_win = 0
+    state = gs = None
+    h = h_out = None
+    with torch.no_grad():
+        model.reset_streams()
+        model.reset_cache()
+        for off in range(0, max(0, len(ids) - L), L):
+            n_win += 1
+            x = torch.tensor(ids[off:off + L], dtype=torch.long).view(1, -1)
+            y = torch.tensor(ids[off + 1:off + L + 1], dtype=torch.long).view(1, -1)
+            h = model.embed_tokens(x)
+            h_out, state, gs, _ = model(h, state, global_state=gs,
+                                        adaptive=False, step=step, tokens=x)
+            bb = _bus_bias_of(model, 1, L)
+            lp = model.lm_head(h_out.reshape(-1, h_out.shape[-1]), bus_bias=bb)
+            tgt = y.reshape(-1)
+            idx = torch.arange(tgt.numel())
+            tot_ce += float(-lp[idx, tgt].sum())
+            tot_b += float((lz_b - tb[tgt]).sum())
+            tot_n += tgt.numel()
+            for pos in range(0, L, 8):
+                npos += 1
+                match += int(lp[pos].argmax()) == tb_am
+                pv = torch.softmax(lp[pos].double(), -1)
+                H_sum += float(-(pv * torch.log2(pv.clamp_min(1e-12))).sum())
+    ce = tot_ce / max(tot_n, 1)
+    bce = tot_b / max(tot_n, 1)
+    dctx = bce - ce
 
-    sec('LIVE (forward на случайном входе)')
+    sec('LIVE (реальный текст, eval-режим, eval-подобный setup)')
+    print(f'  TEXT: {len(ids)} токенов / {n_win} окон | CE={ce:.4f} '
+          f'bias-only={bce:.4f} dctx={dctx:+.4f} | argmax==bias {match}/{npos} '
+          f'({100.0 * match / max(npos, 1):.0f}%) | H={H_sum / max(npos, 1):.2f} bit')
     print(f'INPUT/OUTPUT:  in_norm={h.norm(dim=-1).mean().item():.3f}  '
           f'out_norm={h_out.norm(dim=-1).mean().item():.3f}  '
           f'out_std={h_out.std().item():.4f}')
@@ -1017,10 +1059,16 @@ def run_live(model, cfg, batch=1, seq=128, gradinfo=True):
         _ts = ' '.join((f'{k}={v:.4f}' if isinstance(v, float) else f'{k}={v}')
                        for k, v in _tel.items())
         print(f'  [M53b] head telemetry: {_ts}')
-    tgt = torch.randint(1, cfg.vocab, (batch, seq), device=device)
-    ls, aux = model.compute_losses(h_out[:, :-1], tgt[:, 1:])
-    print(f'CE(random)={ls.item():.3f}  pred={aux["pred"]:.3f}  '
-          f'gate_l1={aux["gate_l1"]:.5f}  balance={aux["balance"]:.5f}')
+    with torch.no_grad():
+        _xr = torch.randint(0, cfg.vocab, (1, min(seq, 32)))
+        _hr = model.embed_tokens(_xr)
+        _or, _, _, _ = model(_hr, None, adaptive=False, step=step, tokens=_xr)
+        _tgr = torch.randint(1, cfg.vocab, _xr.shape)
+        ls, aux = model.compute_losses(_or[:, :-1], _tgr[:, 1:])
+    print(f'  CE(rand, eval)={ls.item():.3f}  '
+          f'pred={float(aux.get("pred", float("nan"))):.3f}  '
+          f'gate_l1={float(aux.get("gate_l1", float("nan"))):.5f}  '
+          f'balance={float(aux.get("balance", float("nan"))):.5f}')
 
     print()
     hdr = f'{"L":>3s} {"||hp||":>8s} {"predMSE":>8s} {"|mirror|":>9s} {"gate":>7s} ' \
@@ -1111,10 +1159,14 @@ def run_live(model, cfg, batch=1, seq=128, gradinfo=True):
     usef_vals = [l.mirror._cached_usefulness.mean().item() for l in model.layers
                  if hasattr(l.mirror, '_cached_usefulness')]
     return {
+        'text_tokens': len(ids), 'n_windows': n_win,
+        'ce': ce, 'bce': bce, 'dctx': dctx,
+        'bias_frac': match / max(npos, 1), 'H': H_sum / max(npos, 1),
         'in_norm': h.norm(dim=-1).mean().item(),
         'out_norm': h_out.norm(dim=-1).mean().item(),
         'out_std': h_out.std().item(),
-        'ce_random': ls.item(), 'pred': aux['pred'], 'gate_l1': aux['gate_l1'],
+        'ce_random': ls.item(), 'pred': float(aux.get('pred', float('nan'))),
+        'gate_l1': float(aux.get('gate_l1', float('nan'))),
         'balance': aux['balance'],
         'usef': (sum(usef_vals) / len(usef_vals)) if usef_vals else float('nan'),
         'rows': rows, 'signals': signals, 'mirror': mirror_rows,
@@ -1259,13 +1311,20 @@ def run_head(model, ckpt, args, tok):
     print('\n  POSMAP: pos | top-1 avg | H avg | punct% | word%')
     bins = [(0, 0, 15), (16, 15, 33), (32, 31, 65), (64, 63, 129), (128, 127, 193),
             (192, 191, 225), (224, 223, 241), (240, 239, 249), (250, 249, L - 1)]
+    # обрезать по фактической длине окна (мини-модели: L=64 и т.п.)
+    bins = [(lb, min(lo, L - 1), min(hi, L - 1)) for lb, lo, hi in bins
+            if lo <= L - 1]
     bins_out = []
     for label, lo, hi in bins:
-        span = hi - lo + 1
-        top1 = sum(posmap[p]['top1'] / posmap[p]['cnt'] for p in range(lo, hi + 1)) / span
-        H = sum(posmap[p]['H'] / posmap[p]['cnt'] for p in range(lo, hi + 1)) / span
-        pc = sum(posmap[p]['punct'] for p in range(lo, hi + 1)) / span * 100
-        wc = sum(posmap[p]['word'] for p in range(lo, hi + 1)) / span * 100
+        # posmap заполняется каждые 8 позиций — берём только существующие
+        _ps = [p for p in range(lo, hi + 1) if p in posmap]
+        if not _ps:
+            continue
+        span = len(_ps)
+        top1 = sum(posmap[p]['top1'] / posmap[p]['cnt'] for p in _ps) / span
+        H = sum(posmap[p]['H'] / posmap[p]['cnt'] for p in _ps) / span
+        pc = sum(posmap[p]['punct'] for p in _ps) / span * 100
+        wc = sum(posmap[p]['word'] for p in _ps) / span * 100
         bins_out.append({'label': label, 'top1': top1, 'H': H, 'punct': pc, 'word': wc})
         print(f'  {label:3d} | {top1:.4f} | {H:.3f} | {pc:5.1f}% | {wc:5.1f}%')
 
@@ -1365,7 +1424,9 @@ def run_cmp(models, args, tok):
             model.reset_reasoning()
             with torch.no_grad():
                 h = model.embed_tokens(ctx)
-                out, _, _, _ = model(h, None, adaptive=False)
+                out, _, _, _ = model(h, None, adaptive=False,
+                                     step=int(_state.get('step', 0) or 0),
+                                     tokens=ctx)
                 logits = model.lm_head(out[:, -1:, :])[0, 0]
             eff = args.temp / math.exp(log_temp)
             for tname, z in (('raw', logits.double()), ('sampler', logits.double() / eff)):
@@ -1558,7 +1619,7 @@ def run_grad_info(model, cfg, seq=16):
 
 # ─────────────────────────── BRIDGE ───────────────────────────
 
-def run_bridge(model, cfg, batch=1, seq=128):
+def run_bridge(model, cfg, batch=1, seq=128, ids=None, step=0):
     """Runtime-метрики Intent Bridge: салайенс от головы, поток intent по слоям,
     кросс-слойная избыточность шины, head-stencil (bus_head_proj) и τ-лесенка
     интеграции intent. Требует intent_bridge=True (иначе возвращает None)."""
@@ -1570,7 +1631,8 @@ def run_bridge(model, cfg, batch=1, seq=128):
     x = torch.randint(0, cfg.vocab, (batch, seq), device='cpu')
     with torch.no_grad():
         h = model.embed_tokens(x)
-        out, _, _, _ = model(h)                   # заполняет _intent_stream, _last_bus
+        out, _, _, _ = model(h, None, adaptive=False, step=step,
+                             tokens=x)            # заполняет _intent_stream, _last_bus
     B, L, D = out.shape
 
     # --- Salience из РЕАЛЬНОГО выхода головы ---
@@ -1995,7 +2057,7 @@ def _hue(v, vmin, vmax):
 
 def save_html_report(ckpt, cfg=None, model=None, wake=None, live=None, head=None,
                      anomaly=None, bridge=None, metacog=None, static=None,
-                     full_text=None):
+                     summary=None, full_text=None):
     import html as H
     if isinstance(ckpt, (str, os.PathLike)):
         # M30: train.py calls generate_report(path) right after every save.
@@ -2061,6 +2123,11 @@ white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color
     ch.append(f'<h1>EVA — {H.escape(os.path.basename(path))}</h1>')
     ch.append(f'<div class="dim">step={step} &nbsp; best_val={best:.4f} &nbsp; params={params:.2f}M '
               f'&nbsp; {wake["verdict"]}</div>')
+    if summary:
+        ch.append('<table style="margin-top:8px">')
+        for _k, _v in summary['rows']:
+            ch.append(f'<tr><td>{H.escape(str(_k))}</td><td>{H.escape(str(_v))}</td></tr>')
+        ch.append('</table>')
 
     ch.append('<div class="cards">')
     cards = [
@@ -2075,6 +2142,12 @@ white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color
         cards.append(('pred', f'{live["pred"]:.3f}'))
         cards.append(('gate_l1', f'{live["gate_l1"]:.5f}'))
         cards.append(('tau_l_dev', f'{live["tau_l_dev"]:.4f}'))
+        if live.get('ce') is not None:
+            _dc = 'g' if live['dctx'] > 0 else 'r'
+            cards.append(('CE (текст)', f'{live["ce"]:.4f}'))
+            cards.append(('Δctx', f'<span class="{_dc}">{live["dctx"]:+.4f}</span>'))
+            cards.append(('argmax==bias', f'{100.0 * live["bias_frac"]:.0f}%'))
+            cards.append(('H', f'{live["H"]:.2f} bit'))
     else:
         cards.append(('CE(rand)', '—'))
         cards.append(('pred', '—'))
@@ -2462,6 +2535,35 @@ white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color
 
 # ─────────────────────────── MAIN ───────────────────────────
 
+def run_summary(ckpt, wake=None, live=None, head=None, static=None):
+    """SUMMARY: итог «одним взглядом» — identity + ключевые числа + вердикты."""
+    sec('SUMMARY (итог)')
+    step = ckpt.get('step', '?')
+    bv = ckpt.get('best_val_loss', float('nan'))
+    npar = sum(v.numel() for v in ckpt.get('model', {}).values()
+               if hasattr(v, 'numel'))
+    rows = [('step', f'{step}'), ('best_val', f'{bv:.4f}'),
+            ('параметров', f'{npar:,}')]
+    if live:
+        rows += [('CE (реальный текст)', f'{live["ce"]:.4f}'),
+                 ('dctx (вклад контекста)', f'{live["dctx"]:+.4f}'),
+                 ('argmax==bias', f'{100.0 * live["bias_frac"]:.0f}%'),
+                 ('H', f'{live["H"]:.2f} bit'),
+                 ('max predMSE', f'{max(r["predMSE"] for r in live["rows"]):.1f}'),
+                 ('min gate', f'{min(r["gate"] for r in live["rows"]):.4f}')]
+    if wake:
+        rows += [('WAKE-вердикт', str(wake.get('verdict', '?')))]
+    if head and head.get('geometry'):
+        g = head['geometry']
+        rows += [('log_temp', f'{head.get("log_temp", float("nan")):.4f}'),
+                 ('emphasis_gain', f'{g.get("gain", float("nan")):+.3f}'),
+                 ('||P·h||/||e_l||', f'{g.get("ratio", float("nan")):.2f}')]
+    w = max(len(k) for k, _ in rows)
+    for k, v in rows:
+        print(f'  {k:<{w}}  {v}')
+    return {'rows': rows}
+
+
 def main():
     ap = argparse.ArgumentParser(description='EVA checkpoint analyzer (все методы + лог)')
     ap.add_argument('checkpoints', nargs='*', help='path(s) to .pt (optional if --log given)')
@@ -2488,6 +2590,11 @@ def main():
 
     _tee = _Tee(sys.stdout)
     sys.stdout = _tee
+    import traceback as _tb
+
+    def _err(tag):
+        print(f'[error] {tag}:')
+        _tb.print_exc(limit=6)
 
     tok = None
     if not args.no_head and not args.quick:
@@ -2511,75 +2618,94 @@ def main():
         try:
             run_envelope(ckpt)
         except Exception as e:
-            print(f'[error] envelope: {e}')
+            _err('envelope')
         static_data = None
         try:
             static_data = run_static(ckpt, cfg, model, missing, unexpected, tok)
         except Exception as e:
-            print(f'[error] static: {e}')
+            _err('static')
         try:
             mech_data = run_mech(model, cfg)
             if static_data is not None:
                 static_data['mech'] = mech_data
         except Exception as e:
-            print(f'[error] mech: {e}')
+            _err('mech')
         try:
             wake_data = run_wake(model, ckpt)
         except Exception as e:
-            print(f'[error] wake: {e}')
+            _err('wake')
             wake_data = None
+        _L = int(cfg.seq_len)
+        _live_ids = None
+        if args.stream and os.path.exists(args.stream):
+            import numpy as _np
+            _w = _np.fromfile(args.stream, dtype=_np.uint16).astype(_np.int64)
+            _live_ids = _w[len(_w) // 4:len(_w) // 4 + 3 * _L].tolist()
+        elif tok is not None:
+            _live_ids = tok.encode(
+                'Москва — столица России, и в ней живут миллионы людей. ' * 60).ids
         live_data = None
         head_data = None
         anomaly_data = None
         if not args.quick:
             if not args.no_live:
                 try:
-                    live_data = run_live(model, cfg, seq=args.seq, gradinfo=not args.no_gradinfo)
+                    live_data = run_live(model, cfg, ids=_live_ids, seq=args.seq,
+                                         gradinfo=not args.no_gradinfo,
+                                         step=int(ckpt.get('step', 0) or 0))
                 except Exception as e:
-                    print(f'[error] live: {e}')
+                    _err('live')
                 if live_data is not None and wake_data is not None:
                     try:
                         anomaly_data = run_anomaly(live_data, wake_data, ckpt)
                     except Exception as e:
-                        print(f'[error] anomaly: {e}')
+                        _err('anomaly')
             if tok is not None:
                 try:
                     head_data = run_head(model, ckpt, args, tok)
                 except Exception as e:
-                    print(f'[error] head: {e}')
+                    _err('head')
         if args.moves:
             try:
                 run_moves(path)
             except Exception as e:
-                print(f'[error] moves: {e}')
+                _err('moves')
         if args.carry:
             try:
                 run_carry(model, cfg, seq=args.seq)
             except Exception as e:
-                print(f'[error] carry: {e}')
+                _err('carry')
         if args.depthgrad:
             try:
                 run_depthgrad(model, cfg, seq=args.seq)
             except Exception as e:
-                print(f'[error] depthgrad: {e}')
+                _err('depthgrad')
         bridge_data = None
         if not args.quick and getattr(model, 'intent_bridge', False):
             try:
-                bridge_data = run_bridge(model, cfg, seq=args.seq)
+                bridge_data = run_bridge(model, cfg, seq=args.seq, ids=_live_ids,
+                                         step=int(ckpt.get('step', 0) or 0))
             except Exception as e:
-                print(f'[error] bridge: {e}')
+                _err('bridge')
+        try:
+            summary_data = run_summary(ckpt, wake_data, live_data, head_data,
+                                       static_data)
+        except Exception as e:
+            _err('summary')
+            summary_data = None
         if not args.no_html and wake_data is not None:
             try:
                 metacog = run_metacog(model, cfg) if not args.quick else None
             except Exception as e:
-                print(f'[error] metacog: {e}')
+                _err('metacog')
                 metacog = None
             try:
                 save_html_report(ckpt, cfg, model, wake_data, live_data, head_data,
                                  anomaly_data, bridge_data, metacog=metacog,
-                                 static=static_data, full_text=''.join(_tee.buf))
+                                 static=static_data, summary=summary_data,
+                                 full_text=''.join(_tee.buf))
             except Exception as e:
-                print(f'[error] html: {e}')
+                _err('html')
 
     if len(models) > 1 and tok is not None:
         try:
