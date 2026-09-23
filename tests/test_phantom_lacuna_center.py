@@ -72,6 +72,27 @@ def test_centering_removes_common_mode_and_updates_ema():
     assert cos2 > 0.99, f'EMA обязана стабилизироваться: cos={cos2:.4f}'
 
 
+def test_single_observation_falls_back_to_ema():
+    """M65b: при одном наблюдении среднее батча == само наблюдение —
+    центрирование обнулило бы его; обязан работать EMA-фолбэк."""
+    m = _model(0.9)
+    head = m.lm_head
+    calls = _spy(head)
+    torch.manual_seed(7)
+    v = torch.randn(1, 1, 64)
+    h = v.expand(1, 1, 64).contiguous()
+    e1 = 2.0 * v.expand(1, 1, 64).contiguous()
+    _mix(head, e1, h)                       # инициализирует EMA
+    assert len(calls) == 1
+    head._pb_step.fill_(0)
+    e2 = e1 + 0.3 * torch.randn(1, 1, 64)
+    _mix(head, e2, h)                       # одно наблюдение -> EMA-фолбэк
+    assert len(calls) == 2
+    obs = calls[1]
+    assert float(obs.norm()) > 0.0, 'одиночное наблюдение не должно обнуляться'
+    assert float(obs.norm()) < float(e2.norm()), 'центрирование обязано убрать часть'
+
+
 def test_off_is_identity_and_eval_does_not_move_ema():
     m = _model(0.0)
     head = m.lm_head

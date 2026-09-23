@@ -909,19 +909,28 @@ class SigmoidCodedHead(nn.Module):
                                 _md = _obs_e.detach().reshape(
                                     -1, _obs_e.shape[-1]).float()
                                 _mm = _md.mean(dim=0)
+                                # EMA режима — телеметрия дрейфа (и фолбэк ниже)
                                 if float(self.lacuna_mode_ema.abs().sum()) <= 0.0:
                                     self.lacuna_mode_ema.copy_(_mm)
                                 else:
                                     self.lacuna_mode_ema.mul_(
                                         self._lacuna_mode_decay).add_(
                                         _mm, alpha=1.0 - self._lacuna_mode_decay)
+                                # M65b (замер 19415-19580): EMA отстаёт от дрейфа
+                                # (centered_rel 0.63->2.83 при падающем mode_norm) —
+                                # вычитаем МГНОВЕННЫЙ общий режим (среднее батча):
+                                # устойчиво к дрейфу документа. При единственном
+                                # наблюдении среднее == само наблюдение (центр
+                                # обнулил бы его) — фолбэк на EMA.
+                                _mode = (_mm if _md.shape[0] >= 2
+                                         else self.lacuna_mode_ema)
                                 _rn = float(_md.norm(dim=-1).mean())
                                 self._last_lacuna_mode_norm = float(
                                     self.lacuna_mode_ema.norm())
                                 self._last_lacuna_centered_rel = float(
-                                    (_md - self.lacuna_mode_ema).norm(
-                                        dim=-1).mean() / (_rn + 1e-6))
-                                _obs_e = _md - self.lacuna_mode_ema
+                                    (_md - _mode).norm(dim=-1).mean()
+                                    / (_rn + 1e-6))
+                                _obs_e = _md - _mode
                         _pb.observe(_obs_e, _obs_ell, _thr)
                     self._meta_thr = _thr
                 # M58b (M55's consumer): the CONFIRMED phantom directions steer
