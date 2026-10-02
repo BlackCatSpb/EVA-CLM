@@ -1817,3 +1817,54 @@ u_max до 218.8, sat>0.5 на ~40% шагов, sat=1.0 (полное насыщ
 Включено в ноутбуке (cell 4): head_u_clamp=8.0, phantom_lacuna_ema=0.9.
 Ожидаемая валидация: spk/sat/log_temp перестают ползти (телеметрия, ~500 шагов),
 ph_cos_p50 0.98 -> 0.1-0.3, lacuna_centered_rel в логе.
+
+
+## M65-OPT: кампания оптимизации в песочнице C:\EVA_CLM_OPT
+
+Копия main-репо вынесена за пределы OneDrive, remote отсоединён (кампания не
+задевает живой прогон). Инвентарь: core 16 022 строки / 40 файлов,
+scripts 9 877 / 31, tests 11 595 / 89 (~38k строк).
+
+Механический аудит (2 параллельных прохода: core+scripts, tests+notebook)
+дал регистр:
+
+Скрытые сбои: ~50 мест `except ...: pass`/counter-only. Критичные закрыты в
+батче 1 (ckpt_io durability: fsync/os.sync/read_step; birth_ledger: warnings
+на легаси-путь; training_control: n_unconnected вместо молчаливого continue).
+Остальные — очередь с решениями по каждому (телеметрийные глотки допустимы,
+но должны считаться; библиотечные — поверхность наружу).
+
+Hot-path синхронизации: ~60 `.item()/float()/cpu()` в forward/шаге (block.py
+per-layer ×24, mirror.py per-layer, concept_layer.py, stack.py, losses.py
+×11/шаг, logit_cache.py). План: стекировать в один sync, выносить телеметрию
+на каденцию, убирать лишние. Батч 2.
+
+Пересчёт констант/аллокации: ~35 мест (math.sqrt/arange/eye/zeros в forward).
+Батч 3.
+
+Мёртвый код: unreachable-ветки при default-конфиге — это A/B-руки (оставить);
+реально мёртвое: _zeckendorf_levels, _readout_rotated, _full_env, _atomic42;
+write-only атрибуты (_cached_contra/_disagreement/_alpha/_expert_asymmetry/
+_in_sentence/_sent_start/_triad_passes/_pred_weight/_m59_grew/_tau_norm_t/
+_mlp_ratio/_nan_at). Unused config: 16 полей (matur_bridge_readiness,
+collective_S, collective_birth_gap, log_scale_l2_weight, spec_lo/hi,
+lambda_sliding, cov_multi_timescale, cov_tau_lo/hi, gate_l1_weight,
+reinforce_weight, balance_weight, diversity_weight, mlp_mod_scale_reopen,
+tau_enabled) — решения: удалить или связать (mlp_mod_scale_reopen выглядит
+потерянной проводкой resume-открытия гейта — проверить). Батч 4.
+
+Дубликаты: mirror forward/debug_mind (τ-сигнал), generate/smart_controller
+(L=1 decode), sim_head_regime (eval-блок ×2), load_model boilerplate ×3.
+Батч 5.
+
+Тесты: 56 shape/existence-only, unseeded random в test_math_audit/test_model,
+source-text проверки (13 файлов), покрытие: losses.py/projector.py/
+tau_compression.py без тестов; tests/__pycache__ сирота. Батч 6.
+
+Методы: глубокий разбор core-алгоритмов (не механический список) — батч 7.
+
+Доки: дрейф чисел/строчных ссылок (183.14M vs 146.67M; AGENT_BOARD ссылки
+сдвинуты на ~130 строк; stale cell-индексы). Ноутбук: cell[10] 847 строк,
+14 копий `except Exception`, дубликаты хелперов, stale-комментарии. Батч 8.
+
+Батч 1: 19cb965 — 631 passed.
