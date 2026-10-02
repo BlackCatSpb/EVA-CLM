@@ -1,0 +1,1187 @@
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>EVA report step 16720</title><style>
+body{background:#0d1117;color:#c9d1d9;font:14px/1.5 Consolas,monospace;margin:24px}
+h1{font-size:20px;color:#f0f6fc}h2{font-size:16px;color:#79c0ff;border-bottom:1px solid #30363d;padding-bottom:4px;margin-top:28px}
+h3{font-size:13px;color:#79c0ff;margin-top:16px;margin-bottom:4px}
+.cards{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 14px;min-width:110px}
+.card b{display:block;font-size:18px;color:#f0f6fc}.card span{font-size:11px;color:#8b949e;text-transform:uppercase}
+table{border-collapse:collapse;margin:10px 0}th,td{border:1px solid #30363d;padding:4px 10px;text-align:right}
+th{background:#161b22;color:#8b949e;font-size:11px;text-transform:uppercase}
+td:first-child,th:first-child{text-align:left}
+.bdg{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:bold}
+.b-PASS{background:#1f6f2f;color:#7ee787}.b-WATCH{background:#6b4d00;color:#e3b341}.b-WAKE{background:#6e1a1a;color:#ff7b72}
+.heat{display:flex;gap:3px;margin:10px 0}.hc{flex:1;text-align:center;font-size:10px;color:#8b949e;border-radius:4px;padding:4px 0}
+.bar{background:#21262d;border-radius:4px;height:14px;position:relative;margin:2px 0;overflow:hidden}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:#58a6ff;border-radius:4px}
+.bar span{position:absolute;left:6px;top:0;font-size:10px;color:#e6edf3}
+.g{color:#7ee787}.y{color:#e3b341}.r{color:#ff7b72}.dim{color:#8b949e}
+pre.full{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 12px;
+white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;color:#c9d1d9}
+</style></head><body>
+<h1>EVA — best 16720.pt</h1>
+<div class="dim">step=16720 &nbsp; best_val=7.8641 &nbsp; params=183.14M &nbsp; WAKE-CANDIDATE</div>
+<div class="cards">
+<div class="card"><b>16720</b><span>Step</span></div>
+<div class="card"><b>7.8641</b><span>Best val</span></div>
+<div class="card"><b>0.0700</b><span>MLP W_std</span></div>
+<div class="card"><b>+0.0012</b><span>dev</span></div>
+<div class="card"><b>0.410</b><span>mod_mlp σ</span></div>
+<div class="card"><b>0.675</b><span>mod_mem σ</span></div>
+<div class="card"><b>0/192</b><span>slots</span></div>
+<div class="card"><b>0</b><span>full L</span></div>
+<div class="card"><b>[]</b><span>births</span></div>
+<div class="card"><b>—</b><span>CE(rand)</span></div>
+<div class="card"><b>—</b><span>pred</span></div>
+<div class="card"><b>—</b><span>gate_l1</span></div>
+<div class="card"><b>—</b><span>tau_l_dev</span></div>
+<div class="card"><b>0.848</b><span>mat gate</span></div>
+<div class="card"><b>0.739</b><span>mat mean</span></div>
+<div class="card"><b>0.4600</b><span>w_sal &sigma;</span></div>
+<div class="card"><b>-0.0123</b><span>tau_intent_dev</span></div>
+<div class="card"><b>1.000</b><span>salience H/Hmax</span></div>
+<div class="card"><b>0.494</b><span>bus cos</span></div>
+<div class="card"><b>42.1829</b><span>stencil ‖W‖</span></div>
+<div class="card"><b>0.9980</b><span>intent α[-1]</span></div>
+</div>
+<h2>STATIC</h2>
+<div class="dim">file=best 16720.pt &nbsp; step=16720 &nbsp; best_val=7.864080519903274 &nbsp; missing=0 unexpected=0</div>
+<h3>CONFIG</h3><table><tr><th>param</th><th>value</th></tr>
+<tr><td>D</td><td>2560</td></tr>
+<tr><td>n_layers</td><td>24</td></tr>
+<tr><td>G</td><td>N/A</td></tr>
+<tr><td>k</td><td>N/A</td></tr>
+<tr><td>vocab</td><td>65536</td></tr>
+<tr><td>seq_len</td><td>384</td></tr>
+<tr><td>mlp_groups</td><td>32</td></tr>
+<tr><td>mlp_expand</td><td>4</td></tr>
+<tr><td>bind_K</td><td>32</td></tr>
+<tr><td>mirror_k</td><td>32</td></tr>
+<tr><td>lr</td><td>0.0006</td></tr>
+<tr><td>weight_decay</td><td>0.01</td></tr>
+<tr><td>explicit_reasoning</td><td>True</td></tr>
+<tr><td>reasoning_max_steps</td><td>8</td></tr>
+<tr><td>reasoning_adaptive</td><td>True</td></tr>
+<tr><td>variable_precision</td><td>True</td></tr>
+<tr><td>collective_read_out</td><td>True</td></tr>
+<tr><td>private_mem</td><td>True</td></tr>
+<tr><td>head_mode</td><td>sigmoid_coded</td></tr>
+<tr><td>bind_twist_mode</td><td>trajectory_spiral</td></tr>
+</table>
+<h3>PARAM GROUPS (LR multipliers)</h3>
+<table><tr><th>lr</th><th>wd</th><th>n_params</th></tr>
+<tr><td>0.000177</td><td>0.0000</td><td>2</td></tr>
+<tr><td>0.000177</td><td>0.0100</td><td>3</td></tr>
+<tr><td>0.000326</td><td>0.0000</td><td>72</td></tr>
+<tr><td>0.000326</td><td>0.0100</td><td>120</td></tr>
+<tr><td>0.001104</td><td>0.0000</td><td>168</td></tr>
+<tr><td>0.001104</td><td>0.0100</td><td>96</td></tr>
+<tr><td>0.001104</td><td>0.0000</td><td>291</td></tr>
+<tr><td>0.001104</td><td>0.0100</td><td>75</td></tr>
+<tr><td>0.000177</td><td>0.0000</td><td>72</td></tr>
+<tr><td>0.000120</td><td>0.0000</td><td>1</td></tr>
+<tr><td>0.000600</td><td>0.0100</td><td>53</td></tr>
+<tr><td>0.000600</td><td>0.0000</td><td>81</td></tr>
+<tr><td>0.000600</td><td>0.0000</td><td>655</td></tr>
+<tr><td>0.000600</td><td>0.0100</td><td>535</td></tr>
+</table>
+<h3>PER-LAYER (params, без forward)</h3>
+<table><tr><th>L</th><th>alpha</th><th>|1-a|</th><th>ls_std</th><th>w_help</th><th>skip</th><th>scale_w</th><th>conv_std</th><th>pm_norm</th></tr>
+<tr><td>0</td><td>0.9172</td><td>0.0830</td><td>2.7326</td><td>0.7196</td><td>0.4884</td><td>0.2540</td><td>0.1425</td><td>0.023</td></tr>
+<tr><td>1</td><td>0.9119</td><td>0.0882</td><td>3.0512</td><td>0.7448</td><td>0.5794</td><td>0.2541</td><td>0.1372</td><td>0.090</td></tr>
+<tr><td>2</td><td>0.9113</td><td>0.0887</td><td>3.1576</td><td>0.7290</td><td>0.5547</td><td>0.2551</td><td>0.1358</td><td>0.017</td></tr>
+<tr><td>3</td><td>0.9128</td><td>0.0872</td><td>3.2048</td><td>0.7393</td><td>0.5953</td><td>0.2545</td><td>0.1372</td><td>0.221</td></tr>
+<tr><td>4</td><td>0.9089</td><td>0.0912</td><td>3.3556</td><td>0.7212</td><td>0.5952</td><td>0.2551</td><td>0.1521</td><td>0.243</td></tr>
+<tr><td>5</td><td>0.9090</td><td>0.0910</td><td>3.4960</td><td>0.7267</td><td>0.6873</td><td>0.2550</td><td>0.1497</td><td>0.263</td></tr>
+<tr><td>6</td><td>0.9080</td><td>0.0921</td><td>3.3247</td><td>0.7254</td><td>0.6211</td><td>0.2546</td><td>0.1447</td><td>0.106</td></tr>
+<tr><td>7</td><td>0.9057</td><td>0.0943</td><td>3.4239</td><td>0.7201</td><td>0.6046</td><td>0.2547</td><td>0.1240</td><td>0.050</td></tr>
+<tr><td>8</td><td>0.9076</td><td>0.0924</td><td>3.1995</td><td>0.7189</td><td>0.7294</td><td>0.2539</td><td>0.1258</td><td>0.047</td></tr>
+<tr><td>9</td><td>0.9094</td><td>0.0907</td><td>3.1286</td><td>0.7137</td><td>0.6556</td><td>0.2540</td><td>0.1323</td><td>0.085</td></tr>
+<tr><td>10</td><td>0.9074</td><td>0.0926</td><td>3.2390</td><td>0.7251</td><td>0.7642</td><td>0.2538</td><td>0.1353</td><td>0.036</td></tr>
+<tr><td>11</td><td>0.9063</td><td>0.0937</td><td>3.0774</td><td>0.7201</td><td>0.6826</td><td>0.2539</td><td>0.1390</td><td>0.031</td></tr>
+<tr><td>12</td><td>0.9090</td><td>0.0910</td><td>3.1788</td><td>0.7312</td><td>0.7087</td><td>0.2535</td><td>0.1394</td><td>0.026</td></tr>
+<tr><td>13</td><td>0.9063</td><td>0.0937</td><td>2.8480</td><td>0.7247</td><td>0.6863</td><td>0.2536</td><td>0.1451</td><td>0.040</td></tr>
+<tr><td>14</td><td>0.9056</td><td>0.0944</td><td>2.8175</td><td>0.7203</td><td>0.6804</td><td>0.2536</td><td>0.1427</td><td>0.048</td></tr>
+<tr><td>15</td><td>0.9057</td><td>0.0943</td><td>2.7897</td><td>0.7305</td><td>0.6543</td><td>0.2536</td><td>0.1471</td><td>0.039</td></tr>
+<tr><td>16</td><td>0.9085</td><td>0.0915</td><td>2.8753</td><td>0.7284</td><td>0.7337</td><td>0.2533</td><td>0.1488</td><td>0.079</td></tr>
+<tr><td>17</td><td>0.9079</td><td>0.0921</td><td>2.6175</td><td>0.7290</td><td>0.6769</td><td>0.2532</td><td>0.1755</td><td>0.059</td></tr>
+<tr><td>18</td><td>0.9063</td><td>0.0937</td><td>2.7702</td><td>0.7315</td><td>0.7389</td><td>0.2532</td><td>0.1418</td><td>0.056</td></tr>
+<tr><td>19</td><td>0.9074</td><td>0.0926</td><td>2.5100</td><td>0.7336</td><td>0.6857</td><td>0.2530</td><td>0.1405</td><td>0.066</td></tr>
+<tr><td>20</td><td>0.9058</td><td>0.0942</td><td>2.4102</td><td>0.7294</td><td>0.6829</td><td>0.2529</td><td>0.1367</td><td>0.071</td></tr>
+<tr><td>21</td><td>0.9065</td><td>0.0935</td><td>2.2713</td><td>0.7352</td><td>0.6652</td><td>0.2529</td><td>0.1689</td><td>0.059</td></tr>
+<tr><td>22</td><td>0.9067</td><td>0.0933</td><td>2.2918</td><td>0.7381</td><td>0.6538</td><td>0.2529</td><td>0.1558</td><td>0.056</td></tr>
+<tr><td>23</td><td>0.9104</td><td>0.0896</td><td>2.3718</td><td>0.7373</td><td>0.6295</td><td>0.2526</td><td>0.1911</td><td>0.075</td></tr>
+</table>
+<h3>VSA TAU</h3><div class="dim">tau[0]=6.61 &nbsp; tau[-1]=256.18 &nbsp; ratio=38.7x &nbsp; tau_l_dev=-0.0123 (std 0.1228)
+</div>
+<h3>MIRROR INTERNALS (L0, mid, last) — ВСЕ параметры зеркала</h3>
+<div class="dim">L0:</div>
+<table><tr><th>param</th><th>shape</th><th>mean</th><th>std</th><th>min</th><th>max</th></tr>
+<tr><td>W_proj</td><td>[32, 80, 8]</td><td>0.0002</td><td>0.0959</td><td>-1.0196</td><td>0.6011</td></tr>
+<tr><td>w_temp</td><td>[32, 8]</td><td>0.1037</td><td>1.4103</td><td>-2.8950</td><td>3.9226</td></tr>
+<tr><td>w_global</td><td>[32, 8]</td><td>-0.0256</td><td>1.4083</td><td>-2.9386</td><td>4.3559</td></tr>
+<tr><td>w_sym_u</td><td>[32, 8]</td><td>0.0814</td><td>0.7661</td><td>-2.6687</td><td>2.2637</td></tr>
+<tr><td>w_sym_v</td><td>[32, 8]</td><td>-0.0745</td><td>0.8296</td><td>-3.3035</td><td>2.5666</td></tr>
+<tr><td>alpha_diag</td><td>[32, 8]</td><td>0.9172</td><td>0.1114</td><td>0.5239</td><td>1.0040</td></tr>
+<tr><td>tanh_bias</td><td>[32, 8]</td><td>-0.2567</td><td>0.4772</td><td>-1.1374</td><td>1.6726</td></tr>
+<tr><td>log_scale</td><td>[32, 80]</td><td>-2.3828</td><td>2.7326</td><td>-5.8976</td><td>2.5277</td></tr>
+<tr><td>w_gate</td><td>[32, 8]</td><td>-0.3297</td><td>0.2159</td><td>-1.0190</td><td>0.5812</td></tr>
+<tr><td>b_gate</td><td>[32]</td><td>-0.4996</td><td>0.1365</td><td>-0.8844</td><td>-0.2516</td></tr>
+<tr><td>w_delta_gate</td><td>[32, 8]</td><td>-0.0601</td><td>0.3940</td><td>-1.8183</td><td>1.3087</td></tr>
+<tr><td>gate_bias</td><td>[32]</td><td>-0.2717</td><td>0.2800</td><td>-0.7611</td><td>0.2385</td></tr>
+<tr><td>w_intent</td><td>[32, 8]</td><td>0.0075</td><td>0.0852</td><td>-0.2609</td><td>0.2660</td></tr>
+<tr><td>b_intent</td><td>[32]</td><td>-0.3975</td><td>0.1045</td><td>-0.7488</td><td>-0.2586</td></tr>
+<tr><td>w_sal</td><td>[32]</td><td>-0.3981</td><td>0.1073</td><td>-0.7884</td><td>-0.2651</td></tr>
+<tr><td>w_help</td><td>[32, 1]</td><td>0.9431</td><td>0.0524</td><td>0.8744</td><td>1.0868</td></tr>
+<tr><td>w_contra</td><td>[32]</td><td>-0.2552</td><td>0.0957</td><td>-0.6136</td><td>-0.1072</td></tr>
+<tr><td>log_skip_alpha</td><td>[32]</td><td>0.0089</td><td>0.8299</td><td>-0.7231</td><td>2.4961</td></tr>
+<tr><td>w_alpha</td><td>[32, 160]</td><td>0.0010</td><td>0.0928</td><td>-0.5830</td><td>0.5530</td></tr>
+<tr><td>b_alpha</td><td>[32]</td><td>-0.0330</td><td>0.3758</td><td>-0.3876</td><td>0.9822</td></tr>
+<tr><td>log_dvar_mod_scale</td><td>[32]</td><td>-1.2908</td><td>0.1051</td><td>-1.5426</td><td>-1.1182</td></tr>
+<tr><td>log_grad_mod_scale</td><td>[32]</td><td>-0.5928</td><td>0.2442</td><td>-1.0350</td><td>-0.1445</td></tr>
+<tr><td>dvar_mod_bias</td><td>[32]</td><td>-0.5171</td><td>0.1310</td><td>-0.8435</td><td>-0.2841</td></tr>
+<tr><td>grad_mod_bias</td><td>[32]</td><td>-0.5633</td><td>0.1420</td><td>-0.9163</td><td>-0.3061</td></tr>
+<tr><td>_signal_log_weights</td><td>[5]</td><td>-1.6642</td><td>0.8587</td><td>-2.7907</td><td>-0.7380</td></tr>
+<tr><td>_tau_signal_log</td><td>[]</td><td>0.1197</td><td>0.0000</td><td>0.1197</td><td>0.1197</td></tr>
+<tr><td>mod_scale_mlp</td><td>[32]</td><td>-1.0273</td><td>0.7327</td><td>-1.9488</td><td>0.1772</td></tr>
+<tr><td>mod_scale_mem</td><td>[32]</td><td>0.6901</td><td>0.0916</td><td>0.4866</td><td>0.8348</td></tr>
+<tr><td>conv_smooth.weight</td><td>[256, 1, 3]</td><td>0.2513</td><td>0.5605</td><td>-1.8423</td><td>2.2917</td></tr>
+<tr><td>usefulness_predictor.0.weight</td><td>[8, 8]</td><td>0.0502</td><td>0.2878</td><td>-0.5216</td><td>0.5344</td></tr>
+<tr><td>usefulness_predictor.0.bias</td><td>[8]</td><td>-0.0648</td><td>0.4155</td><td>-0.6230</td><td>0.6609</td></tr>
+<tr><td>usefulness_predictor.2.weight</td><td>[1, 8]</td><td>0.0938</td><td>0.4085</td><td>-0.4114</td><td>0.4213</td></tr>
+<tr><td>usefulness_predictor.2.bias</td><td>[1]</td><td>-0.7011</td><td>0.0000</td><td>-0.7011</td><td>-0.7011</td></tr>
+<tr><td>hybrid_gate.log_tau</td><td>[]</td><td>0.1134</td><td>0.0000</td><td>0.1134</td><td>0.1134</td></tr>
+<tr><td>bridge_glu_net.log_gain</td><td>[]</td><td>1.1979</td><td>0.0000</td><td>1.1979</td><td>1.1979</td></tr>
+<tr><td>bridge_glu_net.Wg.weight</td><td>[32, 256]</td><td>-0.0066</td><td>0.0478</td><td>-0.2247</td><td>0.2500</td></tr>
+<tr><td>bridge_glu_net.Wg.bias</td><td>[32]</td><td>-0.1532</td><td>0.0422</td><td>-0.2370</td><td>-0.0732</td></tr>
+<tr><td>bridge_glu_net.Wv.weight</td><td>[32, 256]</td><td>-0.0067</td><td>0.0478</td><td>-0.2296</td><td>0.2620</td></tr>
+<tr><td>bridge_glu_net.Wv.bias</td><td>[32]</td><td>-0.1536</td><td>0.0524</td><td>-0.2336</td><td>-0.0500</td></tr>
+</table>
+<div class="dim">L12:</div>
+<table><tr><th>param</th><th>shape</th><th>mean</th><th>std</th><th>min</th><th>max</th></tr>
+<tr><td>W_proj</td><td>[32, 80, 16]</td><td>-0.0002</td><td>0.1119</td><td>-0.9428</td><td>1.0030</td></tr>
+<tr><td>w_temp</td><td>[32, 16]</td><td>0.0648</td><td>1.2267</td><td>-3.3672</td><td>2.6556</td></tr>
+<tr><td>w_global</td><td>[32, 16]</td><td>0.0664</td><td>1.2865</td><td>-2.9812</td><td>2.5504</td></tr>
+<tr><td>w_sym_u</td><td>[32, 16]</td><td>0.0546</td><td>0.8637</td><td>-2.4017</td><td>3.0773</td></tr>
+<tr><td>w_sym_v</td><td>[32, 16]</td><td>0.0176</td><td>0.9028</td><td>-3.0666</td><td>3.2990</td></tr>
+<tr><td>alpha_diag</td><td>[32, 16]</td><td>0.9090</td><td>0.0776</td><td>0.4388</td><td>0.9986</td></tr>
+<tr><td>tanh_bias</td><td>[32, 16]</td><td>0.3690</td><td>0.6338</td><td>-1.3220</td><td>1.5689</td></tr>
+<tr><td>log_scale</td><td>[32, 80]</td><td>-1.0425</td><td>3.1788</td><td>-4.8506</td><td>2.7307</td></tr>
+<tr><td>w_gate</td><td>[32, 16]</td><td>-0.1322</td><td>0.2878</td><td>-0.7461</td><td>1.1631</td></tr>
+<tr><td>b_gate</td><td>[32]</td><td>-0.6346</td><td>0.4102</td><td>-1.3648</td><td>-0.1231</td></tr>
+<tr><td>w_delta_gate</td><td>[32, 16]</td><td>-0.0534</td><td>0.2617</td><td>-0.8994</td><td>0.9585</td></tr>
+<tr><td>gate_bias</td><td>[32]</td><td>-0.3451</td><td>0.6370</td><td>-1.4343</td><td>0.7557</td></tr>
+<tr><td>w_intent</td><td>[32, 16]</td><td>0.0011</td><td>0.2299</td><td>-0.6517</td><td>0.6263</td></tr>
+<tr><td>b_intent</td><td>[32]</td><td>-0.1378</td><td>0.0913</td><td>-0.3882</td><td>-0.0173</td></tr>
+<tr><td>w_sal</td><td>[32]</td><td>-0.2625</td><td>0.1106</td><td>-0.5210</td><td>-0.0747</td></tr>
+<tr><td>w_help</td><td>[32, 1]</td><td>1.0008</td><td>0.0251</td><td>0.9567</td><td>1.0650</td></tr>
+<tr><td>w_contra</td><td>[32]</td><td>-0.2261</td><td>0.1570</td><td>-0.6241</td><td>0.0575</td></tr>
+<tr><td>log_skip_alpha</td><td>[32]</td><td>1.2989</td><td>1.4066</td><td>-0.2679</td><td>3.3793</td></tr>
+<tr><td>w_alpha</td><td>[32, 160]</td><td>-0.0002</td><td>0.1296</td><td>-0.4670</td><td>0.4666</td></tr>
+<tr><td>b_alpha</td><td>[32]</td><td>0.6729</td><td>0.7349</td><td>-0.1607</td><td>1.7448</td></tr>
+<tr><td>log_dvar_mod_scale</td><td>[32]</td><td>-2.4760</td><td>0.2239</td><td>-2.8221</td><td>-1.8893</td></tr>
+<tr><td>log_grad_mod_scale</td><td>[32]</td><td>-1.7518</td><td>0.4218</td><td>-2.3091</td><td>-0.9963</td></tr>
+<tr><td>dvar_mod_bias</td><td>[32]</td><td>-0.6718</td><td>0.3938</td><td>-1.3592</td><td>-0.1253</td></tr>
+<tr><td>grad_mod_bias</td><td>[32]</td><td>-0.6499</td><td>0.3702</td><td>-1.2790</td><td>-0.1354</td></tr>
+<tr><td>_signal_log_weights</td><td>[5]</td><td>-1.6534</td><td>0.1929</td><td>-1.9539</td><td>-1.4890</td></tr>
+<tr><td>_tau_signal_log</td><td>[]</td><td>0.0583</td><td>0.0000</td><td>0.0583</td><td>0.0583</td></tr>
+<tr><td>mod_scale_mlp</td><td>[32]</td><td>-1.0104</td><td>0.1613</td><td>-1.4572</td><td>-0.6564</td></tr>
+<tr><td>mod_scale_mem</td><td>[32]</td><td>0.7239</td><td>0.0793</td><td>0.5456</td><td>0.8747</td></tr>
+<tr><td>conv_smooth.weight</td><td>[512, 1, 3]</td><td>0.2241</td><td>0.6916</td><td>-1.4553</td><td>2.2648</td></tr>
+<tr><td>usefulness_predictor.0.weight</td><td>[16, 16]</td><td>0.0393</td><td>0.2568</td><td>-0.3991</td><td>0.4208</td></tr>
+<tr><td>usefulness_predictor.0.bias</td><td>[16]</td><td>0.2811</td><td>0.8314</td><td>-0.9518</td><td>1.0643</td></tr>
+<tr><td>usefulness_predictor.2.weight</td><td>[1, 16]</td><td>-0.2203</td><td>0.8812</td><td>-0.8814</td><td>0.8812</td></tr>
+<tr><td>usefulness_predictor.2.bias</td><td>[1]</td><td>-2.0045</td><td>0.0000</td><td>-2.0045</td><td>-2.0045</td></tr>
+<tr><td>hybrid_gate.log_tau</td><td>[]</td><td>1.1963</td><td>0.0000</td><td>1.1963</td><td>1.1963</td></tr>
+<tr><td>bridge_glu_net.log_gain</td><td>[]</td><td>1.1100</td><td>0.0000</td><td>1.1100</td><td>1.1100</td></tr>
+<tr><td>bridge_glu_net.Wg.weight</td><td>[32, 512]</td><td>-0.0093</td><td>0.0246</td><td>-0.1065</td><td>0.1012</td></tr>
+<tr><td>bridge_glu_net.Wg.bias</td><td>[32]</td><td>-0.0575</td><td>0.0306</td><td>-0.1075</td><td>0.0051</td></tr>
+<tr><td>bridge_glu_net.Wv.weight</td><td>[32, 512]</td><td>-0.0093</td><td>0.0244</td><td>-0.0994</td><td>0.0918</td></tr>
+<tr><td>bridge_glu_net.Wv.bias</td><td>[32]</td><td>-0.0598</td><td>0.0322</td><td>-0.1112</td><td>0.0160</td></tr>
+</table>
+<div class="dim">L23:</div>
+<table><tr><th>param</th><th>shape</th><th>mean</th><th>std</th><th>min</th><th>max</th></tr>
+<tr><td>W_proj</td><td>[32, 80, 32]</td><td>-0.0000</td><td>0.0979</td><td>-1.2956</td><td>1.2206</td></tr>
+<tr><td>w_temp</td><td>[32, 32]</td><td>-0.0273</td><td>1.0024</td><td>-2.7012</td><td>3.5527</td></tr>
+<tr><td>w_global</td><td>[32, 32]</td><td>-0.0116</td><td>1.0147</td><td>-2.6865</td><td>2.9772</td></tr>
+<tr><td>w_sym_u</td><td>[32, 32]</td><td>0.0002</td><td>0.9617</td><td>-2.9317</td><td>3.3418</td></tr>
+<tr><td>w_sym_v</td><td>[32, 32]</td><td>0.0294</td><td>0.9371</td><td>-3.3230</td><td>2.7373</td></tr>
+<tr><td>alpha_diag</td><td>[32, 32]</td><td>0.9104</td><td>0.0772</td><td>0.2983</td><td>1.0006</td></tr>
+<tr><td>tanh_bias</td><td>[32, 32]</td><td>0.0929</td><td>0.3658</td><td>-0.8358</td><td>0.8919</td></tr>
+<tr><td>log_scale</td><td>[32, 80]</td><td>-1.1793</td><td>2.3718</td><td>-3.8176</td><td>2.3423</td></tr>
+<tr><td>w_gate</td><td>[32, 32]</td><td>-0.1788</td><td>0.1573</td><td>-0.7160</td><td>0.2999</td></tr>
+<tr><td>b_gate</td><td>[32]</td><td>-0.3508</td><td>0.0945</td><td>-0.5749</td><td>-0.1778</td></tr>
+<tr><td>w_delta_gate</td><td>[32, 32]</td><td>-0.0100</td><td>0.2511</td><td>-1.2215</td><td>1.1716</td></tr>
+<tr><td>gate_bias</td><td>[32]</td><td>-0.1896</td><td>1.1779</td><td>-2.0963</td><td>1.8148</td></tr>
+<tr><td>w_intent</td><td>[32, 32]</td><td>0.0006</td><td>0.0534</td><td>-0.2344</td><td>0.2613</td></tr>
+<tr><td>b_intent</td><td>[32]</td><td>-0.0460</td><td>0.0408</td><td>-0.1620</td><td>-0.0049</td></tr>
+<tr><td>w_sal</td><td>[32]</td><td>-0.0555</td><td>0.0488</td><td>-0.1577</td><td>0.0562</td></tr>
+<tr><td>w_help</td><td>[32, 1]</td><td>1.0322</td><td>0.0260</td><td>0.9818</td><td>1.0894</td></tr>
+<tr><td>w_contra</td><td>[32]</td><td>-0.1557</td><td>0.0761</td><td>-0.2981</td><td>0.0004</td></tr>
+<tr><td>log_skip_alpha</td><td>[32]</td><td>0.7110</td><td>1.0640</td><td>-0.2569</td><td>2.6133</td></tr>
+<tr><td>w_alpha</td><td>[32, 160]</td><td>-0.0006</td><td>0.0861</td><td>-0.2822</td><td>0.2825</td></tr>
+<tr><td>b_alpha</td><td>[32]</td><td>0.3162</td><td>0.4740</td><td>-0.1427</td><td>1.2753</td></tr>
+<tr><td>log_dvar_mod_scale</td><td>[32]</td><td>-2.4447</td><td>0.1822</td><td>-2.8459</td><td>-2.1709</td></tr>
+<tr><td>log_grad_mod_scale</td><td>[32]</td><td>-2.1643</td><td>0.0978</td><td>-2.3140</td><td>-1.9661</td></tr>
+<tr><td>dvar_mod_bias</td><td>[32]</td><td>-0.2458</td><td>0.1036</td><td>-0.5455</td><td>-0.0760</td></tr>
+<tr><td>grad_mod_bias</td><td>[32]</td><td>-0.2250</td><td>0.1042</td><td>-0.5083</td><td>-0.0524</td></tr>
+<tr><td>_signal_log_weights</td><td>[5]</td><td>-0.9932</td><td>0.0496</td><td>-1.0222</td><td>-0.9056</td></tr>
+<tr><td>_tau_signal_log</td><td>[]</td><td>-0.6044</td><td>0.0000</td><td>-0.6044</td><td>-0.6044</td></tr>
+<tr><td>mod_scale_mlp</td><td>[32]</td><td>0.8274</td><td>0.1304</td><td>0.5440</td><td>1.0814</td></tr>
+<tr><td>mod_scale_mem</td><td>[32]</td><td>0.6139</td><td>0.0533</td><td>0.5403</td><td>0.7488</td></tr>
+<tr><td>conv_smooth.weight</td><td>[1024, 1, 3]</td><td>0.2714</td><td>0.3951</td><td>-0.8148</td><td>1.6475</td></tr>
+<tr><td>usefulness_predictor.0.weight</td><td>[32, 32]</td><td>-0.0139</td><td>0.2273</td><td>-0.3895</td><td>0.3830</td></tr>
+<tr><td>usefulness_predictor.0.bias</td><td>[32]</td><td>-0.1364</td><td>0.7736</td><td>-0.8782</td><td>0.9474</td></tr>
+<tr><td>usefulness_predictor.2.weight</td><td>[1, 32]</td><td>0.1709</td><td>0.9100</td><td>-0.9134</td><td>0.9125</td></tr>
+<tr><td>usefulness_predictor.2.bias</td><td>[1]</td><td>-1.9816</td><td>0.0000</td><td>-1.9816</td><td>-1.9816</td></tr>
+<tr><td>hybrid_gate.log_tau</td><td>[]</td><td>-0.3059</td><td>0.0000</td><td>-0.3059</td><td>-0.3059</td></tr>
+<tr><td>bridge_glu_net.log_gain</td><td>[]</td><td>1.8405</td><td>0.0000</td><td>1.8405</td><td>1.8405</td></tr>
+<tr><td>bridge_glu_net.Wg.weight</td><td>[32, 1024]</td><td>0.0019</td><td>0.0183</td><td>-0.0562</td><td>0.0590</td></tr>
+<tr><td>bridge_glu_net.Wg.bias</td><td>[32]</td><td>0.0273</td><td>0.0271</td><td>-0.0447</td><td>0.0687</td></tr>
+<tr><td>bridge_glu_net.Wv.weight</td><td>[32, 1024]</td><td>0.0018</td><td>0.0184</td><td>-0.0567</td><td>0.0586</td></tr>
+<tr><td>bridge_glu_net.Wv.bias</td><td>[32]</td><td>0.0312</td><td>0.0205</td><td>-0.0317</td><td>0.0652</td></tr>
+</table>
+<h3>LM HEAD</h3>
+<table><tr><th>name</th><th>shape</th><th>mean</th><th>std</th></tr>
+<tr><td>readout</td><td>[64, 40]</td><td>0.003801</td><td>0.174120</td></tr>
+<tr><td>bit_bias</td><td>[64]</td><td>-1.973338</td><td>0.080645</td></tr>
+<tr><td>log_temp</td><td>[64]</td><td>0.307575</td><td>0.062733</td></tr>
+<tr><td>emphasis_gain</td><td>[1]</td><td>-0.584001</td><td>nan</td></tr>
+<tr><td>phantom_basis</td><td>[64, 2560]</td><td>0.000050</td><td>0.017065</td></tr>
+<tr><td>phantom_mix</td><td>[64, 64]</td><td>0.000093</td><td>0.019343</td></tr>
+<tr><td>lacuna_w</td><td>[]</td><td>29.827820</td><td>nan</td></tr>
+<tr><td>lacuna_b</td><td>[]</td><td>-3.840044</td><td>nan</td></tr>
+<tr><td>log_eta</td><td>[]</td><td>-2.965815</td><td>nan</td></tr>
+<tr><td>token_bias</td><td>[65536]</td><td>-5.442152</td><td>1.099075</td></tr>
+</table>
+<h3>TENSORS</h3><div class="dim">183139929 scalars &nbsp; mean=-0.003040 &nbsp; std=0.200809 &nbsp; min=-9.971434 &nbsp; max=29.827820 &nbsp; NaN=0 &nbsp; Inf=0</div>
+<div class="dim">Q1=-5.067207  Q10=-0.871486  Q50=0.004181  Q90=1.031711  Q99=4.224596</div>
+<h3>REASONING</h3><div class="dim">enabled_step=16726 &nbsp; scale=1.0000 &nbsp; last gates=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]</div>
+<h3>INSPECTOR (private memory)</h3>
+<div class="dim">signals: temp=0.116  pred=0.049  smooth=0.110  sym=0.340  help=0.385</div>
+<div class="dim">w_help(sigmoid)=0.720 &nbsp; w_contra=-0.2552</div>
+<div class="dim">concept_sim: mean=0.1657 std=0.3651 diag=1.0000</div>
+<div class="dim">behavior_div: 0.9692</div>
+<div class="dim">trust: mean=0.0156 diag=0.5000</div>
+<div class="dim">pm_step: 0</div>
+<h2>WAKE DETECTOR</h2>
+<div>Wake-up scan: step=16720 layers=24</div>
+<div>  MLP W_std mean=0.0700 decay-expected=0.0688 dev=+0.0012</div>
+<div>  [WAKE ] MLP W_std vs decay curve (marker #1, dev +0.0012)</div>
+<div>  [WAKE ] per-layer W_std deviation (marker #1b, worst +0.00586)</div>
+<div>        L7: W_std dev +0.00586</div>
+<div>        L6: W_std dev +0.00327</div>
+<div>        L5: W_std dev +0.00210</div>
+<div>  [WAKE ] per-layer gate max (marker #2b, worst 0.860, wake &gt;0.75)</div>
+<div>        L7: gate max 0.860</div>
+<div>        L6: gate max 0.762</div>
+<div>        L23: gate max 0.747</div>
+<div>  sigmoid(mod_scale_mlp) mean=0.410  sigmoid(mod_scale_mem) mean=0.675</div>
+<div>  [PASS ] modulation gate (marker #2, &gt;0.75 = WAKE, baseline 0.668)</div>
+<div>  [WAKE ] mlp/mem gate divergence 0.27</div>
+<div>  slots occupied: 0/192, full layers: 0, empty layers: [], births in empty: []</div>
+<div>  [PASS ] slot births in empty layers: none</div>
+<div>  log_temp mean=+0.3076 (ref +0.0188 at 1398)</div>
+<div>  <span class="bdg b-WATCH">WATCH</span> log_temp rising (softmax flattening)</div>
+<div>  MATURATION gate: min=0.5626 max=0.8479 mean=0.7386 (ramp T0=8000 delta=4000 T_delay=8000)</div>
+<div>  readiness max=0.8479  tau_norm max=1.000</div>
+<div>  [PASS ] maturation gate opening (max 0.848) — bridge engaging</div>
+<h2>Per-layer gate max (wake &gt; 0.75)</h2>
+<div class="heat">
+<div class="hc" title="L7: 0.8605" style="background:hsl(0,75%,32%)">7<br>0.86</div>
+<div class="hc" title="L6: 0.7620" style="background:hsl(23,75%,32%)">6<br>0.76</div>
+<div class="hc" title="L23: 0.7468" style="background:hsl(32,75%,32%)">23<br>0.75</div>
+<div class="hc" title="L20: 0.7348" style="background:hsl(39,75%,32%)">20<br>0.73</div>
+<div class="hc" title="L22: 0.7306" style="background:hsl(42,75%,32%)">22<br>0.73</div>
+<div class="hc" title="L21: 0.7116" style="background:hsl(53,75%,32%)">21<br>0.71</div>
+<div class="hc" title="L18: 0.6416" style="background:hsl(95,75%,32%)">18<br>0.64</div>
+<div class="hc" title="L17: 0.6066" style="background:hsl(116,75%,32%)">17<br>0.61</div>
+<div class="hc" title="L2: 0.6028" style="background:hsl(118,75%,32%)">2<br>0.60</div>
+<div class="hc" title="L19: 0.5997" style="background:hsl(120,75%,32%)">19<br>0.60</div>
+<div class="hc" title="L16: 0.5586" style="background:hsl(120,75%,32%)">16<br>0.56</div>
+<div class="hc" title="L1: 0.5477" style="background:hsl(120,75%,32%)">1<br>0.55</div>
+<div class="hc" title="L0: 0.5442" style="background:hsl(120,75%,32%)">0<br>0.54</div>
+<div class="hc" title="L3: 0.4860" style="background:hsl(120,75%,32%)">3<br>0.49</div>
+<div class="hc" title="L4: 0.4621" style="background:hsl(120,75%,32%)">4<br>0.46</div>
+<div class="hc" title="L5: 0.4567" style="background:hsl(120,75%,32%)">5<br>0.46</div>
+<div class="hc" title="L8: 0.4248" style="background:hsl(120,75%,32%)">8<br>0.42</div>
+<div class="hc" title="L12: 0.3415" style="background:hsl(120,75%,32%)">12<br>0.34</div>
+<div class="hc" title="L9: 0.3273" style="background:hsl(120,75%,32%)">9<br>0.33</div>
+<div class="hc" title="L14: 0.3112" style="background:hsl(120,75%,32%)">14<br>0.31</div>
+<div class="hc" title="L15: 0.3020" style="background:hsl(120,75%,32%)">15<br>0.30</div>
+<div class="hc" title="L11: 0.2857" style="background:hsl(120,75%,32%)">11<br>0.29</div>
+<div class="hc" title="L10: 0.1966" style="background:hsl(120,75%,32%)">10<br>0.20</div>
+<div class="hc" title="L13: 0.1923" style="background:hsl(120,75%,32%)">13<br>0.19</div>
+</div>
+<h2>Per-layer W_std dev (marker #1b)</h2>
+<div class="heat">
+<div class="hc" title="L7: +0.00586" style="background:hsl(0,75%,32%)">7<br>+0.0059</div>
+<div class="hc" title="L6: +0.00327" style="background:hsl(22,75%,32%)">6<br>+0.0033</div>
+<div class="hc" title="L5: +0.00210" style="background:hsl(57,75%,32%)">5<br>+0.0021</div>
+<div class="hc" title="L8: +0.00141" style="background:hsl(78,75%,32%)">8<br>+0.0014</div>
+<div class="hc" title="L9: +0.00116" style="background:hsl(85,75%,32%)">9<br>+0.0012</div>
+<div class="hc" title="L2: +0.00114" style="background:hsl(86,75%,32%)">2<br>+0.0011</div>
+<div class="hc" title="L11: +0.00114" style="background:hsl(86,75%,32%)">11<br>+0.0011</div>
+<div class="hc" title="L10: +0.00110" style="background:hsl(87,75%,32%)">10<br>+0.0011</div>
+<div class="hc" title="L3: +0.00109" style="background:hsl(87,75%,32%)">3<br>+0.0011</div>
+<div class="hc" title="L13: +0.00106" style="background:hsl(88,75%,32%)">13<br>+0.0011</div>
+<div class="hc" title="L4: +0.00103" style="background:hsl(89,75%,32%)">4<br>+0.0010</div>
+<div class="hc" title="L12: +0.00095" style="background:hsl(92,75%,32%)">12<br>+0.0009</div>
+<div class="hc" title="L14: +0.00092" style="background:hsl(92,75%,32%)">14<br>+0.0009</div>
+<div class="hc" title="L16: +0.00086" style="background:hsl(94,75%,32%)">16<br>+0.0009</div>
+<div class="hc" title="L15: +0.00079" style="background:hsl(96,75%,32%)">15<br>+0.0008</div>
+<div class="hc" title="L17: +0.00073" style="background:hsl(98,75%,32%)">17<br>+0.0007</div>
+<div class="hc" title="L19: +0.00070" style="background:hsl(99,75%,32%)">19<br>+0.0007</div>
+<div class="hc" title="L18: +0.00065" style="background:hsl(100,75%,32%)">18<br>+0.0007</div>
+<div class="hc" title="L20: +0.00053" style="background:hsl(104,75%,32%)">20<br>+0.0005</div>
+<div class="hc" title="L22: +0.00044" style="background:hsl(107,75%,32%)">22<br>+0.0004</div>
+<div class="hc" title="L23: +0.00040" style="background:hsl(108,75%,32%)">23<br>+0.0004</div>
+<div class="hc" title="L21: +0.00040" style="background:hsl(108,75%,32%)">21<br>+0.0004</div>
+<div class="hc" title="L0: +0.00034" style="background:hsl(110,75%,32%)">0<br>+0.0003</div>
+<div class="hc" title="L1: +0.00005" style="background:hsl(118,75%,32%)">1<br>+0.0001</div>
+</div>
+<h2>MATURATION gate (live wake-up ramp; T0=8000 delta=4000 T_delay=8000)</h2>
+<div class="heat">
+<div class="hc" title="L0: 0.5626" style="background:hsl(36,75%,32%)">0<br>0.56</div>
+<div class="hc" title="L1: 0.5802" style="background:hsl(33,75%,32%)">1<br>0.58</div>
+<div class="hc" title="L2: 0.5975" style="background:hsl(30,75%,32%)">2<br>0.60</div>
+<div class="hc" title="L3: 0.6138" style="background:hsl(28,75%,32%)">3<br>0.61</div>
+<div class="hc" title="L4: 0.8238" style="background:hsl(0,75%,32%)">4<br>0.82</div>
+<div class="hc" title="L5: 0.8479" style="background:hsl(0,75%,32%)">5<br>0.85</div>
+<div class="hc" title="L6: 0.7624" style="background:hsl(6,75%,32%)">6<br>0.76</div>
+<div class="hc" title="L7: 0.7822" style="background:hsl(3,75%,32%)">7<br>0.78</div>
+<div class="hc" title="L8: 0.6855" style="background:hsl(17,75%,32%)">8<br>0.69</div>
+<div class="hc" title="L9: 0.6978" style="background:hsl(15,75%,32%)">9<br>0.70</div>
+<div class="hc" title="L10: 0.7094" style="background:hsl(14,75%,32%)">10<br>0.71</div>
+<div class="hc" title="L11: 0.7205" style="background:hsl(12,75%,32%)">11<br>0.72</div>
+<div class="hc" title="L12: 0.7310" style="background:hsl(10,75%,32%)">12<br>0.73</div>
+<div class="hc" title="L13: 0.7418" style="background:hsl(9,75%,32%)">13<br>0.74</div>
+<div class="hc" title="L14: 0.7520" style="background:hsl(7,75%,32%)">14<br>0.75</div>
+<div class="hc" title="L15: 0.7615" style="background:hsl(6,75%,32%)">15<br>0.76</div>
+<div class="hc" title="L16: 0.7703" style="background:hsl(4,75%,32%)">16<br>0.77</div>
+<div class="hc" title="L17: 0.7787" style="background:hsl(3,75%,32%)">17<br>0.78</div>
+<div class="hc" title="L18: 0.7864" style="background:hsl(2,75%,32%)">18<br>0.79</div>
+<div class="hc" title="L19: 0.7934" style="background:hsl(1,75%,32%)">19<br>0.79</div>
+<div class="hc" title="L20: 0.7998" style="background:hsl(0,75%,32%)">20<br>0.80</div>
+<div class="hc" title="L21: 0.8051" style="background:hsl(0,75%,32%)">21<br>0.81</div>
+<div class="hc" title="L22: 0.8098" style="background:hsl(0,75%,32%)">22<br>0.81</div>
+<div class="hc" title="L23: 0.8137" style="background:hsl(0,75%,32%)">23<br>0.81</div>
+</div>
+<div class="dim">readiness max=0.8479 &nbsp; tau_norm max=1.000 (gate opens deeper layers later via tau-geometry)</div>
+<h2>LIVE — per-layer dissection</h2>
+<div class="dim">live пропущен (--no-live) — данные не собраны</div>
+<h2>SIGNALS (softmax share)</h2>
+<div class="dim">live пропущен (--no-live) — данные не собраны</div>
+<h2>MIRROR PARAMS (L0 / mid / last)</h2>
+<div class="dim">live пропущен (--no-live) — данные не собраны</div>
+<h2>META-COGNITION (ВСЕ буферы)</h2>
+<div class="cards"><div class="card"><b>0.0000</b><span>bridge readiness</span></div><div class="card"><b>0.8465</b><span>mat gate max</span></div><div class="card"><b>0.7382</b><span>mat gate mean</span></div><div class="card"><b>0.8465</b><span>readiness max</span></div></div>
+<table><tr><th>L</th><th>pm_norm</th><th>gate_ema</th><th>w_help</th><th>w_contra</th><th>trust_diag</th><th>trust_max</th><th>concept_sim</th><th>behavior_div</th><th>meta_pm</th><th>signal temp</th><th>signal pred</th><th>signal smooth</th><th>signal sym</th><th>signal help</th></tr>
+<tr><td>0</td><td>0.0228</td><td>0.1015</td><td>0.9431</td><td>-0.2552</td><td>0.5000</td><td>0.5000</td><td>0.1657</td><td>0.9693</td><td>0.0005</td><td>0.1361</td><td>0.0626</td><td>0.1302</td><td>0.3210</td><td>0.3501</td></tr>
+<tr><td>1</td><td>0.0904</td><td>0.2137</td><td>1.0719</td><td>-0.2286</td><td>0.5000</td><td>0.5000</td><td>0.4253</td><td>0.9676</td><td>0.0005</td><td>0.1798</td><td>0.1126</td><td>0.1961</td><td>0.1783</td><td>0.3332</td></tr>
+<tr><td>2</td><td>0.0184</td><td>0.1875</td><td>0.9899</td><td>-0.1933</td><td>0.5000</td><td>0.5000</td><td>0.1224</td><td>0.9678</td><td>0.0005</td><td>0.1528</td><td>0.0808</td><td>0.1408</td><td>0.2830</td><td>0.3425</td></tr>
+<tr><td>3</td><td>0.2318</td><td>0.2016</td><td>1.0429</td><td>-0.1775</td><td>0.5000</td><td>0.5000</td><td>0.6567</td><td>0.9779</td><td>0.0005</td><td>0.1396</td><td>0.0893</td><td>0.1406</td><td>0.2495</td><td>0.3809</td></tr>
+<tr><td>4</td><td>0.2425</td><td>0.1741</td><td>0.9510</td><td>-0.3854</td><td>0.5000</td><td>0.5003</td><td>0.5560</td><td>0.9663</td><td>0.0005</td><td>0.2549</td><td>0.0648</td><td>0.1072</td><td>0.2167</td><td>0.3563</td></tr>
+<tr><td>5</td><td>0.2644</td><td>0.1662</td><td>0.9783</td><td>-0.2503</td><td>0.5000</td><td>0.5000</td><td>0.2199</td><td>0.9680</td><td>0.0005</td><td>0.1538</td><td>0.0885</td><td>0.1637</td><td>0.2638</td><td>0.3302</td></tr>
+<tr><td>6</td><td>0.1047</td><td>0.0940</td><td>0.9716</td><td>-0.3663</td><td>0.5000</td><td>0.5000</td><td>0.5632</td><td>0.9755</td><td>0.0005</td><td>0.2270</td><td>0.0946</td><td>0.1407</td><td>0.2334</td><td>0.3042</td></tr>
+<tr><td>7</td><td>0.0571</td><td>0.0783</td><td>0.9452</td><td>-0.3819</td><td>0.5000</td><td>0.5003</td><td>0.2988</td><td>0.9788</td><td>0.0005</td><td>0.2118</td><td>0.1082</td><td>0.1850</td><td>0.2105</td><td>0.2846</td></tr>
+<tr><td>8</td><td>0.0480</td><td>0.1315</td><td>0.9395</td><td>0.1949</td><td>0.5000</td><td>0.5000</td><td>0.1166</td><td>0.9418</td><td>0.0005</td><td>0.2451</td><td>0.0856</td><td>0.1492</td><td>0.2346</td><td>0.2855</td></tr>
+<tr><td>9</td><td>0.0858</td><td>0.2435</td><td>0.9138</td><td>-0.1723</td><td>0.5000</td><td>0.5000</td><td>0.1991</td><td>0.9770</td><td>0.0005</td><td>0.2954</td><td>0.0880</td><td>0.1158</td><td>0.2550</td><td>0.2457</td></tr>
+<tr><td>10</td><td>0.0365</td><td>0.1371</td><td>0.9699</td><td>-0.1675</td><td>0.5000</td><td>0.5000</td><td>0.1030</td><td>0.9572</td><td>0.0005</td><td>0.2405</td><td>0.1298</td><td>0.1725</td><td>0.2273</td><td>0.2299</td></tr>
+<tr><td>11</td><td>0.0307</td><td>0.1917</td><td>0.9454</td><td>-0.0390</td><td>0.5000</td><td>0.5000</td><td>0.1074</td><td>0.9330</td><td>0.0005</td><td>0.2436</td><td>0.1201</td><td>0.1820</td><td>0.2203</td><td>0.2341</td></tr>
+<tr><td>12</td><td>0.0265</td><td>0.1279</td><td>1.0008</td><td>-0.2261</td><td>0.5000</td><td>0.5000</td><td>0.0544</td><td>0.9690</td><td>0.0005</td><td>0.1870</td><td>0.1533</td><td>0.2069</td><td>0.2256</td><td>0.2273</td></tr>
+<tr><td>13</td><td>0.0397</td><td>0.2072</td><td>0.9683</td><td>-0.1231</td><td>0.5000</td><td>0.5000</td><td>0.0968</td><td>0.9608</td><td>0.0005</td><td>0.3220</td><td>0.1021</td><td>0.1332</td><td>0.2237</td><td>0.2189</td></tr>
+<tr><td>14</td><td>0.0476</td><td>0.1851</td><td>0.9464</td><td>-0.1075</td><td>0.5000</td><td>0.5000</td><td>0.0547</td><td>0.9571</td><td>0.0005</td><td>0.3045</td><td>0.1325</td><td>0.1506</td><td>0.2106</td><td>0.2018</td></tr>
+<tr><td>15</td><td>0.0393</td><td>0.1526</td><td>0.9974</td><td>-0.1341</td><td>0.5000</td><td>0.5000</td><td>0.0836</td><td>0.9535</td><td>0.0005</td><td>0.2634</td><td>0.1371</td><td>0.1552</td><td>0.2344</td><td>0.2099</td></tr>
+<tr><td>16</td><td>0.0786</td><td>0.1552</td><td>0.9870</td><td>-0.1711</td><td>0.5000</td><td>0.5000</td><td>0.0652</td><td>0.9510</td><td>0.0005</td><td>0.2325</td><td>0.1734</td><td>0.1819</td><td>0.2069</td><td>0.2053</td></tr>
+<tr><td>17</td><td>0.0590</td><td>0.1800</td><td>0.9897</td><td>-0.0719</td><td>0.5000</td><td>0.5000</td><td>0.0492</td><td>0.9638</td><td>0.0005</td><td>0.2720</td><td>0.1584</td><td>0.1671</td><td>0.2014</td><td>0.2011</td></tr>
+<tr><td>18</td><td>0.0554</td><td>0.0309</td><td>1.0026</td><td>-0.2888</td><td>0.5000</td><td>0.5000</td><td>0.0620</td><td>0.9639</td><td>0.0005</td><td>0.2425</td><td>0.1776</td><td>0.1841</td><td>0.1941</td><td>0.2017</td></tr>
+<tr><td>19</td><td>0.0656</td><td>0.1947</td><td>1.0133</td><td>-0.0750</td><td>0.5000</td><td>0.5000</td><td>0.0845</td><td>0.9235</td><td>0.0005</td><td>0.2202</td><td>0.1863</td><td>0.1882</td><td>0.2090</td><td>0.1963</td></tr>
+<tr><td>20</td><td>0.0710</td><td>0.1344</td><td>0.9918</td><td>-0.1546</td><td>0.5000</td><td>0.5000</td><td>0.0595</td><td>0.9496</td><td>0.0005</td><td>0.2407</td><td>0.1764</td><td>0.1810</td><td>0.1937</td><td>0.2082</td></tr>
+<tr><td>21</td><td>0.0588</td><td>0.1878</td><td>1.0214</td><td>-0.0845</td><td>0.5000</td><td>0.5000</td><td>0.0658</td><td>0.9580</td><td>0.0005</td><td>0.2225</td><td>0.1893</td><td>0.1887</td><td>0.1996</td><td>0.1998</td></tr>
+<tr><td>22</td><td>0.0556</td><td>0.0242</td><td>1.0361</td><td>-0.2945</td><td>0.5000</td><td>0.5000</td><td>0.0296</td><td>0.9582</td><td>0.0005</td><td>0.2268</td><td>0.1899</td><td>0.1923</td><td>0.1956</td><td>0.1954</td></tr>
+<tr><td>23</td><td>0.0741</td><td>0.0605</td><td>1.0322</td><td>-0.1557</td><td>0.5000</td><td>0.5000</td><td>0.0694</td><td>0.9655</td><td>0.0005</td><td>0.2130</td><td>0.1963</td><td>0.1957</td><td>0.1964</td><td>0.1986</td></tr>
+</table>
+<h2>MATURATION per-layer</h2>
+<table><tr><th>L</th><th>gate</th><th>readiness</th><th>pen_init</th><th>pen_ema</th></tr>
+<tr><td>0</td><td>0.5626</td><td>0.2951</td><td>0.5057</td><td>0.4421</td></tr>
+<tr><td>1</td><td>0.5802</td><td>0.2712</td><td>0.4997</td><td>0.4486</td></tr>
+<tr><td>2</td><td>0.5975</td><td>0.3938</td><td>0.5736</td><td>0.4510</td></tr>
+<tr><td>3</td><td>0.6138</td><td>0.3653</td><td>0.5602</td><td>0.4541</td></tr>
+<tr><td>4</td><td>0.8225</td><td>0.8224</td><td>1.2090</td><td>0.4756</td></tr>
+<tr><td>5</td><td>0.8465</td><td>0.8465</td><td>1.2661</td><td>0.4540</td></tr>
+<tr><td>6</td><td>0.7594</td><td>0.7592</td><td>0.9935</td><td>0.4673</td></tr>
+<tr><td>7</td><td>0.7784</td><td>0.7777</td><td>1.0322</td><td>0.4640</td></tr>
+<tr><td>8</td><td>0.6855</td><td>0.6581</td><td>0.5955</td><td>0.3389</td></tr>
+<tr><td>9</td><td>0.6978</td><td>0.5817</td><td>0.5290</td><td>0.3354</td></tr>
+<tr><td>10</td><td>0.7094</td><td>0.5641</td><td>0.5116</td><td>0.3317</td></tr>
+<tr><td>11</td><td>0.7205</td><td>0.5935</td><td>0.5307</td><td>0.3313</td></tr>
+<tr><td>12</td><td>0.7310</td><td>0.5455</td><td>0.4947</td><td>0.3283</td></tr>
+<tr><td>13</td><td>0.7418</td><td>0.4659</td><td>0.4601</td><td>0.3346</td></tr>
+<tr><td>14</td><td>0.7520</td><td>0.4437</td><td>0.4524</td><td>0.3371</td></tr>
+<tr><td>15</td><td>0.7615</td><td>0.5215</td><td>0.4959</td><td>0.3386</td></tr>
+<tr><td>16</td><td>0.7703</td><td>0.4205</td><td>0.3057</td><td>0.2336</td></tr>
+<tr><td>17</td><td>0.7787</td><td>0.4129</td><td>0.3059</td><td>0.2357</td></tr>
+<tr><td>18</td><td>0.7864</td><td>0.4333</td><td>0.3111</td><td>0.2345</td></tr>
+<tr><td>19</td><td>0.7934</td><td>0.4812</td><td>0.3275</td><td>0.2342</td></tr>
+<tr><td>20</td><td>0.7998</td><td>0.4496</td><td>0.3164</td><td>0.2343</td></tr>
+<tr><td>21</td><td>0.8051</td><td>0.6980</td><td>0.4383</td><td>0.2333</td></tr>
+<tr><td>22</td><td>0.8098</td><td>0.6157</td><td>0.3819</td><td>0.2313</td></tr>
+<tr><td>23</td><td>0.8137</td><td>0.4629</td><td>0.3147</td><td>0.2296</td></tr>
+</table>
+<h2>ANOMALY TRACK</h2>
+<div class="dim">live пропущен (--no-live) — трекер недоступен</div>
+<h2>GRAD INFO</h2>
+<div class="dim">grad info пропущен (--no-gradinfo)</div>
+<h2>BRIDGE (intent bus)</h2>
+<div>salience (от head): mean=1.69e-01 max/min=1.0 норм.энтропия=1.000 (1=равномерно, 0=сфокус на токенах)</div>
+<div>intent stream cross-layer cosine=0.4940 (bus redundancy) &nbsp; bus_norm=33.900272369384766</div>
+<div>head stencil bus_head_proj weight_norm=42.1829 (0 = не обучен)</div>
+<div>tau_intent ladder: alpha[0]=0.8942 alpha[-1]=0.9980</div>
+<h2>ALL PARAMETERS (grouped — ВСЕ, вкл. новые)</h2>
+<table><tr><th>name</th><th>shape</th><th>n</th><th>mean</th><th>std</th><th>min</th><th>max</th></tr>
+<tr><td>_tau_l_dev</td><td>[24]</td><td>24</td><td>-0.01225</td><td>+0.12279</td><td>-0.1576</td><td>+0.2036</td></tr>
+<tr><td>_vsa_log_param</td><td>[4]</td><td>4</td><td>+1.08974</td><td>+0.29470</td><td>+0.8966</td><td>+1.5290</td></tr>
+<tr><td>_w_alpha_expert</td><td>[32]</td><td>32</td><td>-0.15305</td><td>+0.15676</td><td>-0.4397</td><td>+0.2384</td></tr>
+<tr><td>bridge._inj_alpha</td><td>[]</td><td>1</td><td>+1.12400</td><td>+0.00000</td><td>+1.1240</td><td>+1.1240</td></tr>
+<tr><td>bridge._inj_beta</td><td>[]</td><td>1</td><td>+0.42267</td><td>+0.00000</td><td>+0.4227</td><td>+0.4227</td></tr>
+<tr><td>bridge.nce_log_temp</td><td>[]</td><td>1</td><td>-2.99615</td><td>+0.00000</td><td>-2.9961</td><td>-2.9961</td></tr>
+<tr><td>bridge.probe.0.bias</td><td>[256]</td><td>256</td><td>-0.01900</td><td>+0.01632</td><td>-0.0885</td><td>+0.0327</td></tr>
+<tr><td>bridge.probe.0.weight</td><td>[256, 2560]</td><td>655360</td><td>+0.00003</td><td>+0.01607</td><td>-0.1751</td><td>+0.1269</td></tr>
+<tr><td>bridge.probe.2.bias</td><td>[256]</td><td>256</td><td>-0.00061</td><td>+0.01980</td><td>-0.0632</td><td>+0.0522</td></tr>
+<tr><td>bridge.probe.2.weight</td><td>[256, 256]</td><td>65536</td><td>-0.00028</td><td>+0.04463</td><td>-0.2702</td><td>+0.2708</td></tr>
+<tr><td>bridge.stream_log_scale</td><td>[1]</td><td>1</td><td>+0.00208</td><td>+0.00000</td><td>+0.0021</td><td>+0.0021</td></tr>
+<tr><td>bridge.stream_log_weights</td><td>[3]</td><td>3</td><td>-0.00673</td><td>+0.10136</td><td>-0.1224</td><td>+0.0666</td></tr>
+<tr><td>bridge.stream_proj.bias</td><td>[2560]</td><td>2560</td><td>-0.00019</td><td>+0.06659</td><td>-0.2537</td><td>+0.2068</td></tr>
+<tr><td>bridge.stream_proj.weight</td><td>[2560, 256]</td><td>655360</td><td>-0.00003</td><td>+0.03699</td><td>-0.2090</td><td>+0.1834</td></tr>
+<tr><td>bus_head_proj.weight</td><td>[64, 1024]</td><td>65536</td><td>+0.00460</td><td>+0.16471</td><td>-0.6107</td><td>+0.6104</td></tr>
+<tr><td>concept_layer._log_tau_birth_thr</td><td>[]</td><td>1</td><td>+0.00000</td><td>+0.00000</td><td>+0.0000</td><td>+0.0000</td></tr>
+<tr><td>concept_layer._log_tau_decay_thr</td><td>[]</td><td>1</td><td>+0.00000</td><td>+0.00000</td><td>+0.0000</td><td>+0.0000</td></tr>
+<tr><td>concept_layer._log_tau_novelty_thr</td><td>[]</td><td>1</td><td>+0.00000</td><td>+0.00000</td><td>+0.0000</td><td>+0.0000</td></tr>
+<tr><td>concept_layer.log_tau_birth</td><td>[]</td><td>1</td><td>+0.00000</td><td>+0.00000</td><td>+0.0000</td><td>+0.0000</td></tr>
+<tr><td>concept_layer.log_tau_contra</td><td>[]</td><td>1</td><td>+1.10540</td><td>+0.00000</td><td>+1.1054</td><td>+1.1054</td></tr>
+<tr><td>concept_layer.log_tau_gate</td><td>[]</td><td>1</td><td>+0.00000</td><td>+0.00000</td><td>+0.0000</td><td>+0.0000</td></tr>
+<tr><td>concept_layer.log_tau_maturity</td><td>[]</td><td>1</td><td>+1.00000</td><td>+0.00000</td><td>+1.0000</td><td>+1.0000</td></tr>
+<tr><td>concept_layer.log_tau_read</td><td>[]</td><td>1</td><td>+1.18928</td><td>+0.00000</td><td>+1.1893</td><td>+1.1893</td></tr>
+<tr><td>concept_layer.log_tau_uncert</td><td>[]</td><td>1</td><td>-0.85689</td><td>+0.00000</td><td>-0.8569</td><td>-0.8569</td></tr>
+<tr><td>concept_layer.log_tau_update</td><td>[]</td><td>1</td><td>-0.00001</td><td>+0.00000</td><td>-0.0000</td><td>-0.0000</td></tr>
+<tr><td>concept_layer.out_proj.bias</td><td>[2560]</td><td>2560</td><td>-0.00026</td><td>+0.02528</td><td>-0.0997</td><td>+0.0996</td></tr>
+<tr><td>concept_layer.out_proj.weight</td><td>[2560, 2560]</td><td>6553600</td><td>+0.00000</td><td>+0.01348</td><td>-0.0946</td><td>+0.0853</td></tr>
+<tr><td>concept_layer.q_proj.bias</td><td>[256]</td><td>256</td><td>+0.00020</td><td>+0.01137</td><td>-0.0306</td><td>+0.0325</td></tr>
+<tr><td>concept_layer.q_proj.weight</td><td>[256, 2560]</td><td>655360</td><td>+0.00001</td><td>+0.01297</td><td>-0.0742</td><td>+0.0661</td></tr>
+<tr><td>concept_layer.read_scale</td><td>[]</td><td>1</td><td>-3.84912</td><td>+0.00000</td><td>-3.8491</td><td>-3.8491</td></tr>
+<tr><td>concept_layer.uncert_kappa</td><td>[]</td><td>1</td><td>+3.07934</td><td>+0.00000</td><td>+3.0793</td><td>+3.0793</td></tr>
+<tr><td>concept_layer.write_q_proj.bias</td><td>[256]</td><td>256</td><td>-0.00052</td><td>+0.15222</td><td>-0.2813</td><td>+0.2906</td></tr>
+<tr><td>concept_layer.write_q_proj.weight</td><td>[256, 8]</td><td>2048</td><td>-0.00541</td><td>+0.19993</td><td>-0.4819</td><td>+0.4567</td></tr>
+<tr><td>concept_layer.write_v_proj.bias</td><td>[2560]</td><td>2560</td><td>+0.00757</td><td>+0.22571</td><td>-0.4367</td><td>+0.4472</td></tr>
+<tr><td>concept_layer.write_v_proj.weight</td><td>[2560, 8]</td><td>20480</td><td>-0.00149</td><td>+0.20756</td><td>-0.5017</td><td>+0.5208</td></tr>
+<tr><td>embed.basis</td><td>[64, 40]</td><td>2560</td><td>+0.00380</td><td>+0.17412</td><td>-0.6624</td><td>+0.5168</td></tr>
+<tr><td>embed.embed_mix</td><td>[64, 64]</td><td>4096</td><td>-0.02915</td><td>+0.12629</td><td>-0.2764</td><td>+1.1097</td></tr>
+<tr><td>embed.sent_bos_emb</td><td>[2560]</td><td>2560</td><td>-0.00097</td><td>+0.06666</td><td>-0.2889</td><td>+0.2871</td></tr>
+<tr><td>embed.sent_eos_emb</td><td>[2560]</td><td>2560</td><td>-0.00002</td><td>+0.06169</td><td>-0.3034</td><td>+0.2766</td></tr>
+<tr><td>embed.sent_pos_emb.weight</td><td>[64, 2560]</td><td>163840</td><td>-0.00005</td><td>+0.01676</td><td>-0.1237</td><td>+0.1128</td></tr>
+<tr><td>intent_probe.bias</td><td>[1024]</td><td>1024</td><td>-0.00043</td><td>+0.07068</td><td>-0.2484</td><td>+0.2644</td></tr>
+<tr><td>intent_probe.weight</td><td>[1024, 2560]</td><td>2621440</td><td>+0.00002</td><td>+0.10802</td><td>-0.7815</td><td>+0.7734</td></tr>
+<tr><td>layers.L._vsa_tau_log</td><td>[4]</td><td>96</td><td>+4.15888</td><td>+1.55806</td><td>+2.0794</td><td>+6.2383</td></tr>
+<tr><td>layers.L.b_d</td><td>[2560]</td><td>61440</td><td>+4.74406</td><td>+2.36309</td><td>+2.1370</td><td>+9.9405</td></tr>
+<tr><td>layers.L.b_i</td><td>[2560]</td><td>61440</td><td>-4.20047</td><td>+1.29238</td><td>-7.0502</td><td>-2.1736</td></tr>
+<tr><td>layers.L.bind.W_freq</td><td>[4, 3, 32]</td><td>9216</td><td>-0.87134</td><td>+2.03872</td><td>-6.4005</td><td>+3.1304</td></tr>
+<tr><td>layers.L.bind.W_out</td><td>[224, 2560]</td><td>13762560</td><td>-0.00001</td><td>+0.01458</td><td>-0.2048</td><td>+0.2015</td></tr>
+<tr><td>layers.L.bind.W_phase</td><td>[4, 3, 32]</td><td>9216</td><td>+0.00011</td><td>+0.09886</td><td>-0.4817</td><td>+0.5329</td></tr>
+<tr><td>layers.L.bind.W_proj.bias</td><td>[32]</td><td>768</td><td>-0.00216</td><td>+0.03531</td><td>-0.1803</td><td>+0.1306</td></tr>
+<tr><td>layers.L.bind.W_proj.weight</td><td>[32, 2560]</td><td>1966080</td><td>+0.00001</td><td>+0.01231</td><td>-0.0677</td><td>+0.0681</td></tr>
+<tr><td>layers.L.bind._eta</td><td>[]</td><td>24</td><td>+0.57191</td><td>+0.09673</td><td>+0.3716</td><td>+0.8506</td></tr>
+<tr><td>layers.L.bind.freq_scale</td><td>[]</td><td>24</td><td>+6.21606</td><td>+0.09669</td><td>+5.9440</td><td>+6.4156</td></tr>
+<tr><td>layers.L.bind.hp_norm.weight</td><td>[32]</td><td>768</td><td>+1.02649</td><td>+0.11023</td><td>+0.7350</td><td>+1.7747</td></tr>
+<tr><td>layers.L.bind.w_bind_bias</td><td>[32]</td><td>768</td><td>-0.00175</td><td>+0.03405</td><td>-0.1681</td><td>+0.1245</td></tr>
+<tr><td>layers.L.bind.w_u_im</td><td>[4, 3, 32]</td><td>9216</td><td>+0.00024</td><td>+0.03067</td><td>-0.2531</td><td>+0.2647</td></tr>
+<tr><td>layers.L.bind.w_u_re</td><td>[4, 3, 32]</td><td>9216</td><td>+0.00077</td><td>+0.31078</td><td>-1.0811</td><td>+0.9991</td></tr>
+<tr><td>layers.L.bind.w_v_im</td><td>[4, 3, 32]</td><td>9216</td><td>+0.00024</td><td>+0.03091</td><td>-0.2449</td><td>+0.2481</td></tr>
+<tr><td>layers.L.bind.w_v_re</td><td>[4, 3, 32]</td><td>9216</td><td>+0.00088</td><td>+0.30661</td><td>-1.1098</td><td>+1.0913</td></tr>
+<tr><td>layers.L.bind_coh_gate</td><td>[]</td><td>24</td><td>+0.68391</td><td>+0.14739</td><td>+0.4257</td><td>+0.9617</td></tr>
+<tr><td>layers.L.conv.weight</td><td>[2560, 1, 48]</td><td>2949120</td><td>-0.00421</td><td>+0.14653</td><td>-1.2157</td><td>+1.3867</td></tr>
+<tr><td>layers.L.exact_memory.key.bias</td><td>[64]</td><td>1536</td><td>+0.00082</td><td>+0.02314</td><td>-0.0959</td><td>+0.0941</td></tr>
+<tr><td>layers.L.exact_memory.key.weight</td><td>[64, 2560]</td><td>3932160</td><td>-0.00000</td><td>+0.01213</td><td>-0.0773</td><td>+0.0786</td></tr>
+<tr><td>layers.L.exact_memory.proj.bias</td><td>[2560]</td><td>61440</td><td>-0.00003</td><td>+0.07855</td><td>-0.3503</td><td>+0.4187</td></tr>
+<tr><td>layers.L.exact_memory.proj.weight</td><td>[2560, 64]</td><td>3932160</td><td>+0.00001</td><td>+0.07088</td><td>-0.3182</td><td>+0.3345</td></tr>
+<tr><td>layers.L.exact_memory.query.bias</td><td>[64]</td><td>1536</td><td>-0.00098</td><td>+0.02043</td><td>-0.0791</td><td>+0.0649</td></tr>
+<tr><td>layers.L.exact_memory.query.weight</td><td>[64, 2560]</td><td>3932160</td><td>+0.00001</td><td>+0.01218</td><td>-0.0706</td><td>+0.0674</td></tr>
+<tr><td>layers.L.exact_memory.value.bias</td><td>[64]</td><td>1536</td><td>-0.00006</td><td>+0.04452</td><td>-0.1571</td><td>+0.1535</td></tr>
+<tr><td>layers.L.exact_memory.value.weight</td><td>[64, 2560]</td><td>3932160</td><td>+0.00001</td><td>+0.01766</td><td>-0.1345</td><td>+0.1319</td></tr>
+<tr><td>layers.L.gamma_surprisal</td><td>[]</td><td>24</td><td>+0.48167</td><td>+0.25223</td><td>+0.0318</td><td>+0.8309</td></tr>
+<tr><td>layers.L.lambda_k</td><td>[2560]</td><td>61440</td><td>+1.14533</td><td>+0.30986</td><td>+0.4272</td><td>+1.7000</td></tr>
+<tr><td>layers.L.mirror.W_proj</td><td>[32, 80, 8]</td><td>1146880</td><td>-0.00009</td><td>+0.10825</td><td>-3.0973</td><td>+2.9044</td></tr>
+<tr><td>layers.L.mirror._signal_log_weights</td><td>[5]</td><td>120</td><td>-1.61269</td><td>+0.46207</td><td>-2.8541</td><td>-0.6594</td></tr>
+<tr><td>layers.L.mirror._tau_signal_log</td><td>[]</td><td>24</td><td>+0.09456</td><td>+0.31768</td><td>-0.6162</td><td>+0.5701</td></tr>
+<tr><td>layers.L.mirror.alpha_diag</td><td>[32, 8]</td><td>14336</td><td>+0.90784</td><td>+0.07393</td><td>+0.2991</td><td>+1.0039</td></tr>
+<tr><td>layers.L.mirror.b_alpha</td><td>[32]</td><td>768</td><td>+0.44229</td><td>+0.62013</td><td>-0.4505</td><td>+1.7614</td></tr>
+<tr><td>layers.L.mirror.b_gate</td><td>[32]</td><td>768</td><td>-0.45650</td><td>+0.35767</td><td>-1.5479</td><td>+0.5902</td></tr>
+<tr><td>layers.L.mirror.b_intent</td><td>[32]</td><td>768</td><td>-0.13093</td><td>+0.17338</td><td>-1.0820</td><td>+0.4183</td></tr>
+<tr><td>layers.L.mirror.bridge_glu_net.Wg.bias</td><td>[32]</td><td>768</td><td>-0.05412</td><td>+0.06681</td><td>-0.2418</td><td>+0.2333</td></tr>
+<tr><td>layers.L.mirror.bridge_glu_net.Wg.weight</td><td>[32, 256]</td><td>458752</td><td>+0.00039</td><td>+0.02537</td><td>-0.2247</td><td>+0.2500</td></tr>
+<tr><td>layers.L.mirror.bridge_glu_net.Wv.bias</td><td>[32]</td><td>768</td><td>-0.05106</td><td>+0.06772</td><td>-0.2336</td><td>+0.2403</td></tr>
+<tr><td>layers.L.mirror.bridge_glu_net.Wv.weight</td><td>[32, 256]</td><td>458752</td><td>+0.00045</td><td>+0.02534</td><td>-0.2485</td><td>+0.2620</td></tr>
+<tr><td>layers.L.mirror.bridge_glu_net.log_gain</td><td>[]</td><td>24</td><td>+1.13888</td><td>+0.26569</td><td>+0.7362</td><td>+1.8405</td></tr>
+<tr><td>layers.L.mirror.conv_smooth.weight</td><td>[256, 1, 3]</td><td>43008</td><td>+0.19623</td><td>+0.66188</td><td>-2.9381</td><td>+3.4882</td></tr>
+<tr><td>layers.L.mirror.dvar_mod_bias</td><td>[32]</td><td>768</td><td>-0.38825</td><td>+0.35429</td><td>-1.5652</td><td>+0.6057</td></tr>
+<tr><td>layers.L.mirror.gate_bias</td><td>[32]</td><td>768</td><td>-0.24740</td><td>+0.83257</td><td>-2.0994</td><td>+1.8148</td></tr>
+<tr><td>layers.L.mirror.grad_mod_bias</td><td>[32]</td><td>768</td><td>-0.36902</td><td>+0.35505</td><td>-1.4583</td><td>+0.6641</td></tr>
+<tr><td>layers.L.mirror.hybrid_gate.log_tau</td><td>[]</td><td>24</td><td>+0.82158</td><td>+0.58539</td><td>-0.3374</td><td>+1.5485</td></tr>
+<tr><td>layers.L.mirror.log_dvar_mod_scale</td><td>[32]</td><td>768</td><td>-2.27492</td><td>+0.34713</td><td>-2.8804</td><td>-1.1182</td></tr>
+<tr><td>layers.L.mirror.log_grad_mod_scale</td><td>[32]</td><td>768</td><td>-1.88294</td><td>+0.49089</td><td>-2.8384</td><td>-0.1445</td></tr>
+<tr><td>layers.L.mirror.log_scale</td><td>[32, 80]</td><td>61440</td><td>-1.72852</td><td>+2.99062</td><td>-6.2438</td><td>+3.0713</td></tr>
+<tr><td>layers.L.mirror.log_skip_alpha</td><td>[32]</td><td>768</td><td>+0.92570</td><td>+1.25243</td><td>-0.7473</td><td>+3.3986</td></tr>
+<tr><td>layers.L.mirror.mod_scale_mem</td><td>[32]</td><td>768</td><td>+0.73206</td><td>+0.12624</td><td>+0.4300</td><td>+1.2542</td></tr>
+<tr><td>layers.L.mirror.mod_scale_mlp</td><td>[32]</td><td>768</td><td>-0.42390</td><td>+0.88029</td><td>-2.0986</td><td>+1.8192</td></tr>
+<tr><td>layers.L.mirror.tanh_bias</td><td>[32, 8]</td><td>14336</td><td>-0.02119</td><td>+0.56919</td><td>-1.9625</td><td>+1.9388</td></tr>
+<tr><td>layers.L.mirror.usefulness_predictor.0.bias</td><td>[8]</td><td>448</td><td>-0.00134</td><td>+0.73723</td><td>-1.1709</td><td>+1.1695</td></tr>
+<tr><td>layers.L.mirror.usefulness_predictor.0.weight</td><td>[8, 8]</td><td>10752</td><td>-0.00186</td><td>+0.22222</td><td>-0.7165</td><td>+0.7612</td></tr>
+<tr><td>layers.L.mirror.usefulness_predictor.2.bias</td><td>[1]</td><td>24</td><td>-1.61051</td><td>+0.52039</td><td>-2.3148</td><td>-0.6651</td></tr>
+<tr><td>layers.L.mirror.usefulness_predictor.2.weight</td><td>[1, 8]</td><td>448</td><td>-0.01439</td><td>+0.85020</td><td>-1.0077</td><td>+1.0077</td></tr>
+<tr><td>layers.L.mirror.w_alpha</td><td>[32, 160]</td><td>122880</td><td>+0.00008</td><td>+0.10769</td><td>-0.7443</td><td>+0.6632</td></tr>
+<tr><td>layers.L.mirror.w_contra</td><td>[32]</td><td>768</td><td>-0.17955</td><td>+0.23746</td><td>-1.2291</td><td>+0.8991</td></tr>
+<tr><td>layers.L.mirror.w_delta_gate</td><td>[32, 8]</td><td>14336</td><td>-0.00210</td><td>+0.30509</td><td>-2.1405</td><td>+2.3379</td></tr>
+<tr><td>layers.L.mirror.w_gate</td><td>[32, 8]</td><td>14336</td><td>-0.20247</td><td>+0.28431</td><td>-1.3923</td><td>+1.4154</td></tr>
+<tr><td>layers.L.mirror.w_global</td><td>[32, 8]</td><td>14336</td><td>-0.01107</td><td>+1.21560</td><td>-3.7467</td><td>+4.3559</td></tr>
+<tr><td>layers.L.mirror.w_help</td><td>[32, 1]</td><td>768</td><td>+0.98539</td><td>+0.05308</td><td>+0.8245</td><td>+1.1623</td></tr>
+<tr><td>layers.L.mirror.w_intent</td><td>[32, 8]</td><td>14336</td><td>+0.00031</td><td>+0.14668</td><td>-0.8716</td><td>+0.8260</td></tr>
+<tr><td>layers.L.mirror.w_sal</td><td>[32]</td><td>768</td><td>-0.16280</td><td>+0.21651</td><td>-1.1172</td><td>+0.4078</td></tr>
+<tr><td>layers.L.mirror.w_sym_u</td><td>[32, 8]</td><td>14336</td><td>+0.01130</td><td>+0.87284</td><td>-4.1440</td><td>+3.4533</td></tr>
+<tr><td>layers.L.mirror.w_sym_v</td><td>[32, 8]</td><td>14336</td><td>+0.00225</td><td>+0.87643</td><td>-4.2634</td><td>+4.0285</td></tr>
+<tr><td>layers.L.mirror.w_temp</td><td>[32, 8]</td><td>14336</td><td>-0.01191</td><td>+1.19673</td><td>-4.2205</td><td>+4.5431</td></tr>
+<tr><td>layers.L.mlp.W_down</td><td>[32, 320, 80]</td><td>19660800</td><td>-0.00000</td><td>+0.06975</td><td>-0.4760</td><td>+0.4189</td></tr>
+<tr><td>layers.L.mlp.W_gate</td><td>[32, 80, 320]</td><td>19660800</td><td>+0.00001</td><td>+0.06999</td><td>-0.8087</td><td>+0.7933</td></tr>
+<tr><td>layers.L.mlp.W_up</td><td>[32, 80, 320]</td><td>19660800</td><td>+0.00001</td><td>+0.06997</td><td>-0.5532</td><td>+0.5580</td></tr>
+<tr><td>layers.L.mlp.mlp_gate_a</td><td>[1]</td><td>24</td><td>+0.94770</td><td>+0.38929</td><td>-0.0001</td><td>+1.5038</td></tr>
+<tr><td>layers.L.mlp.mlp_gate_b</td><td>[1]</td><td>24</td><td>+0.67340</td><td>+0.34759</td><td>+0.3281</td><td>+1.5763</td></tr>
+<tr><td>layers.L.mlp.norm_w</td><td>[2560]</td><td>61440</td><td>+1.02005</td><td>+0.06532</td><td>+0.8089</td><td>+1.4929</td></tr>
+<tr><td>layers.L.precision_gate.gate.bias</td><td>[1]</td><td>24</td><td>+0.04828</td><td>+0.04641</td><td>-0.0092</td><td>+0.1754</td></tr>
+<tr><td>layers.L.precision_gate.gate.weight</td><td>[1, 2560]</td><td>61440</td><td>-0.00013</td><td>+0.01777</td><td>-0.0963</td><td>+0.0885</td></tr>
+<tr><td>layers.L.scale_w</td><td>[4, 2560]</td><td>245760</td><td>-1.17295</td><td>+0.62813</td><td>-1.9396</td><td>+0.3165</td></tr>
+<tr><td>layers.L.w_bind_gate</td><td>[32]</td><td>768</td><td>+0.16320</td><td>+0.15424</td><td>-0.1355</td><td>+0.8565</td></tr>
+<tr><td>layers.L.w_d</td><td>[2560]</td><td>61440</td><td>-0.00059</td><td>+0.13595</td><td>-1.7071</td><td>+1.9598</td></tr>
+<tr><td>layers.L.w_d_pen</td><td>[32]</td><td>768</td><td>+0.07683</td><td>+0.12593</td><td>-0.5162</td><td>+0.5553</td></tr>
+<tr><td>layers.L.w_i</td><td>[2560]</td><td>61440</td><td>-0.00054</td><td>+1.13932</td><td>-5.7086</td><td>+5.7108</td></tr>
+<tr><td>layers.L.w_i_dyn</td><td>[32, 8, 80]</td><td>1146880</td><td>-0.00021</td><td>+0.21907</td><td>-1.5622</td><td>+1.5646</td></tr>
+<tr><td>layers.L.w_k_mu</td><td>[2560]</td><td>61440</td><td>+0.00025</td><td>+0.99456</td><td>-3.9145</td><td>+4.2669</td></tr>
+<tr><td>layers.L.w_mem2v</td><td>[2560]</td><td>61440</td><td>+0.48257</td><td>+1.04935</td><td>-3.7314</td><td>+5.0611</td></tr>
+<tr><td>layers.L.w_mu_mem</td><td>[2560]</td><td>61440</td><td>-0.00252</td><td>+0.99147</td><td>-4.3127</td><td>+4.3291</td></tr>
+<tr><td>layers.L.w_q</td><td>[2560]</td><td>61440</td><td>+0.01582</td><td>+0.08278</td><td>-0.4606</td><td>+0.6628</td></tr>
+<tr><td>layers.L.w_q_ctx</td><td>[2560]</td><td>61440</td><td>+0.00608</td><td>+0.08045</td><td>-0.4389</td><td>+0.5937</td></tr>
+<tr><td>layers.L.w_q_dyn</td><td>[32, 8, 80]</td><td>1146880</td><td>+0.00017</td><td>+0.21879</td><td>-1.4582</td><td>+1.4441</td></tr>
+<tr><td>layers.L.w_q_leaf</td><td>[2560]</td><td>61440</td><td>+0.01760</td><td>+0.06346</td><td>-0.9364</td><td>+0.9467</td></tr>
+<tr><td>layers.L.w_q_mu</td><td>[2560]</td><td>61440</td><td>+0.00359</td><td>+0.99183</td><td>-4.6761</td><td>+4.0818</td></tr>
+<tr><td>lm_head.bit_bias</td><td>[64]</td><td>64</td><td>-1.97334</td><td>+0.08065</td><td>-2.5421</td><td>-1.8928</td></tr>
+<tr><td>lm_head.emphasis_gain</td><td>[1]</td><td>1</td><td>-0.58400</td><td>+0.00000</td><td>-0.5840</td><td>-0.5840</td></tr>
+<tr><td>lm_head.lacuna_b</td><td>[]</td><td>1</td><td>-3.84004</td><td>+0.00000</td><td>-3.8400</td><td>-3.8400</td></tr>
+<tr><td>lm_head.lacuna_w</td><td>[]</td><td>1</td><td>+29.82782</td><td>+0.00000</td><td>+29.8278</td><td>+29.8278</td></tr>
+<tr><td>lm_head.log_eta</td><td>[]</td><td>1</td><td>-2.96582</td><td>+0.00000</td><td>-2.9658</td><td>-2.9658</td></tr>
+<tr><td>lm_head.log_temp</td><td>[64]</td><td>64</td><td>+0.30758</td><td>+0.06273</td><td>+0.0390</td><td>+0.5426</td></tr>
+<tr><td>lm_head.phantom_basis</td><td>[64, 2560]</td><td>163840</td><td>+0.00005</td><td>+0.01707</td><td>-0.1092</td><td>+0.1341</td></tr>
+<tr><td>lm_head.phantom_mix</td><td>[64, 64]</td><td>4096</td><td>+0.00009</td><td>+0.01934</td><td>-0.1232</td><td>+0.1044</td></tr>
+<tr><td>lm_head.token_bias</td><td>[65536]</td><td>65536</td><td>-5.44215</td><td>+1.09907</td><td>-6.4833</td><td>+4.7907</td></tr>
+<tr><td>logit_cache.attention.cache_gate.0.bias</td><td>[640]</td><td>640</td><td>+0.00974</td><td>+0.02002</td><td>-0.0511</td><td>+0.0554</td></tr>
+<tr><td>logit_cache.attention.cache_gate.0.weight</td><td>[640, 2560]</td><td>1638400</td><td>+0.00006</td><td>+0.01128</td><td>-0.0490</td><td>+0.0493</td></tr>
+<tr><td>logit_cache.attention.cache_gate.2.bias</td><td>[1]</td><td>1</td><td>-9.97143</td><td>+0.00000</td><td>-9.9714</td><td>-9.9714</td></tr>
+<tr><td>logit_cache.attention.cache_gate.2.weight</td><td>[1, 640]</td><td>640</td><td>+0.00471</td><td>+0.01504</td><td>-0.0380</td><td>+0.0345</td></tr>
+<tr><td>logit_cache.attention.k_norm.bias</td><td>[64]</td><td>64</td><td>+0.00334</td><td>+0.02012</td><td>-0.0473</td><td>+0.0451</td></tr>
+<tr><td>logit_cache.attention.k_norm.weight</td><td>[64]</td><td>64</td><td>+1.00759</td><td>+0.02213</td><td>+0.9620</td><td>+1.0568</td></tr>
+<tr><td>logit_cache.attention.k_proj_h.weight</td><td>[64, 2560]</td><td>163840</td><td>+0.00004</td><td>+0.01248</td><td>-0.0587</td><td>+0.0966</td></tr>
+<tr><td>logit_cache.attention.k_proj_l.weight</td><td>[64, 64]</td><td>4096</td><td>+0.00008</td><td>+0.07192</td><td>-0.1400</td><td>+0.1420</td></tr>
+<tr><td>logit_cache.attention.log_tau</td><td>[]</td><td>1</td><td>+0.07813</td><td>+0.00000</td><td>+0.0781</td><td>+0.0781</td></tr>
+<tr><td>logit_cache.attention.ms_emb.weight</td><td>[7, 64]</td><td>448</td><td>+0.00171</td><td>+0.02183</td><td>-0.0655</td><td>+0.0888</td></tr>
+<tr><td>logit_cache.attention.out_proj.weight</td><td>[2560, 64]</td><td>163840</td><td>+0.00015</td><td>+0.07388</td><td>-0.3309</td><td>+0.3112</td></tr>
+<tr><td>logit_cache.attention.pos_enc.weight</td><td>[1024, 64]</td><td>65536</td><td>-0.00675</td><td>+0.93363</td><td>-3.8423</td><td>+3.8816</td></tr>
+<tr><td>logit_cache.attention.q_proj.weight</td><td>[64, 2560]</td><td>163840</td><td>-0.00004</td><td>+0.01244</td><td>-0.0775</td><td>+0.0878</td></tr>
+<tr><td>logit_cache.attention.v_norm.bias</td><td>[64]</td><td>64</td><td>+0.00021</td><td>+0.11376</td><td>-0.2361</td><td>+0.2688</td></tr>
+<tr><td>logit_cache.attention.v_norm.weight</td><td>[64]</td><td>64</td><td>+0.73703</td><td>+0.07856</td><td>+0.5613</td><td>+0.9681</td></tr>
+<tr><td>logit_cache.attention.v_proj_h.weight</td><td>[64, 2560]</td><td>163840</td><td>-0.00026</td><td>+0.05334</td><td>-1.7491</td><td>+1.4083</td></tr>
+<tr><td>logit_cache.attention.v_proj_l.weight</td><td>[64, 64]</td><td>4096</td><td>-0.00102</td><td>+0.07161</td><td>-0.1727</td><td>+0.1594</td></tr>
+<tr><td>logit_cache.cache.vsa_scales</td><td>[4]</td><td>4</td><td>+0.00000</td><td>+0.00000</td><td>+0.0000</td><td>+0.0000</td></tr>
+<tr><td>logit_cache.logit_to_hidden.weight</td><td>[2560, 64]</td><td>163840</td><td>-0.00002</td><td>+0.00513</td><td>-0.1070</td><td>+0.0738</td></tr>
+<tr><td>memory_bank._fusion_tau_alpha</td><td>[3]</td><td>3</td><td>-0.22489</td><td>+0.22297</td><td>-0.4365</td><td>+0.0079</td></tr>
+<tr><td>memory_bank.fusion.0.bias</td><td>[2560]</td><td>2560</td><td>-0.01279</td><td>+0.02432</td><td>-0.1048</td><td>+0.0896</td></tr>
+<tr><td>memory_bank.fusion.0.weight</td><td>[2560, 7680]</td><td>19660800</td><td>+0.00002</td><td>+0.01375</td><td>-0.1422</td><td>+0.1328</td></tr>
+<tr><td>memory_bank.fusion.2.bias</td><td>[2560]</td><td>2560</td><td>+0.00047</td><td>+0.02850</td><td>-0.2248</td><td>+0.1297</td></tr>
+<tr><td>memory_bank.fusion.2.weight</td><td>[2560, 2560]</td><td>6553600</td><td>-0.00013</td><td>+0.02025</td><td>-0.1589</td><td>+0.1866</td></tr>
+<tr><td>memory_bank.l1.log_tau</td><td>[]</td><td>1</td><td>-1.21312</td><td>+0.00000</td><td>-1.2131</td><td>-1.2131</td></tr>
+<tr><td>memory_bank.l1.out_proj.bias</td><td>[2560]</td><td>2560</td><td>-0.00030</td><td>+0.02190</td><td>-0.0705</td><td>+0.0643</td></tr>
+<tr><td>memory_bank.l1.out_proj.weight</td><td>[2560, 2560]</td><td>6553600</td><td>-0.00000</td><td>+0.01382</td><td>-0.1398</td><td>+0.1169</td></tr>
+<tr><td>memory_bank.l1.proj.bias</td><td>[256]</td><td>256</td><td>-0.00293</td><td>+0.02537</td><td>-0.0929</td><td>+0.0632</td></tr>
+<tr><td>memory_bank.l1.proj.weight</td><td>[256, 2560]</td><td>655360</td><td>+0.00000</td><td>+0.01311</td><td>-0.0620</td><td>+0.0622</td></tr>
+<tr><td>memory_bank.l1.q_proj.bias</td><td>[256]</td><td>256</td><td>+0.00145</td><td>+0.02586</td><td>-0.0580</td><td>+0.0668</td></tr>
+<tr><td>memory_bank.l1.q_proj.weight</td><td>[256, 2560]</td><td>655360</td><td>+0.00002</td><td>+0.01346</td><td>-0.0638</td><td>+0.0608</td></tr>
+<tr><td>memory_bank.l2.W_k.bias</td><td>[256]</td><td>256</td><td>-0.00037</td><td>+0.01743</td><td>-0.0501</td><td>+0.0457</td></tr>
+<tr><td>memory_bank.l2.W_k.weight</td><td>[256, 2560]</td><td>655360</td><td>+0.00001</td><td>+0.01242</td><td>-0.0560</td><td>+0.0535</td></tr>
+<tr><td>memory_bank.l2.W_o.bias</td><td>[2560]</td><td>2560</td><td>+0.00100</td><td>+0.03754</td><td>-0.1104</td><td>+0.1186</td></tr>
+<tr><td>memory_bank.l2.W_o.weight</td><td>[2560, 256]</td><td>655360</td><td>+0.00006</td><td>+0.03488</td><td>-0.1211</td><td>+0.1181</td></tr>
+<tr><td>memory_bank.l2.W_v.bias</td><td>[256]</td><td>256</td><td>+0.00090</td><td>+0.02741</td><td>-0.1126</td><td>+0.0885</td></tr>
+<tr><td>memory_bank.l2.W_v.weight</td><td>[256, 2560]</td><td>655360</td><td>-0.00000</td><td>+0.01371</td><td>-0.0936</td><td>+0.0897</td></tr>
+<tr><td>memory_bank.l2.key_log_scale</td><td>[]</td><td>1</td><td>+0.05808</td><td>+0.00000</td><td>+0.0581</td><td>+0.0581</td></tr>
+<tr><td>memory_bank.l2.log_tau</td><td>[]</td><td>1</td><td>+0.17329</td><td>+0.00000</td><td>+0.1733</td><td>+0.1733</td></tr>
+<tr><td>memory_bank.l2.q_proj.bias</td><td>[256]</td><td>256</td><td>-0.00130</td><td>+0.01636</td><td>-0.0407</td><td>+0.0515</td></tr>
+<tr><td>memory_bank.l2.q_proj.weight</td><td>[256, 2560]</td><td>655360</td><td>-0.00000</td><td>+0.01310</td><td>-0.0643</td><td>+0.0624</td></tr>
+<tr><td>memory_bank.l2.val_log_scale</td><td>[]</td><td>1</td><td>-0.07339</td><td>+0.00000</td><td>-0.0734</td><td>-0.0734</td></tr>
+<tr><td>memory_bank.l2.val_norm.bias</td><td>[256]</td><td>256</td><td>+0.00222</td><td>+0.03886</td><td>-0.0908</td><td>+0.1106</td></tr>
+<tr><td>memory_bank.l2.val_norm.weight</td><td>[256]</td><td>256</td><td>+0.92327</td><td>+0.02054</td><td>+0.8661</td><td>+0.9730</td></tr>
+<tr><td>memory_bank.log_scale</td><td>[]</td><td>1</td><td>-1.45027</td><td>+0.00000</td><td>-1.4503</td><td>-1.4503</td></tr>
+<tr><td>reasoning_gate.know_proj.bias</td><td>[8]</td><td>8</td><td>-0.00358</td><td>+0.06508</td><td>-0.1231</td><td>+0.1184</td></tr>
+<tr><td>reasoning_gate.know_proj.weight</td><td>[8, 8]</td><td>64</td><td>+0.00299</td><td>+0.01998</td><td>-0.0487</td><td>+0.0645</td></tr>
+<tr><td>reasoning_gate.proj.bias</td><td>[8]</td><td>8</td><td>+1.25014</td><td>+3.53592</td><td>-0.1113</td><td>+10.0000</td></tr>
+<tr><td>reasoning_gate.proj.weight</td><td>[8, 2560]</td><td>20480</td><td>-0.00033</td><td>+0.02881</td><td>-1.6070</td><td>+1.0910</td></tr>
+<tr><td>reasoning_gate.r_proj.bias</td><td>[8]</td><td>8</td><td>-0.00358</td><td>+0.06508</td><td>-0.1231</td><td>+0.1184</td></tr>
+<tr><td>reasoning_gate.r_proj.weight</td><td>[8, 2560]</td><td>20480</td><td>+0.00036</td><td>+0.04334</td><td>-1.0602</td><td>+1.4440</td></tr>
+<tr><td>reasoning_memory.output_proj.bias</td><td>[2560]</td><td>2560</td><td>-0.00064</td><td>+0.05505</td><td>-0.1223</td><td>+0.1190</td></tr>
+<tr><td>reasoning_memory.output_proj.weight</td><td>[2560, 2560]</td><td>6553600</td><td>-0.00001</td><td>+0.03353</td><td>-1.1885</td><td>+1.0772</td></tr>
+<tr><td>reasoning_memory.step_encoder.bias</td><td>[2560]</td><td>2560</td><td>+0.00087</td><td>+0.06576</td><td>-0.1178</td><td>+0.1182</td></tr>
+<tr><td>reasoning_memory.step_encoder.weight</td><td>[2560, 2560]</td><td>6553600</td><td>-0.00000</td><td>+0.02982</td><td>-0.1060</td><td>+0.0988</td></tr>
+<tr><td>reasoning_memory.step_key.bias</td><td>[2560]</td><td>2560</td><td>-0.00026</td><td>+0.01176</td><td>-0.0266</td><td>+0.0262</td></tr>
+<tr><td>reasoning_memory.step_key.weight</td><td>[2560, 2560]</td><td>6553600</td><td>-0.00000</td><td>+0.01071</td><td>-0.0249</td><td>+0.0252</td></tr>
+<tr><td>reasoning_memory.step_query.bias</td><td>[2560]</td><td>2560</td><td>+0.00011</td><td>+0.01221</td><td>-0.0258</td><td>+0.0262</td></tr>
+<tr><td>reasoning_memory.step_query.weight</td><td>[2560, 2560]</td><td>6553600</td><td>-0.00001</td><td>+0.01071</td><td>-0.0255</td><td>+0.0253</td></tr>
+<tr><td>reasoning_memory.step_value.bias</td><td>[2560]</td><td>2560</td><td>+0.00007</td><td>+0.01525</td><td>-0.0430</td><td>+0.0414</td></tr>
+<tr><td>reasoning_memory.step_value.weight</td><td>[2560, 2560]</td><td>6553600</td><td>-0.00001</td><td>+0.01329</td><td>-0.0833</td><td>+0.0839</td></tr>
+</table>
+<p class="dim">generated by analyze.py &mdash; step 16720, best val 7.8641, 183.14M params</p>
+<h2>FULL OUTPUT — полный вывод анализа</h2>
+<pre class="full">
+# checkponts\best 16720.pt
+
+==============================================================================
+ENVELOPE (M12 single-checkpoint)
+==============================================================================
+  step=16720  best_val=7.8641  depth=24  reasoning_ramp=16726
+  data cursor: stream_idx=21 offset=276864
+  balancer: ema_ce=None align=True
+  [T8] version: git=2d8ff6e cfg_fp=2aeb587c3af8  (cfg tau=[8.0,512.0]  — фактический τ_l и vsa-лестница печатаются в GLOBAL)
+  rng: cpu=True data_gen=True  optimizer: groups=16 slots=2217 (model tensors=2787)
+  extra keys (ok): git_hash, birth_ledger, ledger, pvel, branch_var_ref, cfg_fp, intent_stream
+    L0  mem=262 mu=230 conv=347 traj=None pen=0.4312
+    L1  mem=985 mu=1.01e+03 conv=347 traj=None pen=0.44
+    L2  mem=1.08e+03 mu=1.16e+03 conv=347 traj=None pen=0.4498
+    L3  mem=1.7e+03 mu=1.43e+03 conv=347 traj=None pen=0.451
+    L4  mem=3.08e+03 mu=2.98e+03 conv=347 traj=None pen=0.449
+    L5  mem=1.45e+03 mu=1.36e+03 conv=347 traj=None pen=0.4465
+    L6  mem=1.43e+04 mu=1.1e+04 conv=347 traj=None pen=0.4552
+    L7  mem=962 mu=625 conv=347 traj=None pen=0.4569
+    L8  mem=1.34e+03 mu=846 conv=347 traj=None pen=0.3317
+    L9  mem=1.75e+03 mu=1.78e+03 conv=347 traj=None pen=0.3316
+    L10 mem=3.76e+03 mu=2.77e+03 conv=347 traj=None pen=0.3272
+    L11 mem=3.57e+03 mu=3.29e+03 conv=347 traj=None pen=0.3257
+    L12 mem=1.13e+04 mu=1.08e+04 conv=347 traj=None pen=0.325
+    L13 mem=3.79e+03 mu=3.91e+03 conv=347 traj=None pen=0.3279
+    L14 mem=1.8e+03 mu=1.51e+03 conv=347 traj=None pen=0.3276
+    L15 mem=2.17e+03 mu=1.91e+03 conv=347 traj=None pen=0.3313
+    L16 mem=1.11e+04 mu=1.8e+04 conv=347 traj=None pen=0.2319
+    L17 mem=1.14e+04 mu=1.03e+04 conv=347 traj=None pen=0.232
+    L18 mem=1.3e+04 mu=8.32e+03 conv=347 traj=None pen=0.2287
+    L19 mem=1.7e+04 mu=6.36e+03 conv=347 traj=None pen=0.23
+    L20 mem=4.97e+03 mu=4.6e+03 conv=347 traj=None pen=0.2302
+    L21 mem=6.34e+03 mu=3.06e+03 conv=347 traj=None pen=0.2307
+    L22 mem=1.17e+03 mu=669 conv=347 traj=None pen=0.2322
+    L23 mem=9.41e+03 mu=5.4e+03 conv=347 traj=None pen=0.2336
+    global_state norm: 13381.487
+  code_fp: 65536x64-74f3f995f303b2ab
+  VERDICT: полный побитовый resume возможен
+
+==============================================================================
+STATIC
+==============================================================================
+File:       best 16720.pt
+Step:       16720
+Best val:   7.864080519903274
+Params:     183.14M
+Tensors:    2787
+Missing:    0   Unexpected: 0
+
+CONFIG:
+  D                        = 2560
+  n_layers                 = 24
+  G                        = N/A
+  k                        = N/A
+  vocab                    = 65536
+  seq_len                  = 384
+  mlp_groups               = 32
+  mlp_expand               = 4
+  bind_K                   = 32
+  mirror_k                 = 32
+  lr                       = 0.0006
+  weight_decay             = 0.01
+  explicit_reasoning       = True
+  reasoning_max_steps      = 8
+  reasoning_adaptive       = True
+  variable_precision       = True
+  collective_read_out      = True
+  private_mem              = True
+  head_mode                = sigmoid_coded
+  bind_twist_mode          = trajectory_spiral
+
+PARAM GROUPS (LR multipliers):
+  lr=0.000177 wd=0.0000 n_params=   2
+  lr=0.000177 wd=0.0100 n_params=   3
+  lr=0.000326 wd=0.0000 n_params=  72
+  lr=0.000326 wd=0.0100 n_params= 120
+  lr=0.001104 wd=0.0000 n_params= 168
+  lr=0.001104 wd=0.0100 n_params=  96
+  lr=0.001104 wd=0.0000 n_params= 291
+  lr=0.001104 wd=0.0100 n_params=  75
+  lr=0.000177 wd=0.0000 n_params=  72
+  lr=0.000120 wd=0.0000 n_params=   1
+  lr=0.000600 wd=0.0100 n_params=  53
+  lr=0.000600 wd=0.0000 n_params=  81
+  lr=0.000600 wd=0.0000 n_params= 655
+  lr=0.000600 wd=0.0100 n_params= 535
+
+PER-LAYER (params, без forward):
+  L   alpha   |1-a|  ls_std  w_help    skip scale_w conv_std  pm_norm
+---------------------------------------------------------------------
+  0  0.9172  0.0830  2.7326  0.7196  0.4884  0.2540   0.1425    0.023
+  1  0.9119  0.0882  3.0512  0.7448  0.5794  0.2541   0.1372    0.090
+  2  0.9113  0.0887  3.1576  0.7290  0.5547  0.2551   0.1358    0.017
+  3  0.9128  0.0872  3.2048  0.7393  0.5953  0.2545   0.1372    0.221
+  4  0.9089  0.0912  3.3556  0.7212  0.5952  0.2551   0.1521    0.243
+  5  0.9090  0.0910  3.4960  0.7267  0.6873  0.2550   0.1497    0.263
+  6  0.9080  0.0921  3.3247  0.7254  0.6211  0.2546   0.1447    0.106
+  7  0.9057  0.0943  3.4239  0.7201  0.6046  0.2547   0.1240    0.050
+  8  0.9076  0.0924  3.1995  0.7189  0.7294  0.2539   0.1258    0.047
+  9  0.9094  0.0907  3.1286  0.7137  0.6556  0.2540   0.1323    0.085
+ 10  0.9074  0.0926  3.2390  0.7251  0.7642  0.2538   0.1353    0.036
+ 11  0.9063  0.0937  3.0774  0.7201  0.6826  0.2539   0.1390    0.031
+ 12  0.9090  0.0910  3.1788  0.7312  0.7087  0.2535   0.1394    0.026
+ 13  0.9063  0.0937  2.8480  0.7247  0.6863  0.2536   0.1451    0.040
+ 14  0.9056  0.0944  2.8175  0.7203  0.6804  0.2536   0.1427    0.048
+ 15  0.9057  0.0943  2.7897  0.7305  0.6543  0.2536   0.1471    0.039
+ 16  0.9085  0.0915  2.8753  0.7284  0.7337  0.2533   0.1488    0.079
+ 17  0.9079  0.0921  2.6175  0.7290  0.6769  0.2532   0.1755    0.059
+ 18  0.9063  0.0937  2.7702  0.7315  0.7389  0.2532   0.1418    0.056
+ 19  0.9074  0.0926  2.5100  0.7336  0.6857  0.2530   0.1405    0.066
+ 20  0.9058  0.0942  2.4102  0.7294  0.6829  0.2529   0.1367    0.071
+ 21  0.9065  0.0935  2.2713  0.7352  0.6652  0.2529   0.1689    0.059
+ 22  0.9067  0.0933  2.2918  0.7381  0.6538  0.2529   0.1558    0.056
+ 23  0.9104  0.0896  2.3718  0.7373  0.6295  0.2526   0.1911    0.075
+
+VSA TAU: tau[0]=6.61  tau[-1]=256.18  ratio=38.7x  tau_l_dev=-0.0123 (std 0.1228)
+
+MIRROR INTERNALS (L0, mid, last) — ВСЕ параметры зеркала:
+  L0:
+    W_proj            : shape=[32, 80, 8] mean=0.0002 std=0.0959
+    w_temp            : shape=[32, 8] mean=0.1037 std=1.4103
+    w_global          : shape=[32, 8] mean=-0.0256 std=1.4083
+    w_sym_u           : shape=[32, 8] mean=0.0814 std=0.7661
+    w_sym_v           : shape=[32, 8] mean=-0.0745 std=0.8296
+    alpha_diag        : shape=[32, 8] mean=0.9172 std=0.1114
+    tanh_bias         : shape=[32, 8] mean=-0.2567 std=0.4772 min=-1.1374 max=1.6726
+    log_scale         : shape=[32, 80] mean=-2.3828 std=2.7326
+    w_gate            : shape=[32, 8] mean=-0.3297 std=0.2159
+    b_gate            : shape=[32] mean=-0.4996 std=0.1365
+    w_delta_gate      : shape=[32, 8] mean=-0.0601 std=0.3940
+    gate_bias         : shape=[32] mean=-0.2717 std=0.2800
+    w_intent          : shape=[32, 8] mean=0.0075 std=0.0852
+    b_intent          : shape=[32] mean=-0.3975 std=0.1045
+    w_sal             : shape=[32] mean=-0.3981 std=0.1073
+    w_help            : shape=[32, 1] mean=0.9431 std=0.0524
+    w_contra          : shape=[32] mean=-0.2552 std=0.0957
+    log_skip_alpha    : shape=[32] mean=0.0089 std=0.8299
+    w_alpha           : shape=[32, 160] mean=0.0010 std=0.0928
+    b_alpha           : shape=[32] mean=-0.0330 std=0.3758
+    log_dvar_mod_scale: shape=[32] mean=-1.2908 std=0.1051
+    log_grad_mod_scale: shape=[32] mean=-0.5928 std=0.2442
+    dvar_mod_bias     : shape=[32] mean=-0.5171 std=0.1310
+    grad_mod_bias     : shape=[32] mean=-0.5633 std=0.1420
+    _signal_log_weights: shape=[5] mean=-1.6642 std=0.8587 vals=[-1.939, -2.791, -1.99, -0.864, -0.738]
+    _tau_signal_log   : shape=[] mean=0.1197 std=0.0000 vals=[0.12]
+    mod_scale_mlp     : shape=[32] mean=-1.0273 std=0.7327
+    mod_scale_mem     : shape=[32] mean=0.6901 std=0.0916
+    conv_smooth.weight: shape=[256, 1, 3] mean=0.2513 std=0.5605
+    usefulness_predictor.0.weight: shape=[8, 8] mean=0.0502 std=0.2878
+    usefulness_predictor.0.bias: shape=[8] mean=-0.0648 std=0.4155 vals=[0.2, -0.424, 0.254, 0.661, -0.623, -0.13, -0.153, -0.304]
+    usefulness_predictor.2.weight: shape=[1, 8] mean=0.0938 std=0.4085 vals=[-0.402, 0.409, -0.383, -0.411, 0.421, 0.37, 0.365, 0.382]
+    usefulness_predictor.2.bias: shape=[1] mean=-0.7011 std=0.0000 vals=[-0.701]
+    hybrid_gate.log_tau: shape=[] mean=0.1134 std=0.0000 vals=[0.113]
+    bridge_glu_net.log_gain: shape=[] mean=1.1979 std=0.0000 vals=[1.198]
+    bridge_glu_net.Wg.weight: shape=[32, 256] mean=-0.0066 std=0.0478
+    bridge_glu_net.Wg.bias: shape=[32] mean=-0.1532 std=0.0422
+    bridge_glu_net.Wv.weight: shape=[32, 256] mean=-0.0067 std=0.0478
+    bridge_glu_net.Wv.bias: shape=[32] mean=-0.1536 std=0.0524
+  L12:
+    W_proj            : shape=[32, 80, 16] mean=-0.0002 std=0.1119
+    w_temp            : shape=[32, 16] mean=0.0648 std=1.2267
+    w_global          : shape=[32, 16] mean=0.0664 std=1.2865
+    w_sym_u           : shape=[32, 16] mean=0.0546 std=0.8637
+    w_sym_v           : shape=[32, 16] mean=0.0176 std=0.9028
+    alpha_diag        : shape=[32, 16] mean=0.9090 std=0.0776
+    tanh_bias         : shape=[32, 16] mean=0.3690 std=0.6338 min=-1.3220 max=1.5689
+    log_scale         : shape=[32, 80] mean=-1.0425 std=3.1788
+    w_gate            : shape=[32, 16] mean=-0.1322 std=0.2878
+    b_gate            : shape=[32] mean=-0.6346 std=0.4102
+    w_delta_gate      : shape=[32, 16] mean=-0.0534 std=0.2617
+    gate_bias         : shape=[32] mean=-0.3451 std=0.6370
+    w_intent          : shape=[32, 16] mean=0.0011 std=0.2299
+    b_intent          : shape=[32] mean=-0.1378 std=0.0913
+    w_sal             : shape=[32] mean=-0.2625 std=0.1106
+    w_help            : shape=[32, 1] mean=1.0008 std=0.0251
+    w_contra          : shape=[32] mean=-0.2261 std=0.1570
+    log_skip_alpha    : shape=[32] mean=1.2989 std=1.4066
+    w_alpha           : shape=[32, 160] mean=-0.0002 std=0.1296
+    b_alpha           : shape=[32] mean=0.6729 std=0.7349
+    log_dvar_mod_scale: shape=[32] mean=-2.4760 std=0.2239
+    log_grad_mod_scale: shape=[32] mean=-1.7518 std=0.4218
+    dvar_mod_bias     : shape=[32] mean=-0.6718 std=0.3938
+    grad_mod_bias     : shape=[32] mean=-0.6499 std=0.3702
+    _signal_log_weights: shape=[5] mean=-1.6534 std=0.1929 vals=[-1.723, -1.954, -1.603, -1.498, -1.489]
+    _tau_signal_log   : shape=[] mean=0.0583 std=0.0000 vals=[0.058]
+    mod_scale_mlp     : shape=[32] mean=-1.0104 std=0.1613
+    mod_scale_mem     : shape=[32] mean=0.7239 std=0.0793
+    conv_smooth.weight: shape=[512, 1, 3] mean=0.2241 std=0.6916
+    usefulness_predictor.0.weight: shape=[16, 16] mean=0.0393 std=0.2568
+    usefulness_predictor.0.bias: shape=[16] mean=0.2811 std=0.8314
+    usefulness_predictor.2.weight: shape=[1, 16] mean=-0.2203 std=0.8812
+    usefulness_predictor.2.bias: shape=[1] mean=-2.0045 std=0.0000 vals=[-2.005]
+    hybrid_gate.log_tau: shape=[] mean=1.1963 std=0.0000 vals=[1.196]
+    bridge_glu_net.log_gain: shape=[] mean=1.1100 std=0.0000 vals=[1.11]
+    bridge_glu_net.Wg.weight: shape=[32, 512] mean=-0.0093 std=0.0246
+    bridge_glu_net.Wg.bias: shape=[32] mean=-0.0575 std=0.0306
+    bridge_glu_net.Wv.weight: shape=[32, 512] mean=-0.0093 std=0.0244
+    bridge_glu_net.Wv.bias: shape=[32] mean=-0.0598 std=0.0322
+  L23:
+    W_proj            : shape=[32, 80, 32] mean=-0.0000 std=0.0979
+    w_temp            : shape=[32, 32] mean=-0.0273 std=1.0024
+    w_global          : shape=[32, 32] mean=-0.0116 std=1.0147
+    w_sym_u           : shape=[32, 32] mean=0.0002 std=0.9617
+    w_sym_v           : shape=[32, 32] mean=0.0294 std=0.9371
+    alpha_diag        : shape=[32, 32] mean=0.9104 std=0.0772
+    tanh_bias         : shape=[32, 32] mean=0.0929 std=0.3658 min=-0.8358 max=0.8919
+    log_scale         : shape=[32, 80] mean=-1.1793 std=2.3718
+    w_gate            : shape=[32, 32] mean=-0.1788 std=0.1573
+    b_gate            : shape=[32] mean=-0.3508 std=0.0945
+    w_delta_gate      : shape=[32, 32] mean=-0.0100 std=0.2511
+    gate_bias         : shape=[32] mean=-0.1896 std=1.1779
+    w_intent          : shape=[32, 32] mean=0.0006 std=0.0534
+    b_intent          : shape=[32] mean=-0.0460 std=0.0408
+    w_sal             : shape=[32] mean=-0.0555 std=0.0488
+    w_help            : shape=[32, 1] mean=1.0322 std=0.0260
+    w_contra          : shape=[32] mean=-0.1557 std=0.0761
+    log_skip_alpha    : shape=[32] mean=0.7110 std=1.0640
+    w_alpha           : shape=[32, 160] mean=-0.0006 std=0.0861
+    b_alpha           : shape=[32] mean=0.3162 std=0.4740
+    log_dvar_mod_scale: shape=[32] mean=-2.4447 std=0.1822
+    log_grad_mod_scale: shape=[32] mean=-2.1643 std=0.0978
+    dvar_mod_bias     : shape=[32] mean=-0.2458 std=0.1036
+    grad_mod_bias     : shape=[32] mean=-0.2250 std=0.1042
+    _signal_log_weights: shape=[5] mean=-0.9932 std=0.0496 vals=[-0.906, -1.018, -1.022, -1.018, -1.002]
+    _tau_signal_log   : shape=[] mean=-0.6044 std=0.0000 vals=[-0.604]
+    mod_scale_mlp     : shape=[32] mean=0.8274 std=0.1304
+    mod_scale_mem     : shape=[32] mean=0.6139 std=0.0533
+    conv_smooth.weight: shape=[1024, 1, 3] mean=0.2714 std=0.3951
+    usefulness_predictor.0.weight: shape=[32, 32] mean=-0.0139 std=0.2273
+    usefulness_predictor.0.bias: shape=[32] mean=-0.1364 std=0.7736
+    usefulness_predictor.2.weight: shape=[1, 32] mean=0.1709 std=0.9100
+    usefulness_predictor.2.bias: shape=[1] mean=-1.9816 std=0.0000 vals=[-1.982]
+    hybrid_gate.log_tau: shape=[] mean=-0.3059 std=0.0000 vals=[-0.306]
+    bridge_glu_net.log_gain: shape=[] mean=1.8405 std=0.0000 vals=[1.84]
+    bridge_glu_net.Wg.weight: shape=[32, 1024] mean=0.0019 std=0.0183
+    bridge_glu_net.Wg.bias: shape=[32] mean=0.0273 std=0.0271
+    bridge_glu_net.Wv.weight: shape=[32, 1024] mean=0.0018 std=0.0184
+    bridge_glu_net.Wv.bias: shape=[32] mean=0.0312 std=0.0205
+
+LM HEAD:
+  readout                 : shape=[64, 40] mean=0.003801 std=0.174120
+  bit_bias                : shape=[64] mean=-1.973338 std=0.080645
+  log_temp                : shape=[64] mean=0.307575 std=0.062733
+  emphasis_gain           : shape=[1] mean=-0.584001 std=nan
+  phantom_basis           : shape=[64, 2560] mean=0.000050 std=0.017065
+  phantom_mix             : shape=[64, 64] mean=0.000093 std=0.019343
+  lacuna_w                : shape=[] mean=29.827820 std=nan
+  lacuna_b                : shape=[] mean=-3.840044 std=nan
+  log_eta                 : shape=[] mean=-2.965815 std=nan
+  token_bias              : shape=[65536] mean=-5.442152 std=1.099075
+  [M54] phantom bank: slots=16 alive=16 confirmed=2 births=102 obs=301 mean_conf=0.542
+  [M52a] emphasis_gain=-0.5840  head_wall w=0.001 u0=6.0
+  [M52b] phantom: Kp=32 mix_norm=1.2378 eta=0.0515 lacuna_w=29.83 lacuna_b=-3.84
+  [M56] logit cache: R1 steps=844 h-lens=0 kv-entries=0 sent-ring=0 compressed=0 (кэш не персистится — 0 после загрузки структурно)
+  [M53] SRL: on=True apply=False steps=2 shortlist=64 expl_thr=0.7
+  [M55a] temper: on=True k=0.5 cos_thr=0.3 after=1045 | mem_lacuna_k=0.5
+
+TENSORS: 183139929 scalars | mean=-0.003040 std=0.200809 | min=-9.971434 max=29.827820
+  quantiles: Q  1=-5.067207  Q 10=-0.871486  Q 50=0.004181  Q 90=1.031711  Q 99=4.224596
+  NaN: 0  Inf: 0
+
+ALL PARAMETERS (grouped по шаблону имени — ВСЕ, вкл. новые):
+  _tau_l_dev                                     [24]                     n=       24 mean=-0.01225 std=+0.12279 [-0.1576, +0.2036]
+  _vsa_log_param                                 [4]                      n=        4 mean=+1.08974 std=+0.29470 [+0.8966, +1.5290]
+  _w_alpha_expert                                [32]                     n=       32 mean=-0.15305 std=+0.15676 [-0.4397, +0.2384]
+  bridge._inj_alpha                              []                       n=        1 mean=+1.12400 std=+0.00000 [+1.1240, +1.1240]
+  bridge._inj_beta                               []                       n=        1 mean=+0.42267 std=+0.00000 [+0.4227, +0.4227]
+  bridge.nce_log_temp                            []                       n=        1 mean=-2.99615 std=+0.00000 [-2.9961, -2.9961]
+  bridge.probe.0.bias                            [256]                    n=      256 mean=-0.01900 std=+0.01632 [-0.0885, +0.0327]
+  bridge.probe.0.weight                          [256, 2560]              n=   655360 mean=+0.00003 std=+0.01607 [-0.1751, +0.1269]
+  bridge.probe.2.bias                            [256]                    n=      256 mean=-0.00061 std=+0.01980 [-0.0632, +0.0522]
+  bridge.probe.2.weight                          [256, 256]               n=    65536 mean=-0.00028 std=+0.04463 [-0.2702, +0.2708]
+  bridge.stream_log_scale                        [1]                      n=        1 mean=+0.00208 std=+0.00000 [+0.0021, +0.0021]
+  bridge.stream_log_weights                      [3]                      n=        3 mean=-0.00673 std=+0.10136 [-0.1224, +0.0666]
+  bridge.stream_proj.bias                        [2560]                   n=     2560 mean=-0.00019 std=+0.06659 [-0.2537, +0.2068]
+  bridge.stream_proj.weight                      [2560, 256]              n=   655360 mean=-0.00003 std=+0.03699 [-0.2090, +0.1834]
+  bus_head_proj.weight                           [64, 1024]               n=    65536 mean=+0.00460 std=+0.16471 [-0.6107, +0.6104]
+  concept_layer._log_tau_birth_thr               []                       n=        1 mean=+0.00000 std=+0.00000 [+0.0000, +0.0000]
+  concept_layer._log_tau_decay_thr               []                       n=        1 mean=+0.00000 std=+0.00000 [+0.0000, +0.0000]
+  concept_layer._log_tau_novelty_thr             []                       n=        1 mean=+0.00000 std=+0.00000 [+0.0000, +0.0000]
+  concept_layer.log_tau_birth                    []                       n=        1 mean=+0.00000 std=+0.00000 [+0.0000, +0.0000]
+  concept_layer.log_tau_contra                   []                       n=        1 mean=+1.10540 std=+0.00000 [+1.1054, +1.1054]
+  concept_layer.log_tau_gate                     []                       n=        1 mean=+0.00000 std=+0.00000 [+0.0000, +0.0000]
+  concept_layer.log_tau_maturity                 []                       n=        1 mean=+1.00000 std=+0.00000 [+1.0000, +1.0000]
+  concept_layer.log_tau_read                     []                       n=        1 mean=+1.18928 std=+0.00000 [+1.1893, +1.1893]
+  concept_layer.log_tau_uncert                   []                       n=        1 mean=-0.85689 std=+0.00000 [-0.8569, -0.8569]
+  concept_layer.log_tau_update                   []                       n=        1 mean=-0.00001 std=+0.00000 [-0.0000, -0.0000]
+  concept_layer.out_proj.bias                    [2560]                   n=     2560 mean=-0.00026 std=+0.02528 [-0.0997, +0.0996]
+  concept_layer.out_proj.weight                  [2560, 2560]             n=  6553600 mean=+0.00000 std=+0.01348 [-0.0946, +0.0853]
+  concept_layer.q_proj.bias                      [256]                    n=      256 mean=+0.00020 std=+0.01137 [-0.0306, +0.0325]
+  concept_layer.q_proj.weight                    [256, 2560]              n=   655360 mean=+0.00001 std=+0.01297 [-0.0742, +0.0661]
+  concept_layer.read_scale                       []                       n=        1 mean=-3.84912 std=+0.00000 [-3.8491, -3.8491]
+  concept_layer.uncert_kappa                     []                       n=        1 mean=+3.07934 std=+0.00000 [+3.0793, +3.0793]
+  concept_layer.write_q_proj.bias                [256]                    n=      256 mean=-0.00052 std=+0.15222 [-0.2813, +0.2906]
+  concept_layer.write_q_proj.weight              [256, 8]                 n=     2048 mean=-0.00541 std=+0.19993 [-0.4819, +0.4567]
+  concept_layer.write_v_proj.bias                [2560]                   n=     2560 mean=+0.00757 std=+0.22571 [-0.4367, +0.4472]
+  concept_layer.write_v_proj.weight              [2560, 8]                n=    20480 mean=-0.00149 std=+0.20756 [-0.5017, +0.5208]
+  embed.basis                                    [64, 40]                 n=     2560 mean=+0.00380 std=+0.17412 [-0.6624, +0.5168]
+  embed.embed_mix                                [64, 64]                 n=     4096 mean=-0.02915 std=+0.12629 [-0.2764, +1.1097]
+  embed.sent_bos_emb                             [2560]                   n=     2560 mean=-0.00097 std=+0.06666 [-0.2889, +0.2871]
+  embed.sent_eos_emb                             [2560]                   n=     2560 mean=-0.00002 std=+0.06169 [-0.3034, +0.2766]
+  embed.sent_pos_emb.weight                      [64, 2560]               n=   163840 mean=-0.00005 std=+0.01676 [-0.1237, +0.1128]
+  intent_probe.bias                              [1024]                   n=     1024 mean=-0.00043 std=+0.07068 [-0.2484, +0.2644]
+  intent_probe.weight                            [1024, 2560]             n=  2621440 mean=+0.00002 std=+0.10802 [-0.7815, +0.7734]
+  layers.L._vsa_tau_log                          [4]                      n=       96 mean=+4.15888 std=+1.55806 [+2.0794, +6.2383]
+  layers.L.b_d                                   [2560]                   n=    61440 mean=+4.73675 std=+2.36616 [+2.1272, +9.9472]
+  layers.L.b_i                                   [2560]                   n=    61440 mean=-4.19914 std=+1.29222 [-7.0496, -2.1721]
+  layers.L.bind.W_freq                           [4, 3, 32]               n=     9216 mean=-0.87134 std=+2.03872 [-6.4005, +3.1304]
+  layers.L.bind.W_out                            [224, 2560]              n= 13762560 mean=-0.00001 std=+0.01458 [-0.2048, +0.2015]
+  layers.L.bind.W_phase                          [4, 3, 32]               n=     9216 mean=+0.00011 std=+0.09886 [-0.4817, +0.5329]
+  layers.L.bind.W_proj.bias                      [32]                     n=      768 mean=-0.00216 std=+0.03531 [-0.1803, +0.1306]
+  layers.L.bind.W_proj.weight                    [32, 2560]               n=  1966080 mean=+0.00001 std=+0.01231 [-0.0677, +0.0681]
+  layers.L.bind._eta                             []                       n=       24 mean=+0.57191 std=+0.09673 [+0.3716, +0.8506]
+  layers.L.bind.freq_scale                       []                       n=       24 mean=+6.21606 std=+0.09669 [+5.9440, +6.4156]
+  layers.L.bind.hp_norm.weight                   [32]                     n=      768 mean=+1.02649 std=+0.11023 [+0.7350, +1.7747]
+  layers.L.bind.w_bind_bias                      [32]                     n=      768 mean=-0.00175 std=+0.03405 [-0.1681, +0.1245]
+  layers.L.bind.w_u_im                           [4, 3, 32]               n=     9216 mean=+0.00024 std=+0.03067 [-0.2531, +0.2647]
+  layers.L.bind.w_u_re                           [4, 3, 32]               n=     9216 mean=+0.00077 std=+0.31078 [-1.0811, +0.9991]
+  layers.L.bind.w_v_im                           [4, 3, 32]               n=     9216 mean=+0.00024 std=+0.03091 [-0.2449, +0.2481]
+  layers.L.bind.w_v_re                           [4, 3, 32]               n=     9216 mean=+0.00088 std=+0.30661 [-1.1098, +1.0913]
+  layers.L.bind_coh_gate                         []                       n=       24 mean=+0.68391 std=+0.14739 [+0.4257, +0.9617]
+  layers.L.conv.weight                           [2560, 1, 48]            n=  2949120 mean=-0.00421 std=+0.14653 [-1.2157, +1.3867]
+  layers.L.exact_memory.key.bias                 [64]                     n=     1536 mean=+0.00082 std=+0.02314 [-0.0959, +0.0941]
+  layers.L.exact_memory.key.weight               [64, 2560]               n=  3932160 mean=-0.00000 std=+0.01213 [-0.0773, +0.0786]
+  layers.L.exact_memory.proj.bias                [2560]                   n=    61440 mean=-0.00003 std=+0.07855 [-0.3503, +0.4187]
+  layers.L.exact_memory.proj.weight              [2560, 64]               n=  3932160 mean=+0.00001 std=+0.07088 [-0.3182, +0.3345]
+  layers.L.exact_memory.query.bias               [64]                     n=     1536 mean=-0.00098 std=+0.02043 [-0.0791, +0.0649]
+  layers.L.exact_memory.query.weight             [64, 2560]               n=  3932160 mean=+0.00001 std=+0.01218 [-0.0706, +0.0674]
+  layers.L.exact_memory.value.bias               [64]                     n=     1536 mean=-0.00006 std=+0.04452 [-0.1571, +0.1535]
+  layers.L.exact_memory.value.weight             [64, 2560]               n=  3932160 mean=+0.00001 std=+0.01766 [-0.1345, +0.1319]
+  layers.L.gamma_surprisal                       []                       n=       24 mean=+0.48167 std=+0.25223 [+0.0318, +0.8309]
+  layers.L.lambda_k                              [2560]                   n=    61440 mean=+1.14533 std=+0.30986 [+0.4272, +1.7000]
+  layers.L.mirror.W_proj                         [32, 80, 8]              n=  1146880 mean=-0.00009 std=+0.10825 [-3.0973, +2.9044]
+  layers.L.mirror._signal_log_weights            [5]                      n=      120 mean=-1.61269 std=+0.46207 [-2.8541, -0.6594]
+  layers.L.mirror._tau_signal_log                []                       n=       24 mean=+0.09456 std=+0.31768 [-0.6162, +0.5701]
+  layers.L.mirror.alpha_diag                     [32, 8]                  n=    14336 mean=+0.90782 std=+0.07392 [+0.2983, +1.0040]
+  layers.L.mirror.b_alpha                        [32]                     n=      768 mean=+0.44229 std=+0.62013 [-0.4505, +1.7614]
+  layers.L.mirror.b_gate                         [32]                     n=      768 mean=-0.45650 std=+0.35767 [-1.5479, +0.5902]
+  layers.L.mirror.b_intent                       [32]                     n=      768 mean=-0.13093 std=+0.17338 [-1.0820, +0.4183]
+  layers.L.mirror.bridge_glu_net.Wg.bias         [32]                     n=      768 mean=-0.05412 std=+0.06681 [-0.2418, +0.2333]
+  layers.L.mirror.bridge_glu_net.Wg.weight       [32, 256]                n=   458752 mean=+0.00039 std=+0.02537 [-0.2247, +0.2500]
+  layers.L.mirror.bridge_glu_net.Wv.bias         [32]                     n=      768 mean=-0.05106 std=+0.06772 [-0.2336, +0.2403]
+  layers.L.mirror.bridge_glu_net.Wv.weight       [32, 256]                n=   458752 mean=+0.00045 std=+0.02534 [-0.2485, +0.2620]
+  layers.L.mirror.bridge_glu_net.log_gain        []                       n=       24 mean=+1.13888 std=+0.26569 [+0.7362, +1.8405]
+  layers.L.mirror.conv_smooth.weight             [256, 1, 3]              n=    43008 mean=+0.19623 std=+0.66188 [-2.9381, +3.4882]
+  layers.L.mirror.dvar_mod_bias                  [32]                     n=      768 mean=-0.38825 std=+0.35429 [-1.5652, +0.6057]
+  layers.L.mirror.gate_bias                      [32]                     n=      768 mean=-0.24740 std=+0.83257 [-2.0994, +1.8148]
+  layers.L.mirror.grad_mod_bias                  [32]                     n=      768 mean=-0.36902 std=+0.35505 [-1.4583, +0.6641]
+  layers.L.mirror.hybrid_gate.log_tau            []                       n=       24 mean=+0.82158 std=+0.58539 [-0.3374, +1.5485]
+  layers.L.mirror.log_dvar_mod_scale             [32]                     n=      768 mean=-2.27492 std=+0.34713 [-2.8804, -1.1182]
+  layers.L.mirror.log_grad_mod_scale             [32]                     n=      768 mean=-1.88294 std=+0.49089 [-2.8384, -0.1445]
+  layers.L.mirror.log_scale                      [32, 80]                 n=    61440 mean=-1.72852 std=+2.99062 [-6.2438, +3.0713]
+  layers.L.mirror.log_skip_alpha                 [32]                     n=      768 mean=+0.92570 std=+1.25243 [-0.7473, +3.3986]
+  layers.L.mirror.mod_scale_mem                  [32]                     n=      768 mean=+0.73206 std=+0.12624 [+0.4300, +1.2542]
+  layers.L.mirror.mod_scale_mlp                  [32]                     n=      768 mean=-0.42390 std=+0.88029 [-2.0986, +1.8192]
+  layers.L.mirror.tanh_bias                      [32, 8]                  n=    14336 mean=-0.02119 std=+0.56919 [-1.9625, +1.9388]
+  layers.L.mirror.usefulness_predictor.0.bias    [8]                      n=      448 mean=-0.00134 std=+0.73723 [-1.1709, +1.1695]
+  layers.L.mirror.usefulness_predictor.0.weight  [8, 8]                   n=    10752 mean=-0.00186 std=+0.22222 [-0.7165, +0.7612]
+  layers.L.mirror.usefulness_predictor.2.bias    [1]                      n=       24 mean=-1.61051 std=+0.52039 [-2.3148, -0.6651]
+  layers.L.mirror.usefulness_predictor.2.weight  [1, 8]                   n=      448 mean=-0.01439 std=+0.85020 [-1.0077, +1.0077]
+  layers.L.mirror.w_alpha                        [32, 160]                n=   122880 mean=+0.00008 std=+0.10769 [-0.7443, +0.6632]
+  layers.L.mirror.w_contra                       [32]                     n=      768 mean=-0.17955 std=+0.23746 [-1.2291, +0.8991]
+  layers.L.mirror.w_delta_gate                   [32, 8]                  n=    14336 mean=-0.00210 std=+0.30509 [-2.1405, +2.3379]
+  layers.L.mirror.w_gate                         [32, 8]                  n=    14336 mean=-0.20247 std=+0.28431 [-1.3923, +1.4154]
+  layers.L.mirror.w_global                       [32, 8]                  n=    14336 mean=-0.01107 std=+1.21560 [-3.7467, +4.3559]
+  layers.L.mirror.w_help                         [32, 1]                  n=      768 mean=+0.98539 std=+0.05308 [+0.8245, +1.1623]
+  layers.L.mirror.w_intent                       [32, 8]                  n=    14336 mean=+0.00031 std=+0.14668 [-0.8716, +0.8260]
+  layers.L.mirror.w_sal                          [32]                     n=      768 mean=-0.16280 std=+0.21651 [-1.1172, +0.4078]
+  layers.L.mirror.w_sym_u                        [32, 8]                  n=    14336 mean=+0.01130 std=+0.87284 [-4.1440, +3.4533]
+  layers.L.mirror.w_sym_v                        [32, 8]                  n=    14336 mean=+0.00225 std=+0.87643 [-4.2634, +4.0285]
+  layers.L.mirror.w_temp                         [32, 8]                  n=    14336 mean=-0.01191 std=+1.19673 [-4.2205, +4.5431]
+  layers.L.mlp.W_down                            [32, 320, 80]            n= 19660800 mean=-0.00000 std=+0.06975 [-0.4760, +0.4189]
+  layers.L.mlp.W_gate                            [32, 80, 320]            n= 19660800 mean=+0.00001 std=+0.06999 [-0.8087, +0.7933]
+  layers.L.mlp.W_up                              [32, 80, 320]            n= 19660800 mean=+0.00001 std=+0.06997 [-0.5532, +0.5580]
+  layers.L.mlp.mlp_gate_a                        [1]                      n=       24 mean=+0.94770 std=+0.38929 [-0.0001, +1.5038]
+  layers.L.mlp.mlp_gate_b                        [1]                      n=       24 mean=+0.67340 std=+0.34759 [+0.3281, +1.5763]
+  layers.L.mlp.norm_w                            [2560]                   n=    61440 mean=+1.02005 std=+0.06532 [+0.8089, +1.4929]
+  layers.L.precision_gate.gate.bias              [1]                      n=       24 mean=+0.04828 std=+0.04641 [-0.0092, +0.1754]
+  layers.L.precision_gate.gate.weight            [1, 2560]                n=    61440 mean=-0.00013 std=+0.01777 [-0.0963, +0.0885]
+  layers.L.scale_w                               [4, 2560]                n=   245760 mean=-1.17295 std=+0.62813 [-1.9396, +0.3165]
+  layers.L.w_bind_gate                           [32]                     n=      768 mean=+0.16320 std=+0.15424 [-0.1355, +0.8565]
+  layers.L.w_d                                   [2560]                   n=    61440 mean=-0.00059 std=+0.13595 [-1.7071, +1.9598]
+  layers.L.w_d_pen                               [32]                     n=      768 mean=+0.07683 std=+0.12593 [-0.5162, +0.5553]
+  layers.L.w_i                                   [2560]                   n=    61440 mean=-0.00054 std=+1.13932 [-5.7086, +5.7108]
+  layers.L.w_i_dyn                               [32, 8, 80]              n=  1146880 mean=-0.00021 std=+0.21907 [-1.5622, +1.5646]
+  layers.L.w_k_mu                                [2560]                   n=    61440 mean=+0.00025 std=+0.99456 [-3.9145, +4.2669]
+  layers.L.w_mem2v                               [2560]                   n=    61440 mean=+0.48257 std=+1.04935 [-3.7314, +5.0611]
+  layers.L.w_mu_mem                              [2560]                   n=    61440 mean=-0.00252 std=+0.99147 [-4.3127, +4.3291]
+  layers.L.w_q                                   [2560]                   n=    61440 mean=+0.01582 std=+0.08278 [-0.4606, +0.6628]
+  layers.L.w_q_ctx                               [2560]                   n=    61440 mean=+0.00608 std=+0.08045 [-0.4389, +0.5937]
+  layers.L.w_q_dyn                               [32, 8, 80]              n=  1146880 mean=+0.00017 std=+0.21879 [-1.4582, +1.4441]
+  layers.L.w_q_leaf                              [2560]                   n=    61440 mean=+0.01760 std=+0.06346 [-0.9364, +0.9467]
+  layers.L.w_q_mu                                [2560]                   n=    61440 mean=+0.00359 std=+0.99183 [-4.6761, +4.0818]
+  lm_head.bit_bias                               [64]                     n=       64 mean=-1.97334 std=+0.08065 [-2.5421, -1.8928]
+  lm_head.emphasis_gain                          [1]                      n=        1 mean=-0.58400 std=+0.00000 [-0.5840, -0.5840]
+  lm_head.lacuna_b                               []                       n=        1 mean=-3.84004 std=+0.00000 [-3.8400, -3.8400]
+  lm_head.lacuna_w                               []                       n=        1 mean=+29.82782 std=+0.00000 [+29.8278, +29.8278]
+  lm_head.log_eta                                []                       n=        1 mean=-2.96582 std=+0.00000 [-2.9658, -2.9658]
+  lm_head.log_temp                               [64]                     n=       64 mean=+0.30758 std=+0.06273 [+0.0390, +0.5426]
+  lm_head.phantom_basis                          [64, 2560]               n=   163840 mean=+0.00005 std=+0.01707 [-0.1092, +0.1341]
+  lm_head.phantom_mix                            [64, 64]                 n=     4096 mean=+0.00009 std=+0.01934 [-0.1232, +0.1044]
+  lm_head.token_bias                             [65536]                  n=    65536 mean=-5.44215 std=+1.09907 [-6.4833, +4.7907]
+  logit_cache.attention.cache_gate.0.bias        [640]                    n=      640 mean=+0.00974 std=+0.02002 [-0.0511, +0.0554]
+  logit_cache.attention.cache_gate.0.weight      [640, 2560]              n=  1638400 mean=+0.00006 std=+0.01128 [-0.0490, +0.0493]
+  logit_cache.attention.cache_gate.2.bias        [1]                      n=        1 mean=-9.97143 std=+0.00000 [-9.9714, -9.9714]
+  logit_cache.attention.cache_gate.2.weight      [1, 640]                 n=      640 mean=+0.00471 std=+0.01504 [-0.0380, +0.0345]
+  logit_cache.attention.k_norm.bias              [64]                     n=       64 mean=+0.00334 std=+0.02012 [-0.0473, +0.0451]
+  logit_cache.attention.k_norm.weight            [64]                     n=       64 mean=+1.00759 std=+0.02213 [+0.9620, +1.0568]
+  logit_cache.attention.k_proj_h.weight          [64, 2560]               n=   163840 mean=+0.00004 std=+0.01248 [-0.0587, +0.0966]
+  logit_cache.attention.k_proj_l.weight          [64, 64]                 n=     4096 mean=+0.00008 std=+0.07192 [-0.1400, +0.1420]
+  logit_cache.attention.log_tau                  []                       n=        1 mean=+0.07813 std=+0.00000 [+0.0781, +0.0781]
+  logit_cache.attention.ms_emb.weight            [7, 64]                  n=      448 mean=+0.00171 std=+0.02183 [-0.0655, +0.0888]
+  logit_cache.attention.out_proj.weight          [2560, 64]               n=   163840 mean=+0.00015 std=+0.07388 [-0.3309, +0.3112]
+  logit_cache.attention.pos_enc.weight           [1024, 64]               n=    65536 mean=-0.00675 std=+0.93363 [-3.8423, +3.8816]
+  logit_cache.attention.q_proj.weight            [64, 2560]               n=   163840 mean=-0.00004 std=+0.01244 [-0.0775, +0.0878]
+  logit_cache.attention.v_norm.bias              [64]                     n=       64 mean=+0.00021 std=+0.11376 [-0.2361, +0.2688]
+  logit_cache.attention.v_norm.weight            [64]                     n=       64 mean=+0.73703 std=+0.07856 [+0.5613, +0.9681]
+  logit_cache.attention.v_proj_h.weight          [64, 2560]               n=   163840 mean=-0.00026 std=+0.05334 [-1.7491, +1.4083]
+  logit_cache.attention.v_proj_l.weight          [64, 64]                 n=     4096 mean=-0.00102 std=+0.07161 [-0.1727, +0.1594]
+  logit_cache.cache.vsa_scales                   [4]                      n=        4 mean=+0.00000 std=+0.00000 [+0.0000, +0.0000]
+  logit_cache.logit_to_hidden.weight             [2560, 64]               n=   163840 mean=-0.00002 std=+0.00513 [-0.1070, +0.0738]
+  memory_bank._fusion_tau_alpha                  [3]                      n=        3 mean=-0.22489 std=+0.22297 [-0.4365, +0.0079]
+  memory_bank.fusion.0.bias                      [2560]                   n=     2560 mean=-0.01279 std=+0.02432 [-0.1048, +0.0896]
+  memory_bank.fusion.0.weight                    [2560, 7680]             n= 19660800 mean=+0.00002 std=+0.01375 [-0.1422, +0.1328]
+  memory_bank.fusion.2.bias                      [2560]                   n=     2560 mean=+0.00047 std=+0.02850 [-0.2248, +0.1297]
+  memory_bank.fusion.2.weight                    [2560, 2560]             n=  6553600 mean=-0.00013 std=+0.02025 [-0.1589, +0.1866]
+  memory_bank.l1.log_tau                         []                       n=        1 mean=-1.21312 std=+0.00000 [-1.2131, -1.2131]
+  memory_bank.l1.out_proj.bias                   [2560]                   n=     2560 mean=-0.00030 std=+0.02190 [-0.0705, +0.0643]
+  memory_bank.l1.out_proj.weight                 [2560, 2560]             n=  6553600 mean=-0.00000 std=+0.01382 [-0.1398, +0.1169]
+  memory_bank.l1.proj.bias                       [256]                    n=      256 mean=-0.00293 std=+0.02537 [-0.0929, +0.0632]
+  memory_bank.l1.proj.weight                     [256, 2560]              n=   655360 mean=+0.00000 std=+0.01311 [-0.0620, +0.0622]
+  memory_bank.l1.q_proj.bias                     [256]                    n=      256 mean=+0.00145 std=+0.02586 [-0.0580, +0.0668]
+  memory_bank.l1.q_proj.weight                   [256, 2560]              n=   655360 mean=+0.00002 std=+0.01346 [-0.0638, +0.0608]
+  memory_bank.l2.W_k.bias                        [256]                    n=      256 mean=-0.00037 std=+0.01743 [-0.0501, +0.0457]
+  memory_bank.l2.W_k.weight                      [256, 2560]              n=   655360 mean=+0.00001 std=+0.01242 [-0.0560, +0.0535]
+  memory_bank.l2.W_o.bias                        [2560]                   n=     2560 mean=+0.00100 std=+0.03754 [-0.1104, +0.1186]
+  memory_bank.l2.W_o.weight                      [2560, 256]              n=   655360 mean=+0.00006 std=+0.03488 [-0.1211, +0.1181]
+  memory_bank.l2.W_v.bias                        [256]                    n=      256 mean=+0.00090 std=+0.02741 [-0.1126, +0.0885]
+  memory_bank.l2.W_v.weight                      [256, 2560]              n=   655360 mean=-0.00000 std=+0.01371 [-0.0936, +0.0897]
+  memory_bank.l2.key_log_scale                   []                       n=        1 mean=+0.05808 std=+0.00000 [+0.0581, +0.0581]
+  memory_bank.l2.log_tau                         []                       n=        1 mean=+0.17329 std=+0.00000 [+0.1733, +0.1733]
+  memory_bank.l2.q_proj.bias                     [256]                    n=      256 mean=-0.00130 std=+0.01636 [-0.0407, +0.0515]
+  memory_bank.l2.q_proj.weight                   [256, 2560]              n=   655360 mean=-0.00000 std=+0.01310 [-0.0643, +0.0624]
+  memory_bank.l2.val_log_scale                   []                       n=        1 mean=-0.07339 std=+0.00000 [-0.0734, -0.0734]
+  memory_bank.l2.val_norm.bias                   [256]                    n=      256 mean=+0.00222 std=+0.03886 [-0.0908, +0.1106]
+  memory_bank.l2.val_norm.weight                 [256]                    n=      256 mean=+0.92327 std=+0.02054 [+0.8661, +0.9730]
+  memory_bank.log_scale                          []                       n=        1 mean=-1.45027 std=+0.00000 [-1.4503, -1.4503]
+  reasoning_gate.know_proj.bias                  [8]                      n=        8 mean=-0.00358 std=+0.06508 [-0.1231, +0.1184]
+  reasoning_gate.know_proj.weight                [8, 8]                   n=       64 mean=+0.00299 std=+0.01998 [-0.0487, +0.0645]
+  reasoning_gate.proj.bias                       [8]                      n=        8 mean=+1.25014 std=+3.53592 [-0.1113, +10.0000]
+  reasoning_gate.proj.weight                     [8, 2560]                n=    20480 mean=-0.00033 std=+0.02881 [-1.6070, +1.0910]
+  reasoning_gate.r_proj.bias                     [8]                      n=        8 mean=-0.00358 std=+0.06508 [-0.1231, +0.1184]
+  reasoning_gate.r_proj.weight                   [8, 2560]                n=    20480 mean=+0.00036 std=+0.04334 [-1.0602, +1.4440]
+  reasoning_memory.output_proj.bias              [2560]                   n=     2560 mean=-0.00064 std=+0.05505 [-0.1223, +0.1190]
+  reasoning_memory.output_proj.weight            [2560, 2560]             n=  6553600 mean=-0.00001 std=+0.03353 [-1.1885, +1.0772]
+  reasoning_memory.step_encoder.bias             [2560]                   n=     2560 mean=+0.00087 std=+0.06576 [-0.1178, +0.1182]
+  reasoning_memory.step_encoder.weight           [2560, 2560]             n=  6553600 mean=-0.00000 std=+0.02982 [-0.1060, +0.0988]
+  reasoning_memory.step_key.bias                 [2560]                   n=     2560 mean=-0.00026 std=+0.01176 [-0.0266, +0.0262]
+  reasoning_memory.step_key.weight               [2560, 2560]             n=  6553600 mean=-0.00000 std=+0.01071 [-0.0249, +0.0252]
+  reasoning_memory.step_query.bias               [2560]                   n=     2560 mean=+0.00011 std=+0.01221 [-0.0258, +0.0262]
+  reasoning_memory.step_query.weight             [2560, 2560]             n=  6553600 mean=-0.00001 std=+0.01071 [-0.0255, +0.0253]
+  reasoning_memory.step_value.bias               [2560]                   n=     2560 mean=+0.00007 std=+0.01525 [-0.0430, +0.0414]
+  reasoning_memory.step_value.weight             [2560, 2560]             n=  6553600 mean=-0.00001 std=+0.01329 [-0.0833, +0.0839]
+
+REASONING: enabled_step=16726 scale=1.0000  last gates=tensor([0., 0., 0., 0., 0., 0., 0., 0.])
+
+INSPECTOR (private memory):
+  signals: temp=0.116  pred=0.049  smooth=0.110  sym=0.340  help=0.385
+  w_help(sigmoid)=0.720  w_contra=-0.2552
+  concept_sim: mean=0.1657 std=0.3651 diag=1.0000
+  behavior_div: 0.9692
+  trust: mean=0.0156 diag=0.5000
+  pm_step: 0/0
+
+==============================================================================
+MECHANISMS (cache / UCL / mirror-signals / head / tau-ladder)
+==============================================================================
+  cache: windows=12 gate_bias=-9.97 (σ(bias)=0.00005) gate_fact=1.0000 read_ratio=1.0022 -&gt; АКТИВНО востребован
+         attn τ=1.08; inference k-фракции шкал=[0.5, 0.5, 0.5, 0.5]
+  UCL: births=513 updates=82966 skipped=6422272 занято=8/8 step=16726; thr σ(birth)=0.500 σ(novelty)=0.500 max_conf=0.600
+       read_scale σ=0.0209 effective=0.1188 (floor cfg=0.1 until=5000) mature=1.000
+  mirror signal entropy (n_sig=5, max=1.609): avg=1.557 min=1.443 max=1.609
+  head: token_bias rms=5.5520 bit_bias std=0.0806 (приор -1.973)
+  τ-ladder dev: |max|=0.2036 [-0.1576, +0.2036] (лестница ещё прямая = мало движения)
+
+WAKE DETECTOR (verdict: WAKE-CANDIDATE)
+Wake-up scan: step=16720 layers=24
+  MLP W_std mean=0.0700 decay-expected=0.0688 dev=+0.0012
+  [WAKE ] MLP W_std vs decay curve (marker #1, dev +0.0012)
+  [WAKE ] per-layer W_std deviation (marker #1b, worst +0.00586)
+        L7: W_std dev +0.00586
+        L6: W_std dev +0.00327
+        L5: W_std dev +0.00210
+  [WAKE ] per-layer gate max (marker #2b, worst 0.860, wake &gt;0.75)
+        L7: gate max 0.860
+        L6: gate max 0.762
+        L23: gate max 0.747
+  sigmoid(mod_scale_mlp) mean=0.410  sigmoid(mod_scale_mem) mean=0.675
+  [PASS ] modulation gate (marker #2, &gt;0.75 = WAKE, baseline 0.668)
+  [WAKE ] mlp/mem gate divergence 0.27
+  slots occupied: 0/192, full layers: 0, empty layers: [], births in empty: []
+  [PASS ] slot births in empty layers: none
+  log_temp mean=+0.3076 (ref +0.0188 at 1398)
+  [WATCH] log_temp rising (softmax flattening)
+  MATURATION gate: min=0.5626 max=0.8479 mean=0.7386 (ramp T0=8000 delta=4000 T_delay=8000)
+  readiness max=0.8479  tau_norm max=1.000
+  [PASS ] maturation gate opening (max 0.848) — bridge engaging
+
+==============================================================================
+HEAD: декомпозиция bias vs контекст + позиционная карта + A/B reasoning
+==============================================================================
+  log_temp=0.3076 -&gt; t_eff=0.5882 | token_bias top: [&quot;&#x27;,&#x27;&quot;, &quot;&#x27;.&#x27;&quot;, &quot;&#x27;&#x27;&quot;, &quot;&#x27; и&#x27;&quot;, &quot;&#x27; не&#x27;&quot;]
+  [analyzer    ] CE=8.1175 bias-only=8.1309 dctx=+0.0133 | argmax==bias 48/48 (100%) | full: w=0 p=48 | H=12.02 bit
+  [stream_head ] CE=8.0546 bias-only=8.0895 dctx=+0.0350 | argmax==bias 96/96 (100%) | full: w=0 p=96 | H=11.97 bit
+  [stream_eval ] CE=7.7028 bias-only=7.7280 dctx=+0.0251 | argmax==bias 96/96 (100%) | full: w=0 p=96 | H=11.75 bit
+
+  BIAS-DECOMP (агрегат, 3 текстов): argmax==bias 240/240 (100.0%) | ctx: word=240 punct=0 | full: word=0 punct=240
+
+  POSMAP: pos | top-1 avg | H avg | punct% | word%
+[error] head: 1
+
+==============================================================================
+BRIDGE: runtime intent-bus metrics
+==============================================================================
+  SALIENCE (от head logits): mean=1.6878e-01 min=1.6877e-01 max=1.6880e-01 std=3.8472e-06
+    max/min=1.0  норм.энтропия H/Hmax=1.000  (1=равномерно, 0=сфокус на токенах)
+  INTENT STREAM: per-layer norm mean=9342.6859 min=46.1515 max=24273.5723
+    per-expert mean norm (первые 8): [507.7903, 385.4032, 653.0903, 279.0529, 461.4064, 304.6883, 386.7024, 368.7489] ...
+    cross-layer cosine (redundancy): mean_offdiag=0.4940 (1=слои несут одно и то же, 0=дополняют)
+  BUS (_last_bus): norm=33.9003  per-expert mean=5.2814
+  HEAD STENCIL bus_head_proj: weight_norm=42.1829 (zero-init =&gt; 0 на старте, рост = стенсил обучается)
+    bus_bias (вклад в логиты головы): norm/pos=1140.04700
+  BRIDGE PARAMS (L0 / mid / last):
+    L0: ||w_intent||=1.3656 ||b_intent||=2.3224 w_sal(sig)=0.4021
+    L12: ||w_intent||=5.1979 ||b_intent||=0.9305 w_sal(sig)=0.4349
+    L23: ||w_intent||=1.7074 ||b_intent||=0.3457 w_sal(sig)=0.4861
+  intent_probe: W_norm=174.8945 b_norm=2.2607
+  TAU LADDER (intent): tau[0]=9.451 tau[-1]=512.000 alpha[0]=0.8942 alpha[-1]=0.9980 (alpha = доля carried intent в EMA)
+</pre>
+</body></html>
