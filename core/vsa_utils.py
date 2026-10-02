@@ -6,6 +6,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .config import EVAConfig
 
+# M65-opt: кэш единичных матриц — torch.eye аллоцировался на каждом шаге в
+# loss-путях (diversity/orthogonality/bridge InfoNCE). Ключ (n, device, dtype).
+_EYE_CACHE: dict = {}
+
+
+def eye_cached(n: int, device, dtype=torch.float32) -> torch.Tensor:
+    key = (int(n), str(device), dtype)
+    e = _EYE_CACHE.get(key)
+    if e is None:
+        e = torch.eye(n, device=device, dtype=dtype)
+        _EYE_CACHE[key] = e
+    return e
+
+
 def dct_basis(n):
     """DCT-II basis vectors of shape (n, n) — orthogonal rows."""
     k = torch.arange(n, dtype=torch.float32)

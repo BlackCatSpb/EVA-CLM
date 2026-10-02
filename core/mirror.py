@@ -1090,6 +1090,13 @@ class GroupedCognitiveMirror(nn.Module):
         elif getattr(self, '_hp_grad', None) is not None and torch.isfinite(self._hp_grad).all():
             self._prev_grad_norm.copy_(self._hp_grad)
 
+    def reopen_mlp_gate(self, value: float) -> None:
+        """M65-opt: проводка cfg.mlp_mod_scale_reopen (документирована, но
+        отсутствовала): на резюме выставляет обучаемый гейт mod_scale_mlp в
+        заданное значение. Вызывается только при значении > 0 (см. stack)."""
+        with torch.no_grad():
+            self.mod_scale_mlp.data.fill_(float(value))
+
     def _signal_weights(self) -> torch.Tensor:
         """M65-opt: единая точка сигнальных весов.
 

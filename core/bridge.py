@@ -29,6 +29,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .vsa_utils import eye_cached   # M65-opt: кэш eye (аллокации на шаг)
+
 
 class SemanticBridge(nn.Module):
     """Per-layer semantic bridge for cross-layer communication.
@@ -63,6 +65,8 @@ class SemanticBridge(nn.Module):
         self._br_rs: float = float(getattr(cfg, 'matur_bridge_rs', 0.2))
         # T9: hard-negative mining контрастива (порт FCF); 0 = выключено.
         self._hard_neg_k: int = int(getattr(cfg, 'bridge_hard_neg_k', 0) or 0)
+        # M65-opt: кэш arange-подписей (аллоцировался на каждый loss-вызов)
+        self._labels_cache: dict = {}
         self.register_buffer('bridge_loss_init', torch.tensor(1.0), persistent=False)
         self.register_buffer('bridge_loss_ema', torch.tensor(1.0), persistent=False)
 
@@ -221,17 +225,21 @@ class SemanticBridge(nn.Module):
             k = tgt_.reshape(-1, tgt_.shape[-1]).float()
             sims = (q @ k.T) / temp
             Nq = sims.shape[0]
-            labels = torch.arange(Nq, device=sims.device)
+            _lk = (Nq, str(sims.device))
+            labels = self._labels_cache.get(_lk)
+            if labels is None:
+                labels = torch.arange(Nq, device=sims.device)
+                self._labels_cache[_lk] = labels
             # B2: in a repeating stream the pool contains the SAME token at
             # other positions — they are true matches, not negatives; without
             # the mask the loss actively punished them (measured: structured
             # streams got WORSE than iid under InfoNCE).
             tok = y[:, :-1].reshape(-1)[:Nq]
             false_neg = (tok[:, None] == tok[None, :])
-            false_neg &= ~torch.eye(Nq, dtype=torch.bool, device=sims.device)
+            false_neg &= ~eye_cached(Nq, sims.device, torch.bool)
             sims = sims.masked_fill(false_neg, float('-inf'))
             if 0 < _hk < Nq - 1:
-                eye = torch.eye(Nq, dtype=torch.bool, device=sims.device)
+                eye = eye_cached(Nq, sims.device, torch.bool)
                 pos = sims.diagonal().unsqueeze(1)                  # (Nq, 1)
                 neg = sims.masked_fill(eye, float('-inf'))          # drop positive column
                 hard, _ = neg.topk(_hk, dim=1)                      # (Nq, K) hardest
@@ -246,7 +254,7 @@ class SemanticBridge(nn.Module):
         if len(layer_means) >= 2:
             stacked: torch.Tensor = F.normalize(torch.stack(layer_means), dim=-1)
             sim: torch.Tensor = stacked @ stacked.T
-            mask: torch.Tensor = ~torch.eye(len(layer_means), dtype=torch.bool, device=sim.device)
+            mask: torch.Tensor = ~eye_cached(len(layer_means), sim.device, torch.bool)
             diversity_penalty: torch.Tensor = sim[mask].mean()
             loss_val = loss_val + 0.1 * diversity_penalty
         with torch.no_grad():

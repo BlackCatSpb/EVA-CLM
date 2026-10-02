@@ -372,6 +372,12 @@ def train(cfg=None, resume_path=None):
             else:
                 _filtered[k] = v
         missing, unexpected = model.load_state_dict(_filtered, strict=False)
+        # M65-opt: документированная ручка резюма (0 = off, обычное резюме
+        # не меняется) — восстановлена потерянная проводка.
+        _n_ro = (model.apply_resume_reopen(cfg)
+                 if hasattr(model, 'apply_resume_reopen') else 0)
+        if _n_ro:
+            print(f'  [resume] mlp_mod_scale_reopen applied to {_n_ro} layers')
         verify_identity_resume(model, ckpt, _skipped)  # B15 (F5-01): it returns the fp, not a tuple
         if getattr(cfg, 'reset_skip_alpha', False):
             nzero = 0

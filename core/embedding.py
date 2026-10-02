@@ -458,6 +458,11 @@ class SigmoidCodedHead(nn.Module):
             # буфера случается максимум раз за сессию/резюм).
             self._ell_ema_ready: bool = False
             self._chi_ladder_ready: bool = False
+            # M65-opt: квантильный тензор салиентности — кэш (был
+            # torch.tensor([0.5,0.9,0.99]) на каждое наблюдение фантома)
+            self.register_buffer('_sal_q_levels',
+                                 torch.tensor([0.5, 0.9, 0.99]),
+                                 persistent=False)
             # T9.7 (мета-архитектура): ЛЕСТНИЦА ПРОТИВОРЕЧИЙ вместо одной EMA.
             # Регистры на τ-шкалах; по умолчанию — лестница кэша
             # (cfg.head_lacuna_ladder: 8/32/128/512/2048/8192, ×4), т.е. горизонты
@@ -888,8 +893,8 @@ class SigmoidCodedHead(nn.Module):
                     _n = int(min(int(self._sal_ptr.item()), self._sal_ring.numel()))
                     if _n >= 8:
                         _win = self._sal_ring[:min(_n, self._sal_ring.numel())].float()
-                        _q = torch.quantile(_win, torch.tensor(
-                            [0.5, 0.9, 0.99], device=_win.device, dtype=_win.dtype))
+                        _q = torch.quantile(_win, self._sal_q_levels.to(
+                            device=_win.device, dtype=_win.dtype))   # M65-opt: кэш
                         self._sal_q = (float(_q[0]), float(_q[1]), float(_q[2]))
                     # T9.7b: the observation threshold. 'noise' = the robust
                     # upper tail of the recent maxima (median + k*MAD, clamped):

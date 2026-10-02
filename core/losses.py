@@ -7,18 +7,8 @@ import torch
 import torch.nn.functional as F
 
 
-# M65-opt: кэш единичных матриц (torch.eye аллоцировался на каждом шаге в
-# diversity/orthogonality/bridge-термах). Ключ — (n, device, dtype).
-_EYE_CACHE: dict = {}
-
-
-def _eye(n: int, device, dtype=torch.float32) -> torch.Tensor:
-    key = (int(n), str(device), dtype)
-    e = _EYE_CACHE.get(key)
-    if e is None:
-        e = torch.eye(n, device=device, dtype=dtype)
-        _EYE_CACHE[key] = e
-    return e
+# M65-opt: кэш единичных матриц — общий с bridge (см. vsa_utils.eye_cached)
+from .vsa_utils import eye_cached as _eye   # noqa: E402
 
 
 def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):

@@ -449,7 +449,12 @@ class WideBindConfig:
     # param, sigmoid -> MLP scale). Checkpoints freeze it at init log(2)~0.69
     # (sigmoid 0.667 = "asleep"). On resume set it to log(3)~1.10 (sigmoid 0.75)
     # so the gate starts clearly open AND the deep-MLP gradient boost can move it.
-    mlp_mod_scale_reopen: float = 1.0986  # math.log(3.0)
+    # M65-opt: ПОТЕРЯННАЯ ПРОВОДКА восстановлена. Ручка резюма: если > 0, после
+    # загрузки чекпоинта обучаемый гейт mod_scale_mlp выставляется в это
+    # значение (log(3)≈1.0986 ⇒ σ≈0.75 — «открыт», глубокий MLP-буст может его
+    # двигать). Раньше поле документировалось, но НИКЕМ не читалось.
+    # 0.0 = выключено (безопасный дефолт: поведение резюма не меняется молча).
+    mlp_mod_scale_reopen: float = 0.0
     # Hybrid gate tau: sigmoid+softmax temperature for the MLP modulation gate.
     # Replaces frozen mod_scale_mlp baseline. tau < 1 = sharper (winner-take-all),
     # tau > 1 = softer (uniform). 1.0 = balanced default.

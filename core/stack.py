@@ -1255,6 +1255,24 @@ class EVAStack(nn.Module):
         for l in self.layers:
             l._stream_mode = bool(on)
 
+    def apply_resume_reopen(self, cfg=None) -> int:
+        """M65-opt: применяет cfg.mlp_mod_scale_reopen на резюме.
+
+        Поле было документировано, но не читалось (потерянная проводка).
+        Значение <= 0 — no-op (дефолт), поэтому обычное резюме не меняется.
+        Возвращает число слоёв, у которых гейт переоткрыт."""
+        cfg = cfg if cfg is not None else self.cfg
+        val = float(getattr(cfg, 'mlp_mod_scale_reopen', 0.0) or 0.0)
+        if val <= 0.0:
+            return 0
+        n = 0
+        for l in self.layers:
+            mir = getattr(l, 'mirror', None)
+            if mir is not None and hasattr(mir, 'reopen_mlp_gate'):
+                mir.reopen_mlp_gate(val)
+                n += 1
+        return n
+
     def reset_cache(self):
         """Clear the logit cache (for new sequence)."""
         if self.logit_cache is not None:
