@@ -643,6 +643,11 @@ class WideBindConfig:
                                         # lets the UCL prove itself before the model
                                         # self-closes it (measured: -4.0 in 120 steps)
     ucl_read_scale_floor_until: int = 0  # M59: the step until which the floor holds
+    # M65-opt (методы): pre-birth критерий UCL — планка уверенности, с которой
+    # подтверждённый фантом рождает концепт. Диагноз чурна (лог: births 10545,
+    # retired 2273, median_verdict −39668): большинство новорождённых не
+    # окупает MDL. 0.6 = прежнее поведение (инертный дефолт); A/B поднимает.
+    ucl_birth_confidence: float = 0.6
     stream_cap: float = 1e3        # M50: per-layer residual-stream magnitude
                                    # cap (scale-invariant fuse); 0 disables
     stream_chunk_steps: int = 0    # M62: rotate the genre stream every N steps

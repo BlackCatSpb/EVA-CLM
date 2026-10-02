@@ -447,7 +447,13 @@ class EVAStack(nn.Module):
                             # (model._birth_ledger is set by the trainer; None = off)
                             _bl = getattr(self, '_birth_ledger', None)
                             if _bl is None or _bl.allow_birth(_d, _st):
-                                if _ucl.birth_from_direction(_d, confidence=0.6):
+                                # M65-opt: pre-birth bar — opt-in рычаг против
+                                # UCL-чурна (median_verdict −39668: большинство
+                                # новорождённых не окупает MDL). Дефолт 0.6 =
+                                # прежнее поведение; A/B поднимает планку.
+                                if _ucl.birth_from_direction(
+                                        _d, confidence=float(getattr(
+                                            self.cfg, 'ucl_birth_confidence', 0.6))):
                                     if _bl is not None:
                                         _dn = torch.nn.functional.normalize(
                                             _d.detach().float().reshape(-1), dim=-1)
