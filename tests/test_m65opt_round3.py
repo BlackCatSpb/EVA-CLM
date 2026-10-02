@@ -65,6 +65,25 @@ def test_snapshot_preserves_types_and_clones_values():
     assert torch.equal(m._reasoning_buffer[0], torch.zeros(6))
 
 
+def test_head_lacuna_off_with_memory_bank_and_temper_no_crash():
+    # Round 5 (аудит): head_lacuna=False (Kp=0) + head_temper=True +
+    # memory_bank=True падало AttributeError (_temper_rel) на
+    # step>=head_temper_after. Комбинация валидная.
+    torch.manual_seed(0)
+    cfg = EVAConfig(D=64, n_layers=2, mlp_groups=2, code_dim=8, code_sparsity=2,
+                    vocab=16, save_dir='.', logit_cache_enabled=False,
+                    gradient_checkpointing=False, head_lacuna=False,
+                    head_temper=True, head_temper_after=0, memory_bank=True,
+                    intent_bridge=True, bridge_conn=0.1)
+    m = EVAStack(cfg).train()
+    x = torch.randint(1, 16, (1, 12))
+    h = m.embed_tokens(x)
+    out, state, gs, r = m(h, None, step=2000, tokens=x)
+    assert torch.isfinite(out).all()
+    loss, aux = m.compute_losses(out, x, h_emb=h)
+    assert torch.isfinite(loss)
+
+
 def test_restore_never_shares_storage_with_snapshot():
     # Round 4 (саботаж S3): restore-путь не должен отдавать модели тензоры
     # снимка — ни через _restore_value, ни через list-ветку с иной формой.

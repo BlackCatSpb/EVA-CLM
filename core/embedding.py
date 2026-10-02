@@ -1072,7 +1072,14 @@ class SigmoidCodedHead(nn.Module):
                 _h_impl = (_a.unsqueeze(-1) * self.readout).reshape(*u.shape[:-1], self.D)
                 _cos = F.cosine_similarity(_h_impl, _md.reshape(_h_impl.shape), dim=-1, eps=1e-6)
                 _chi = F.relu(self.temper_cos - _cos).unsqueeze(-1)
-                if self._temper_rel:
+                # Round 5 (аудит): _temper_rel/_chi_ladder определены только
+                # при head_lacuna=True (Kp>0), а temper-путь (head_temper=True,
+                # независимый флаг) читал их безусловно -> AttributeError при
+                # комбинации head_lacuna=False + memory_bank=True на
+                # step>=head_temper_after. Относительная форма деградирует до
+                # абсолютной, краша нет.
+                if getattr(self, '_temper_rel', False) \
+                        and hasattr(self, '_chi_ladder'):
                     # P4-3 A/B: относительная форма — сложить межшкальное χ
                     # (тоже «превышение») и нормировать сумму на рабочий уровень
                     # χ-лестницы (гейт-ступень τ≈128). Форма из патча: абсолютный
