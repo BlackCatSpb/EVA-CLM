@@ -552,20 +552,27 @@ class TestIntegration:
         assert new_params < total * 0.01, f'New params {new_params} > 1% of {total}'
 
     def test_deterministic_forward(self):
-        """Two forwards with same input produce similar (not identical) output.
-        Streaming state (memory bank EMA, concept layer) mutates between calls,
-        so exact equality is not expected — just no NaN/inf."""
+        """M65-opt (аудит D): строгий детерминизм. Свежие модели с одним
+        сидом обязаны дать БИТ-ИДЕНТИЧНЫЙ выход; на одной модели второй
+        вызов мутирует streaming-состояние — дрейф обязан быть ограничен."""
+        def _fresh():
+            torch.manual_seed(42)
+            mm = EVAStack(EVAConfig(**SMALL)).to(device).eval()
+            xx = torch.randint(0, SMALL['vocab'], (1, 4), device=device)
+            with torch.no_grad():
+                o, _, _, _ = mm(mm.embed_tokens(xx))
+            return o
+        a, b = _fresh(), _fresh()
+        assert torch.equal(a, b), 'детерминизм нарушен: свежие модели разошлись'
         cfg = EVAConfig(**SMALL)
-        model = EVAStack(cfg).to(device)
-        model.eval()
         torch.manual_seed(42)
+        model = EVAStack(cfg).to(device).eval()
         x = torch.randint(0, cfg.vocab, (1, 4), device=device)
-        h = model.embed_tokens(x)
-        out1, _, _, _ = model(h)
-        out2, _, _, _ = model(h)
-        assert not torch.isnan(out1).any()
-        assert not torch.isnan(out2).any()
-        assert out1.shape == out2.shape
+        with torch.no_grad():
+            out1, _, _, _ = model(model.embed_tokens(x))
+            out2, _, _, _ = model(model.embed_tokens(x))
+        assert torch.isfinite(out1).all() and torch.isfinite(out2).all()
+        assert float((out1 - out2).abs().max()) < 1e3, 'дрейф состояния неограничен'
 
     def test_no_nan_in_forward(self):
         cfg = EVAConfig(**SMALL, intent_bridge=True, memory_bank=True,

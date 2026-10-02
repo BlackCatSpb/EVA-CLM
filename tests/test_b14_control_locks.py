@@ -71,7 +71,9 @@ def test_f406_depth_integrator_roundtrip():
     d.update(10, 5.0)
     d.update(12, 5.0)
     st = d.get_state()
-    assert st['last_depth_step'] != -10 ** 9 or st['val_ema'] is not None
+    # M65-opt (аудит D): оба условия обязаны держаться, не «или»
+    assert st['last_depth_step'] != -10 ** 9, 'last_depth_step не обновился'
+    assert st['val_ema'] is not None, 'val_ema не выставился'
     d2 = DepthController(m, n_layers=2, init_k=1, unfreeze_inc=1,
                          warmup_steps=0, eval_interval=2, max_depth=2)
     d2.put_state(st)

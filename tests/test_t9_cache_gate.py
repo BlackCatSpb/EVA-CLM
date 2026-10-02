@@ -8,6 +8,7 @@
 
 Run: python -m pytest tests/test_t9_cache_gate.py -q
 """
+import math
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
@@ -123,7 +124,10 @@ def test_census_and_telemetry_see_cache():
     gc = grad_census(m)
     for k in ('g_cache_gate', 'g_cache_gate_w', 'g_cache_attn', 'g_logit_to_hidden'):
         assert k in gc, f'{k} отсутствует в цензе'
-        assert gc[k] is None or gc[k] >= 0.0
+        assert gc[k] is None or (gc[k] >= 0.0 and math.isfinite(gc[k]))
+    # M65-opt (аудит D): кэш-путь не может быть целиком вне графа
+    assert any(gc[k] is not None for k in ('g_cache_gate_w', 'g_cache_attn')), \
+        'кэш-путь целиком вне графа'
     tt = training_telemetry(m)
     for k in ('cache_gate', 'cache_gate_bias', 'cache_read_ratio'):
         assert k in tt, f'{k} отсутствует в телеметрии: {sorted(tt)}'

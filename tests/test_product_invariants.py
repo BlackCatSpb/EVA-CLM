@@ -597,7 +597,8 @@ def test_tokenstream_wrapped(tmp_path=None):
     assert not wrapped
     x, y, off, wrapped = st.get_batch(8, 2, 60)          # 60+17>64 → wrap
     assert wrapped, 'end-of-stream not reported'
-    assert off == 16 or off > 0  # read from 0 after wrap
+    # M65-opt (аудит D): после wrap чтение с 0 -> offset = 0 + bs*seq = 16
+    assert off == 16, f'после wrap offset обязан быть 16, а не {off}'
 
 
 # ── M9.1 reasoning weighted-average must stay bounded when all gates close ───

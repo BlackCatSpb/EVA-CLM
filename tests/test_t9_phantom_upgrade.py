@@ -33,7 +33,8 @@ def test_confirmation_requires_cycles():
     st = b.stats()
     # conf может быть >=0.75? при w=1 (hard merge) conf = 0.5+4*0.05=0.7 <0.75 — поднимем
     # искусственно, но count уже 5 → gate пройден
-    assert st['confirmed'] == 0 or st['confirmed'] == 1
+    # M65-opt (аудит D): conf=0.5+4*0.05*w<0.75 -> подтверждения быть НЕ может
+    assert st['confirmed'] == 0, f'подтверждение при conf<0.75: {st}'
     # теперь: conf высокий, но count мал
     b2 = _bank(cycles_before_stable=5, decay=1.0)
     b2.directions[0].copy_(F.normalize(v, dim=-1)); b2.filled[0] = True

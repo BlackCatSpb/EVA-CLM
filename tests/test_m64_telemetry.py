@@ -34,6 +34,10 @@ def test_grad_census_reports_the_channels():
         # T9-ревью R3: None = «вне графа», 0.0 = «ровно ноль» — оба валидны,
         # но None обязан быть отличим (иначе A/B живой/мёртвой лестницы слеп)
         assert gc[k] is None or (gc[k] >= 0.0 and torch.isfinite(torch.tensor(gc[k])))
+    # M65-opt (аудит D): None-на-всех = слепая панель; хотя бы один τ-путь жив
+    assert any(gc[k] is not None for k in (
+        'g_ucl_scale', 'g_phantom_basis', 'g_lacuna_w', 'g_log_eta', 'g_tau_dev'
+    )), 'все τ-пути вне графа — проводка мертва?'
     # the readout and token_bias must be LIVE (nonzero) after a real CE backward
     assert gc['g_readout'] > 0.0, 'the readout has no gradient through the CE path'
     assert gc['g_token_bias'] > 0.0

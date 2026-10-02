@@ -1374,16 +1374,35 @@ class EVAStack(nn.Module):
                                        # boundary reset is state, not absence)
         # M58b: the memory<->head channel lives on SUBMODULES (the chain found
         # the eval handing the head a stale training direction).
-        # M65-opt2 (A4): лакуна-телеметрия головы — тоже состояние forward'а
-        for _pfx, _mod, _an in (('bank', getattr(self, 'memory_bank', None), '_last_read'),
+        # M65-opt2 (A4/A2): состояние forward'а головы (лакуна/салиентность/
+        # спайки/phantom-l1) — без него резюм/восстановление не бит-точны
+        # M65-opt2 (A5-дет): bridge._preds — одношаговый кэш предсказаний
+        # (читается forward'ом!), был вне снимка -> 0.026 расхождения
+        for _pfx, _mod, _an in (('bridge', getattr(self, 'bridge', None), '_preds'),
+                                ('bank', getattr(self, 'memory_bank', None), '_last_read'),
                                 ('head', getattr(self, 'lm_head', None), '_mem_dir'),
                                 ('head', getattr(self, 'lm_head', None), '_last_lacuna_rel'),
                                 ('head', getattr(self, 'lm_head', None), '_last_lacuna_gate'),
-                                ('head', getattr(self, 'lm_head', None), '_last_lacuna')):
+                                ('head', getattr(self, 'lm_head', None), '_last_lacuna'),
+                                ('head', getattr(self, 'lm_head', None), '_sal_q'),
+                                ('head', getattr(self, 'lm_head', None), '_meta_thr'),
+                                ('head', getattr(self, 'lm_head', None), '_meta_levels'),
+                                ('head', getattr(self, 'lm_head', None), '_spike_n'),
+                                ('head', getattr(self, 'lm_head', None), '_spike_stats'),
+                                ('head', getattr(self, 'lm_head', None), '_last_p')):
             if _mod is None:
                 continue
             _a = getattr(_mod, _an, None)
-            _ex[f'{_pfx}.{_an}'] = _a.detach().clone() if isinstance(_a, torch.Tensor) else _a
+            # M65-opt2: списки/кортежи — ПОЭЛЕМЕНТНЫЙ клон (bridge._preds
+            # хранился по ссылке: аппенды forward'а мутировали сам снимок)
+            if isinstance(_a, torch.Tensor):
+                _ex[f'{_pfx}.{_an}'] = _a.detach().clone()
+            elif isinstance(_a, (list, tuple)):
+                _ex[f'{_pfx}.{_an}'] = [
+                    t.detach().clone() if isinstance(t, torch.Tensor) else t
+                    for t in _a]
+            else:
+                _ex[f'{_pfx}.{_an}'] = _a
         # M33: per-layer streaming caches ARE forward inputs (see mirror M33) —
         # they must round-trip through the eval isolation contract as well.
         for _i, _l in enumerate(self.layers):
@@ -1391,6 +1410,7 @@ class EVAStack(nn.Module):
             if _mir is not None:
                 for _an in ('_cached_hp', '_cached_pred_k', '_cached_pred_error_norm',
                             '_cached_gate', '_cached_usefulness',
+                            '_cached_concept_dendrogram',
                             '_alpha_override_py',      # M65-opt2 (A2): python-двойник
                             '_alpha_pending'):         # M65-opt2 (A2): отложенный write
                     _a = getattr(_mir, _an, None)
@@ -1427,12 +1447,22 @@ class EVAStack(nn.Module):
                     setattr(_tgt, _attr,
                             _v.clone() if isinstance(_v, torch.Tensor) else _v)
                     continue
-                if _an.startswith(('bank.', 'head.')):               # M58b submodule route
+                if _an.startswith(('bank.', 'head.', 'bridge.')):    # M58b + bridge (M65-opt2)
                     _pfx, _attr = _an.split('.', 1)
-                    _tgt = getattr(self, 'memory_bank' if _pfx == 'bank' else 'lm_head', None)
+                    _tgt = getattr(self, {'bank': 'memory_bank', 'head': 'lm_head',
+                                          'bridge': 'bridge'}[_pfx], None)
                     if _tgt is not None:
-                        setattr(_tgt, _attr,
-                                _v.clone() if isinstance(_v, torch.Tensor) else _v)
+                        # M65-opt2: свежий клон на КАЖДЫЙ restore (иначе
+                        # повторный restore вернул бы уже мутированный список)
+                        if isinstance(_v, torch.Tensor):
+                            _nv = _v.clone()
+                        elif isinstance(_v, (list, tuple)):
+                            _nv = type(_v)(
+                                t.clone() if isinstance(t, torch.Tensor) else t
+                                for t in _v)
+                        else:
+                            _nv = _v
+                        setattr(_tgt, _attr, _nv)
                     continue
                 _cur = getattr(self, _an, None)
                 if isinstance(_v, list) and isinstance(_cur, list):
