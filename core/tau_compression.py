@@ -134,9 +134,11 @@ def compress_sparse_topk_ste(t: torch.Tensor, k: int = 128) -> Tuple[torch.Tenso
     idx_vals = ste_quantize(topk_vals, vmin, scale).to(torch.uint8)
     
     # Reconstruct values for gradient flow (detached quantization, but STE in backward)
-    vals_ste = idx_vals.float() * scale + vmin
-    # Add STE: gradient flows as if quantization didn't happen
-    vals_ste = vals_ste + (topk_vals - vals_ste).detach()
+    _q = idx_vals.float() * scale + vmin
+    # M65-opt FIX: STE-формула была перевёрнута (`q + (x−q).detach()`):
+    # forward возвращал НЕквантованные значения, backward был 0 (градиент мёртв).
+    # Канон: x + (q − x).detach() -> forward=q (квантовано), backward=identity.
+    vals_ste = topk_vals + (_q - topk_vals).detach()
     
     return topk_idx.to(torch.uint16), idx_vals, torch.tensor([vmin, scale]), vals_ste
 
@@ -171,8 +173,10 @@ def compress_uniform8_ste(t: torch.Tensor) -> Tuple[torch.Tensor, float, float, 
     idx = ste_quantize(t_f, t_min, scale).clamp_(0, 255).to(torch.uint8)
     
     # Reconstruct with STE
-    vals_ste = idx.float() * scale + t_min
-    vals_ste = vals_ste + (t_f - vals_ste).detach()
+    _q = idx.float() * scale + t_min
+    # M65-opt FIX: см. compress_sparse_topk_ste — формула была перевёрнута
+    # (forward неквантованный, backward 0). Канон: x + (q − x).detach().
+    vals_ste = t_f + (_q - t_f).detach()
     
     return idx.reshape(t.shape), t_min, scale, vals_ste
 
