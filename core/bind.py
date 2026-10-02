@@ -11,6 +11,24 @@ from .config import EVAConfig
 from .vsa_utils import dct_basis, fib_sigmoid_init
 
 
+def _hrr_conv(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Циркулярная свёртка hrr[n] = Σ_t a[t]·b[(n−t)%K] через FFT.
+
+    Замена gather (B,L,K,K) + einsum: замер агента B — 37.0 -> 0.74 ms/слой
+    (50x), освобождает ~18.9MB/слой графа. Индекс `_circ_conv_idx` = (n−t)%K —
+    ИМЕННО свёртка: irfft(rfft(a)·rfft(b)), max abs err 9.5e-7 (fp32),
+    8.9e-16 (fp64). ВНИМАНИЕ: прототип B (flip+roll) проверял корреляцию
+    (t+n)%K — к свёрточному сайту НЕ применим (err 9.9 — проверено)."""
+    _dt = a.dtype
+    if _dt not in (torch.float32, torch.float64):
+        a = a.float()
+        b = b.float()
+    out = torch.fft.irfft(
+        torch.fft.rfft(a, n=a.shape[-1]) * torch.fft.rfft(b, n=b.shape[-1]),
+        n=a.shape[-1])
+    return out.to(_dt)
+
+
 class _ExpRMSNorm(nn.Module):
     """RMSNorm via explicit formula (ONNX-exportable, equiv to nn.RMSNorm)."""
 
@@ -384,8 +402,8 @@ class TrajectorySpiralBind(nn.Module):
         return self.hybrid_alpha_min + (self.hybrid_alpha_max - self.hybrid_alpha_min) * (1.0 - _tn)
 
     def _hrr_bind(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        bg: torch.Tensor = b[..., self._circ_conv_idx]  # (B, L, K, K) circular shifts
-        return torch.einsum('blt,bltn->bln', a, bg)
+        # FFT вместо gather+einsum (агент B: 50x, err 9.5e-7) — см. _hrr_conv
+        return _hrr_conv(a, b)
 
     def _hybrid_bind(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         alpha: float = self._hybrid_alpha()
@@ -460,9 +478,10 @@ class TrajectorySpiralBind(nn.Module):
             prod_im = u_re * vr_im + u_im * vr_re
             u_re_v = u_re.reshape(-1, K)
             v_re_v = v_re.reshape(-1, K)
-            bg = v_re_v[..., self._circ_conv_idx]                 # (B*L*S*nd, K, K)
             alpha = self._hybrid_alpha()
-            hrr = torch.einsum('bt,btn->bn', u_re_v, bg).reshape(
+            # FFT вместо gather (B*L*S*nd,K,K) + einsum (агент B: 37->0.74ms/
+            # слой, -18.9MB/слой графа; err 9.5e-7) — см. _hrr_conv
+            hrr = _hrr_conv(u_re_v, v_re_v).reshape(
                 u_re.shape[0], u_re.shape[1], self.S, self.n_dims, K)
             ewise = u_re * v_re
             hybrid = alpha * hrr + (1 - alpha) * ewise
