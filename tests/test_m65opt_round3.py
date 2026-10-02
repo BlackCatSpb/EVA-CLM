@@ -65,6 +65,30 @@ def test_snapshot_preserves_types_and_clones_values():
     assert torch.equal(m._reasoning_buffer[0], torch.zeros(6))
 
 
+def test_restore_never_shares_storage_with_snapshot():
+    # Round 4 (саботаж S3): restore-путь не должен отдавать модели тензоры
+    # снимка — ни через _restore_value, ни через list-ветку с иной формой.
+    m = _mini()
+    m._reasoning_buffer = [torch.zeros(3)]                 # форма 3
+    snap = m.snapshot_runtime_buffers()
+    m._reasoning_buffer = [torch.full((5,), 7.0)]          # та же длина, форма 5
+    m.restore_runtime_buffers(snap)
+    assert m._reasoning_buffer[0].shape == (3,), 'значение не восстановлено'
+    assert torch.equal(m._reasoning_buffer[0], torch.zeros(3))
+    # нет шаринга хранилищ
+    assert m._reasoning_buffer[0].data_ptr() != \
+        snap['__attrs__']['_reasoning_buffer'][0].data_ptr(), 'list-элемент расшарен'
+    m._reasoning_buffer[0].add_(11.0)
+    assert float(snap['__attrs__']['_reasoning_buffer'][0].abs().sum()) == 0.0, \
+        'мутация модели испортила снимок'
+    # тензорный атрибут: тоже свежий клон
+    m._last_logits = torch.zeros(4)
+    snap2 = m.snapshot_runtime_buffers()
+    m.restore_runtime_buffers(snap2)
+    assert m._last_logits.data_ptr() != \
+        snap2['__attrs__']['_last_logits'].data_ptr(), 'тензорный атрибут расшарен'
+
+
 def test_restore_shortened_and_lengthened_lists_no_crash():
     m = _mini()
     m._reasoning_buffer = [torch.zeros(3), torch.ones(3)]

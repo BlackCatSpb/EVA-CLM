@@ -390,10 +390,14 @@ class EVAStack(nn.Module):
         if adaptive and step is not None and step >= 5000:
             momentum_beta = 0.8 * min(1.0, (step - 5000) / 5000)
         if momentum_beta > 0:
-            if not hasattr(self, '_gs_velocity') or self._gs_velocity.shape != global_state.shape:
+            # M65-opt (аудит round4): restore снимка, снятого ДО init, кладёт
+            # атрибут None -> прежняя проверка hasattr(...).shape падала
+            # AttributeError на step>=5000. None и несовпадение формы — init.
+            _gv = getattr(self, '_gs_velocity', None)
+            if _gv is None or _gv.shape != global_state.shape:
                 self._gs_velocity = torch.zeros_like(global_state)
             else:
-                self._gs_velocity = self._gs_velocity.to(global_state.device)
+                self._gs_velocity = _gv.to(global_state.device)
         # M50 (the 2970 explosion post-mortem): the residual stream can
         # diverge (measured: h~1e20 at the layer outputs, final_norm's
         # mean(h^2) overflows to inf -> rsqrt(inf)=0 -> model output EXACTLY
@@ -1487,7 +1491,11 @@ class EVAStack(nn.Module):
                                 and _cur[_i2].shape == _t.shape:
                             _cur[_i2].copy_(_t)
                         else:
-                            _cur[_i2] = _t
+                            # M65-opt (аудит round4): клон обязателен — иначе
+                            # при несовпадении формы элемент снимка шарится
+                            # с моделью (мутация модели портит снимок)
+                            _cur[_i2] = (_t.clone() if isinstance(_t, torch.Tensor)
+                                         else _t)
                 else:
                     # M65-opt (аудит): тип сохраняется (tuple/dict), длины не
                     # обязаны совпадать (раньше IndexError на укороченном

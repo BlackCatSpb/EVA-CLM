@@ -2183,3 +2183,26 @@ b_d->10-12 сигмоид насыщается и w_d гаснет сам (от�
 Инвентаризация снимка: 20 непокрытых атрибутов — все write-before-read
 (max|Δout|=0 на мутациях) — задокументировано, не баг.
 Тесты: 684 passed. Изменения синхронизированы в песочницу.
+
+
+## Round 4: адверсариальный аудит STE/снимка — 685 passed
+
+Агент (round4) проверил df082ed саботаж-тестами (6/7 откатов пойманы). Найдено:
+1. List-шаринг при restore (core/stack.py): при равной длине и НЕсовпадающей
+   форме _cur[_i2] = _t отдавал модели тензор снимка (мутация модели портила
+   снимок). Pre-existing, но моя длина-проверка ветку сохранила. Фикс: клон.
+2. Краш _gs_velocity=None: снимок, снятый ДО momentum-init (step<5000),
+   восстанавливал атрибут как None; forward при step>=5000 падал
+   AttributeError. Pre-existing. Фикс: getattr(...) is None or shape !=.
+3. Пробел теста: _restore_value->identity (S3) не ловился — добавлен замок
+   на data_ptr (нет шаринга хранилищ) + мутация модели после restore.
+Саботаж-таблица: STE->hard clamp CATCH; старый softplus CATCH (2 failed);
+снимок dict/tuple->ссылка CATCH; restore->старый IndexError CATCH;
+traj_dims=1 revert CATCH; FFT->correlation CATCH; restore->identity был
+NOT-CAUGHT -> теперь закрыт тестом.
+Подтверждено pre-existing: строгий повторный forward после restore не
+бит-точен (1.2e-2; parent 1.19e-2) из-за непарных graph-кэшей
+(_cache_mlp_out/_cached_decorr/_tau_signal_used) — известное хаотическое
+свойство, контракт — состояние бит-точно, выходы в допуске.
+Мелкий докс-фикс: eva_optim.py — 723M -> фактические 183.14M (сверено с
+отчётом step=18920). Тесты: 685 passed; синхронизировано в песочницу.
