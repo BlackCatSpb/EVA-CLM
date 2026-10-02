@@ -1368,7 +1368,15 @@ class EVAStack(nn.Module):
             if isinstance(_a, torch.Tensor):
                 _ex[_an] = _a.detach().clone()
             elif isinstance(_a, (list, tuple)):
-                _ex[_an] = [t.detach().clone() if isinstance(t, torch.Tensor) else t for t in _a]
+                # M65-opt (аудит): тип СОХРАНЯЕТСЯ (tuple остаётся tuple —
+                # раньше restore молча превращал его в list)
+                _ex[_an] = type(_a)(t.detach().clone() if isinstance(t, torch.Tensor)
+                                    else t for t in _a)
+            elif isinstance(_a, dict):
+                # M65-opt (аудит): dict-значения (напр. _spike_stats) тоже
+                # клонируются — раньше хранились по ссылке
+                _ex[_an] = {_k: (t.detach().clone() if isinstance(t, torch.Tensor) else t)
+                            for _k, t in _a.items()}
             else:
                 _ex[_an] = _a          # None/scalar must restore too (a document
                                        # boundary reset is state, not absence)
@@ -1398,9 +1406,13 @@ class EVAStack(nn.Module):
             if isinstance(_a, torch.Tensor):
                 _ex[f'{_pfx}.{_an}'] = _a.detach().clone()
             elif isinstance(_a, (list, tuple)):
-                _ex[f'{_pfx}.{_an}'] = [
+                _ex[f'{_pfx}.{_an}'] = type(_a)(
                     t.detach().clone() if isinstance(t, torch.Tensor) else t
-                    for t in _a]
+                    for t in _a)
+            elif isinstance(_a, dict):
+                _ex[f'{_pfx}.{_an}'] = {
+                    _k: (t.detach().clone() if isinstance(t, torch.Tensor) else t)
+                    for _k, t in _a.items()}
             else:
                 _ex[f'{_pfx}.{_an}'] = _a
         # M33: per-layer streaming caches ARE forward inputs (see mirror M33) —
@@ -1416,6 +1428,16 @@ class EVAStack(nn.Module):
                     _a = getattr(_mir, _an, None)
                     if isinstance(_a, torch.Tensor):
                         _ex[f'mir.{_i}.{_an}'] = _a.detach().clone()
+                    elif isinstance(_a, (list, tuple)):
+                        # M65-opt (аудит): _cached_concept_dendrogram (tuple)
+                        # хранился по ссылке — мутация была видна в снимке
+                        _ex[f'mir.{_i}.{_an}'] = type(_a)(
+                            t.detach().clone() if isinstance(t, torch.Tensor) else t
+                            for t in _a)
+                    elif isinstance(_a, dict):
+                        _ex[f'mir.{_i}.{_an}'] = {
+                            _k: (t.detach().clone() if isinstance(t, torch.Tensor) else t)
+                            for _k, t in _a.items()}
                     else:
                         # M45: None is STATE (document boundary reset) — a
                         # snapshot that silently drops it cannot restore it,
@@ -1444,8 +1466,7 @@ class EVAStack(nn.Module):
                     _tgt = self.layers[int(_i)]
                     if _pfx == 'mir':
                         _tgt = _tgt.mirror
-                    setattr(_tgt, _attr,
-                            _v.clone() if isinstance(_v, torch.Tensor) else _v)
+                    setattr(_tgt, _attr, self._restore_value(_v))
                     continue
                 if _an.startswith(('bank.', 'head.', 'bridge.')):    # M58b + bridge (M65-opt2)
                     _pfx, _attr = _an.split('.', 1)
@@ -1454,29 +1475,36 @@ class EVAStack(nn.Module):
                     if _tgt is not None:
                         # M65-opt2: свежий клон на КАЖДЫЙ restore (иначе
                         # повторный restore вернул бы уже мутированный список)
-                        if isinstance(_v, torch.Tensor):
-                            _nv = _v.clone()
-                        elif isinstance(_v, (list, tuple)):
-                            _nv = type(_v)(
-                                t.clone() if isinstance(t, torch.Tensor) else t
-                                for t in _v)
-                        else:
-                            _nv = _v
-                        setattr(_tgt, _attr, _nv)
+                        setattr(_tgt, _attr, self._restore_value(_v))
                     continue
                 _cur = getattr(self, _an, None)
-                if isinstance(_v, list) and isinstance(_cur, list):
+                if isinstance(_v, list) and isinstance(_cur, list) \
+                        and len(_cur) == len(_v):
+                    # in-place копия при совпадении длины (алиасы сохраняются)
                     for _i2, _t in enumerate(_v):
-                        if _i2 < len(_cur) and isinstance(_t, torch.Tensor) \
+                        if isinstance(_t, torch.Tensor) \
                                 and isinstance(_cur[_i2], torch.Tensor) \
                                 and _cur[_i2].shape == _t.shape:
                             _cur[_i2].copy_(_t)
                         else:
                             _cur[_i2] = _t
-                elif isinstance(_v, torch.Tensor):
-                    setattr(self, _an, _v.clone())
                 else:
-                    setattr(self, _an, _v)
+                    # M65-opt (аудит): тип сохраняется (tuple/dict), длины не
+                    # обязаны совпадать (раньше IndexError на укороченном
+                    # списке), значения клонируются свежо
+                    setattr(self, _an, self._restore_value(_v))
+
+    @staticmethod
+    def _restore_value(v):
+        """Тип-сохраняющий свежий клон значения снимка (tensor/list/tuple/dict)."""
+        if isinstance(v, torch.Tensor):
+            return v.clone()
+        if isinstance(v, (list, tuple)):
+            return type(v)(t.clone() if isinstance(t, torch.Tensor) else t for t in v)
+        if isinstance(v, dict):
+            return {k: (t.clone() if isinstance(t, torch.Tensor) else t)
+                    for k, t in v.items()}
+        return v
 
     def cache_size_mb(self) -> float:
         """Get current cache size in MB."""

@@ -51,6 +51,21 @@ def test_fft_conv_half_cast_path():
     assert torch.allclose(out.float(), ref, atol=1e-2, rtol=0)
 
 
+def test_trajectory_spiral_single_dim_no_crash():
+    # M65-opt (аудит): bind_traj_dims=1 падал на torch.stack пустого списка
+    cfg = EVAConfig(D=64, n_layers=1, mlp_groups=2, code_dim=8, code_sparsity=2,
+                    vocab=64, bind_K=16, save_dir='.',
+                    bind_twist_mode='trajectory_spiral', bind_traj_dims=1)
+    torch.manual_seed(0)
+    m = TrajectorySpiralBind(64, 16, cfg).train()
+    h = torch.randn(1, 12, 64, requires_grad=True)
+    out, new_traj, coh = m(h)
+    assert out.shape == (1, 12, 64)
+    assert torch.isfinite(out).all()
+    out.square().mean().backward()
+    assert h.grad is not None and float(h.grad.abs().sum()) > 0.0
+
+
 def test_trajectory_spiral_forward_uses_fft_and_flows_grad():
     # live-режим (bind_twist_mode='trajectory_spiral'): forward конечен, форма
     # верна, градиент по h течёт (интеграционный smoke поверх _hrr_conv)

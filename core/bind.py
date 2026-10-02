@@ -433,7 +433,9 @@ class TrajectorySpiralBind(nn.Module):
         # modes — gating it on self.training meant eval fed zeros where
         # train fed shifted windows (a silent train≡eval split, and the
         # reason the eval forward corrupted the stream cache semantics).
-        if traj_state is None and L >= self.n_dims:
+        # M65-opt (адверсариальный аудит): n_dims=1 -> range(1,1) пуст и
+        # torch.stack([]) падал; при n_dims=1 траектория — сам hp (fallback ниже)
+        if traj_state is None and L >= self.n_dims and self.n_dims > 1:
             # B2 (audit A): the trajectory previously fed the spiral either
             # zeros (seq start — measured grad w_v_re[:,d≥1] ≡ 0) or a
             # DETACHED cache (cross-position Jacobian exactly 0 — the

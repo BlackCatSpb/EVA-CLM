@@ -34,25 +34,43 @@ def _stream_cap(x, cap):
     m = x.abs().amax(dim=-1, keepdim=True)
     return x * (cap / m.clamp_min(cap))
 
-_SOFT_FLOOR_T = 0.01   # температура мягкого пола (log-space, ~1% затухания)
-
-def _soft_floor(x: torch.Tensor, floor: torch.Tensor) -> torch.Tensor:
-    """Smooth max(x, floor): exact for x-floor > 20*T, softplus-knee below.
+class _FloorSTE(torch.autograd.Function):
+    """max(x, floor) с ПРОЗРАЧНЫМ градиентом (straight-through).
 
     КОРНЕВОЙ ФИКС bind-градиента (найден аудитом, диагностирован зондами):
     жёсткий clamp_min(log_a, k*log(d_s)) обнулял градиент bind-параметров.
-    У медленной лестницы (d_s -> 1, глубокие слои) пол k*log(d_s) лежит ВЫШЕ
+    У медленной лестницы (d_s -> 1, глубокие слои) пол k*log(d_s) лежит выше
     каждого log(decay): маска клампа пуста (frac_clamped=1.0), локальный
     якобиан d(combined)/d(decay) == 0 точно (замер: 0 против 3.8e4 у быстрого
     слоя) -> w_d/b_d/w_d_pen получали ровно нулевой градиент в чистом пути
-    gc=False (в gc=True ненулевые значения давал fp-шум recompute, не
-    обучение). Ниже колена градиент softplus'(d) в (0,1) — никогда не ноль;
-    значение не ниже жёсткого пола (безопасность M26/F2 сохранена: |log_a| не
-    превышает прежней границы), отличие от клампа <= T*ln2 ~ 0.7%.
-    Паддинг (decay=1): d-floor > 0.2 -> точное x (бит-в-бит, как раньше)."""
-    t = _SOFT_FLOOR_T
-    d = x - floor
-    return floor + torch.where(d > 20.0 * t, d, F.softplus(d / t) * t)
+    gc=False (в gc=True ненулевые значения давал fp-шум recompute, не обучение).
+
+    Почему STE, а не сглаженный пол (история честная — попытка была и
+    отклонена адверсариальным аудитом): у медленных шкал rest-режим
+    (d_mod=1) лежит всего в |log(d_s)| ~ 2e-4 над полом; любой softplus-пол
+    с коленом шире этого зазора делает log_a > 0 -> decay > 1 -> память
+    РАСТЁТ (замер аудита: cum_decay 1.234/чанк, 28.9x за 512 токенов при
+    tau=4111) и искажает номинальную лестницу. Сглаживание с коленом уже
+    зазора даёт градиент ~0 на реальной глубине нарушения (0.004) —
+    не лечит. STE сохраняет forward БИТ-в-бит как исходный clamp
+    (decay<=1, паддинг точен, безопасность M26/F2), а backward проводит
+    CE-сигнал к параметрам гейта напрямую: кламп — числовой предохранитель,
+    а не обучаемое ограничение, и он не должен глушить обучение.
+    Математически строгий субградиент max(x,floor) при x<floor равен 0 —
+    именно он и делал параметры мёртвыми; STE — сознательный выбор в пользу
+    обучаемости при неизменном forward."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, floor: torch.Tensor) -> torch.Tensor:
+        return torch.maximum(x, floor)
+
+    @staticmethod
+    def backward(ctx, g: torch.Tensor):
+        return g, None
+
+def _soft_floor(x: torch.Tensor, floor: torch.Tensor) -> torch.Tensor:
+    """Имя сохранено для совместимости вызовов; семантика — _FloorSTE."""
+    return _FloorSTE.apply(x, floor)
 
 def pen_decay_factor(pen: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """Prediction-error modulation of the decay gate, CENTERED at 1.0 (audit
