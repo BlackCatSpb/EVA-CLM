@@ -1868,3 +1868,36 @@ tau_compression.py без тестов; tests/__pycache__ сирота. Батч
 14 копий `except Exception`, дубликаты хелперов, stale-комментарии. Батч 8.
 
 Батч 1: 19cb965 — 631 passed.
+
+
+### M65-OPT прогресс (батчи 2-3)
+
+Батч 2a (36223f8): TauConfig публикует python-снимки tau_l/tau_norm/intent_alpha
+(1 host-передача на forward вместо ~48 .item()); block/stack/ledger читают
+снимки; losses: 11 .item()/шаг -> один cat+tolist, branch-RMS 72 -> 1;
+embedding lazy-init на флагах (резюм-буфер не затирается); maturation .data
+-> no_grad copy_.
+
+Батч 2b (eed00dd): mirror — _alpha_override_py (публикует MirrorLRScheduler),
+_div_run_rec тензорно, dendrogram хранит тензоры, _cached_ig_eff -> property
+(sync при чтении); concept_layer — _mature_py снимок, счётчики слотов одним
+tolist, пороги рождения тензорами, birth_gate без .item(); block — _mlp_cnt_py
++ reset_mlp_observer (stack переведён), мёртвый _mlp_ratio удалён; logit_cache
+— сегментный цикл 2 tolist; embedding — _kp() кэш среза (+инвалидация в
+load-хуке), h_norm тензором.
+
+Батч 3 (c6382bd): losses — кэш _eye вместо torch.eye на шаг, логи ветвей 6->3
+на слой; maturation — лог-константы в init; block — _sqrt_k, mirror._sqrt_k,
+float(CHUNK) убран; logit_cache — _sqrt_head_dim; reasoning — кэш arange/sqrt(D).
+638 passed. Примечание: скриптовые правки переписали файлы с LF (шумные diff'ы).
+
+Замки: tests/test_m65opt_batch2.py (3) + test_m65opt_batch2b.py (4).
+
+Очередь: батч 4 — мёртвый код (bind._zeckendorf_levels, embedding._readout_rotated,
+train._full_env/_atomic42, write-only атрибуты mirror/memory_bank/stack/block)
+и 16 unused config-полей; из них ДВА подозрения на потерянную проводку
+(mlp_mod_scale_reopen — открытие гейта при резюме; matur_bridge_readiness —
+второй вход зрелости M_l=max(time-рампа, bridge-readiness)) — в батч 7.
+Батч 5 — дубликаты; батч 6 — качество тестов; батч 7 — методы; батч 8 — доки/ноутбук.
+Остаток синков: bridge (eye/arange на loss-вызов), block._mlp (1/forward, by design),
+embedding phantom-хвост (каденция), logit_cache 621/650-остатки.
