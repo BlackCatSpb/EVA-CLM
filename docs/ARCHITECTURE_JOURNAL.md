@@ -2045,3 +2045,28 @@ C (методы, вердикты), D (мутационное тестирова
 очереди (производительность/методы/тесты), ритуалы и первые шаги — в
 docs/HANDOFF.md. Ревизия тестов и полный снимок runtime (bridge._preds и др.)
 в рабочем дереве; полный прогон pytest и коммит — первым делом.
+
+
+## Ревизия тестов: ЗАВЕРШЕНА И ПРОВЕРЕНА (676 passed + 1 xfailed)
+
+- Строгие замки инвариантов (tests/test_audit_agents_invariants.py, 9 тестов):
+  детерминизм свежих моделей (бит-идентичны); eval-изоляция end-to-end;
+  by-name restore оптимизатора — живое состояние бит-равно снимку по каждому
+  имени (225 слотов, 0 skipped; проверено >100 слотов), пост-шаговые параметры
+  допуск 1e-2; state_dict roundtrip; decode_step самосогласен (1e-3);
+  характеристика window-vs-chunk раскола; emphasis data-части; ring==max_entries;
+  τ-пути не все None.
+- Тавтологии заменены строгими проверками (tau_improvements/b14/product_invariants/
+  m64_telemetry/t9_cache_gate/t9_phantom_upgrade).
+- ДИАГНОЗ ХАОТИЧНОСТИ (зафиксирован): состояние восстанавливается БИТ-точно
+  (probe_restore_gap: только 6 benign-атрибутов: lazy-кэши _mature_py/_kp_active_py/
+  _ell_ema_ready и перезаписываемые флаги _pb_active/_temper_active/_tau_norm),
+  но выход после forward+restore расходится ~0.026 (fp-сдвиг аллокации,
+  усиливается хаотической динамикой; один поток — то же число; свежие модели с
+  одним сидом бит-идентичны). Тесты: состояние — бит-точно, выходы — допуски.
+- Снимок runtime расширен: bridge._preds (читается forward'ом!), dendrogram,
+  _sal_q/_meta_thr/_meta_levels/_spike_n/_spike_stats/_last_p; restore-маршрут
+  знает bridge.; списки клонируются поэлементно и свежо на каждый restore.
+
+СЛЕДУЮЩИЙ ШАГ (приоритет №1 из HANDOFF): корневой фикс bind-градиента —
+в чистом gc=False пути w_d/b_d/w_d_pen мёртвы (градиенты даёт recompute-артефакт).
