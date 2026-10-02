@@ -27,23 +27,31 @@ def _log_default(msg: str) -> None:
     pass
 
 
-def read_step(path: str):
+def read_step(path: str, log=None):
     """Cheap `step` read. Prefers mmap (header only, ~ms even for 2.2 GB);
-    falls back to a full load; returns None when the file is unreadable."""
+    falls back to a full load; returns None when the file is unreadable.
+
+    M65-opt: the mmap→full fallback and the final failure are surfaced via
+    `log` when given — a silent fallback here hides Drive/corruption issues
+    in exactly the module whose job is to make them visible."""
     import torch
     try:
         ck = torch.load(path, map_location='cpu', mmap=True, weights_only=False)
         step = int(ck.get('step', -1)) if isinstance(ck, dict) else -1
         del ck
         return step
-    except Exception:
-        pass
+    except Exception as e:
+        if log is not None:
+            log(f'[ckpt] mmap read failed on {os.path.basename(path)} ({e}); '
+                f'full-load fallback')
     try:
         ck = torch.load(path, map_location='cpu', weights_only=False)
         step = int(ck.get('step', -1)) if isinstance(ck, dict) else -1
         del ck
         return step
-    except Exception:
+    except Exception as e:
+        if log is not None:
+            log(f'[ckpt] read_step failed on {os.path.basename(path)}: {e}')
         return None
 
 
@@ -61,7 +69,7 @@ def _chunk_hash(path: str, nbytes: int = 1 << 20) -> str:
 
 
 def verify_ckpt(path: str, expected_step=None, expected_bytes=None,
-                ref_path: str = None):
+                ref_path: str = None, log=None):
     """Verify a checkpoint file: exists, non-empty, size, step, and (when
     `ref_path` is given) the header/tail content hash. Returns (ok, reason)."""
     if not path or not os.path.exists(path):
@@ -72,7 +80,7 @@ def verify_ckpt(path: str, expected_step=None, expected_bytes=None,
     if expected_bytes is not None and size != int(expected_bytes):
         return False, f'size {size} != {expected_bytes}'
     if expected_step is not None:
-        step = read_step(path)
+        step = read_step(path, log=log)
         if step != int(expected_step):
             return False, f'step {step} != {expected_step}'
     if ref_path is not None and os.path.exists(ref_path):
@@ -84,7 +92,7 @@ def verify_ckpt(path: str, expected_step=None, expected_bytes=None,
     return True, 'ok'
 
 
-def atomic_save(obj, path: str) -> str:
+def atomic_save(obj, path: str, log=_log_default) -> str:
     """torch.save to `path.tmp`, fsync, atomic replace. Safe on the local
     runtime disk and (via rename) on the Drive mount."""
     import torch
@@ -96,8 +104,10 @@ def atomic_save(obj, path: str) -> str:
     try:
         with open(tmp, 'rb+') as f:
             os.fsync(f.fileno())
-    except Exception:
-        pass
+    except Exception as e:
+        # Durability is this module's whole point: a swallowed fsync failure
+        # is the exact class of silent Drive loss it exists to prevent.
+        log(f'[ckpt] fsync failed on {os.path.basename(tmp)}: {e}')
     os.replace(tmp, path)
     return path
 
@@ -111,16 +121,20 @@ def _copy_verified(local_path: str, drive_path: str, step, log=_log_default) -> 
     _copyfile(local_path, tmp)
     try:
         os.sync()  # force the FUSE flush before the rename (Linux/Colab)
-    except Exception:
-        pass
+    except AttributeError:
+        pass       # os.sync is Linux-only (Windows dev boxes) — expected
+    except OSError as e:
+        log(f'[ckpt] os.sync before rename failed: {e}')
     os.replace(tmp, drive_path)
     try:
         os.sync()
-    except Exception:
+    except AttributeError:
         pass
+    except OSError as e:
+        log(f'[ckpt] os.sync after rename failed: {e}')
     ok, why = verify_ckpt(drive_path, expected_step=step,
                           expected_bytes=os.path.getsize(local_path),
-                          ref_path=local_path)
+                          ref_path=local_path, log=log)
     if not ok:
         log(f'[ckpt] drive verify failed: {why}')
     return ok
@@ -136,8 +150,8 @@ def save_best_robust(env, drive_path: str, local_path: str, step=None,
         step = env.get('step', -1) if isinstance(env, dict) else -1
     step = int(step)
 
-    atomic_save(env, local_path)
-    ok, why = verify_ckpt(local_path, expected_step=step)
+    atomic_save(env, local_path, log=log)
+    ok, why = verify_ckpt(local_path, expected_step=step, log=log)
     if not ok:
         log(f'[ckpt] LOCAL save failed verification ({why}); drive not touched')
         return False

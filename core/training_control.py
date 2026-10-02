@@ -284,6 +284,9 @@ class LossBalancer:
         self.scale_ema: Optional[float] = None  # M64.4: the measured align scale
         self.n_align: int = 0                   # M64.4: telemetry counters
         self.n_balance: int = 0
+        # M65-opt: aux terms skipped in grad_geometry because they are not
+        # connected to this graph — previously an uncounted silent `continue`.
+        self.n_unconnected: int = 0
         # M64.12 (M63-E §7): the optional aux kill-switch (measure-only unless
         # kill_disable is set). The caller feeds it at the log cadence via
         # `measure_kill` (it needs the LIVE graph); `backward` filters the OFF
@@ -433,7 +436,8 @@ class LossBalancer:
                 tg = torch.autograd.grad(v, params, retain_graph=True,
                                          allow_unused=True)
             except RuntimeError:
-                continue              # term not connected to this graph
+                self.n_unconnected += 1   # term not connected to this graph
+                continue
             num = na = nb = None
             for gce, gt in zip(ce_g, tg):
                 if gce is None or gt is None:

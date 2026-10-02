@@ -10,8 +10,12 @@ from core.vsa_utils import twin_free_codes
 
 
 def _mini(**kw):
-    cfg = EVAConfig(n_layers=2, D=256, mlp_groups=4, code_dim=16, code_sparsity=4,
-                    vocab=600, save_dir='.', **kw)
+    # M65-opt: overrides через dict — раньше `_mini(n_layers=1)` падал на
+    # duplicate keyword (n_layers передавался дважды).
+    base = dict(n_layers=2, D=256, mlp_groups=4, code_dim=16, code_sparsity=4,
+                vocab=600, save_dir='.')
+    base.update(kw)
+    cfg = EVAConfig(**base)
     torch.manual_seed(0)
     return EVAStack(cfg).train()
 
@@ -162,20 +166,24 @@ def test_b2_traj_cross_position_gradient():
 
 
 def test_b2_signal_ent_matches_forward_weights():
-    m = _mini()
+    # M65-opt: 1 слой — среднее по слоям в losses РАВНО значению слоя, поэтому
+    # проверка точная (раньше стояло `or True` — тест ничего не проверял).
+    m = _mini(n_layers=1)
     sl = m.layers[0].mirror
-    assert hasattr(sl, '_tau_signal_used') or True
     x = torch.randint(1, 600, (1, 16))
     m(m.embed_tokens(x), None, step=5, tokens=x)
     ts = getattr(sl, '_tau_signal_used', None)
-    th = sl._signal_log_weights.detach() if ts is None else sl._signal_log_weights.detach() / ts
+    assert ts is not None, 'mirror обязан записать tau, использованный в forward'
+    assert float(ts) > 0.0
+    th = sl._signal_log_weights.detach() / ts
     w = torch.sigmoid(th); p = w / w.sum()
     want = float((p * (p + 1e-10).log()).sum())
     h = m.embed_tokens(x)
     out, *_ = m(h, None, step=6, tokens=x)
     _, aux = m.compute_losses(out, x, h_emb=h)
-    # losses averages over layers; with 2 layers both may differ — check range contains layer-0 value
-    assert abs(float(aux['signal_ent'].detach()) - want) < 0.5 or True  # structural check below is the lock
+    _se = float(aux['signal_ent'].detach())
+    assert math.isfinite(_se) and _se <= 0.0, f'signal_ent вне диапазона: {_se}'
+    assert abs(_se - want) < 1e-3, f'signal_ent != энтропии forward-весов: {_se} vs {want}'
     # structural: gradient must flow through θ (the entropy acts on the FORWARD quantity now)
     loss = aux['signal_ent']
     grads = torch.autograd.grad(loss, [sl._signal_log_weights], allow_unused=True)

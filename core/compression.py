@@ -265,7 +265,8 @@ class FCF_CPR:
                 f'their regeneration to decompress_sd')
         return sd
     
-    def save_compressed(self, ckpt: dict[str, Any], save_path: str) -> int:
+    def save_compressed(self, ckpt: dict[str, Any], save_path: str,
+                        log=print) -> int:
         """Save compressed checkpoint as an inference-only artifact.
 
         Strips all training-only state (optimizer, scheduler, param_names,
@@ -288,19 +289,24 @@ class FCF_CPR:
 
         torch.save(out, save_path)
         size = os.path.getsize(save_path)
-        print(f'\nSaved: {save_path}')
-        print(f'Compressed size: {size/1e9:.2f} GB ({size/1e6:.0f} MB)')
+        # M65-opt: библиотека не печатает сама — log инжектируется
+        # (default=print сохраняет CLI-поведение скриптов; None = тишина).
+        _log = log if callable(log) else (lambda *_a, **_k: None)
+        _log(f'\nSaved: {save_path}')
+        _log(f'Compressed size: {size/1e9:.2f} GB ({size/1e6:.0f} MB)')
         return size
     
-    def load_compressed(self, load_path: str, cfg: Optional[WideBindConfig] = None) -> dict[str, Any]:
+    def load_compressed(self, load_path: str, cfg: Optional[WideBindConfig] = None,
+                        log=print) -> dict[str, Any]:
         """Load and decompress checkpoint."""
+        _log = log if callable(log) else (lambda *_a, **_k: None)
         ckpt = torch.load(load_path, map_location='cpu', weights_only=False)
         
         if 'model_compressed' not in ckpt:
-            print('Not a compressed checkpoint, returning as-is')
+            _log('Not a compressed checkpoint, returning as-is')
             return ckpt
         
-        print(f'Loading compressed checkpoint (step {ckpt.get("step")})')
+        _log(f'Loading compressed checkpoint (step {ckpt.get("step")})')
         compressed = ckpt['model_compressed']
         meta = ckpt['meta']
         
@@ -318,14 +324,15 @@ class FCF_CPR:
 FCF_CPR_Compressor = FCF_CPR
 
 
-def compress_checkpoint(ckpt: dict[str, Any], save_path: str) -> int:
+def compress_checkpoint(ckpt: dict[str, Any], save_path: str, log=print) -> int:
     cpr = FCF_CPR()
-    return cpr.save_compressed(ckpt, save_path)
+    return cpr.save_compressed(ckpt, save_path, log=log)
 
 
-def decompress_checkpoint(load_path: str, cfg: Optional[WideBindConfig] = None) -> dict[str, Any]:
+def decompress_checkpoint(load_path: str, cfg: Optional[WideBindConfig] = None,
+                          log=print) -> dict[str, Any]:
     cpr = FCF_CPR()
-    return cpr.load_compressed(load_path, cfg=cfg)
+    return cpr.load_compressed(load_path, cfg=cfg, log=log)
 
 
 # ─── Test ───

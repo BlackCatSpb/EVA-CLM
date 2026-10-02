@@ -66,7 +66,8 @@ def test_reset_cache_scrubs_the_block_and_mirror_state():
     m = _model(memory_bank=True).train()
     x, h = _hq(m)
     m(h, None, step=3000, tokens=x)
-    assert getattr(m.layers[0], '_traj_state', None) is not None or True
+    # M65-opt: фейковый assert (`or True`) убран — реальные замки ниже
+    # (reset_cache обязан очистить ЯВНО выставленное состояние).
     m.layers[0]._traj_state = torch.randn(1, 2, 8, 16)
     m.layers[0].mirror._cached_usefulness = torch.randn(1, 8, 4)
     m.reset_cache()

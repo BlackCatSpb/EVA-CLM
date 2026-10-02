@@ -783,6 +783,10 @@ class LogitCacheAttention(nn.Module):
                                         sentence_ring=sentence_ring,
                                         ms_spans=ms_spans)  # T9.15
         self.scheduled_sampling_ratio = scheduled_sampling_ratio
+        # M65-opt: module-owned RNG for the scheduled-sampling draw — the
+        # forward must not consume the global torch stream (invisible to the
+        # checkpointed RNG state and not reproducible).
+        self._ss_gen: Optional[torch.Generator] = None
         self.mode = str(mode)
         # M56c: how many times the R1 inference-mode actually fired (rides in
         # the checkpoint; the analyzer prints it - the definitive live check).
@@ -826,7 +830,13 @@ class LogitCacheAttention(nn.Module):
         # train/inference representations.
         use_inference_mode = False
         if training and self.scheduled_sampling_ratio > 0 and logits is not None:
-            if torch.rand(1).item() < self.scheduled_sampling_ratio:
+            # M65-opt: explicit per-module generator (fixed seed 0 — the
+            # sequence is deterministic per process; device follows the input).
+            if self._ss_gen is None or self._ss_gen.device != h.device:
+                self._ss_gen = torch.Generator(device=h.device)
+                self._ss_gen.manual_seed(0)
+            if torch.rand(1, device=h.device,
+                          generator=self._ss_gen).item() < self.scheduled_sampling_ratio:
                 use_inference_mode = True
         if use_inference_mode:
             self._r1_steps += 1            # M56c

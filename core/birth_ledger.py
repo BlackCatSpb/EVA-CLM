@@ -22,6 +22,7 @@ main MDL mechanism: it kills the birth/archive churn of the same direction
 from __future__ import annotations
 
 import math
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -183,6 +184,10 @@ class BirthLedger:
         try:
             _d = torch.stack([e['d'] for e in self.entries]) if self.entries else None
         except RuntimeError:                       # разные формы — легаси-путь
+            # M65-opt: не молчать — легаси-формат раздувает чекпоинт, и это
+            # должно быть видно (иначе тихо теряется весь выигрыш §7.2).
+            warnings.warn('BirthLedger.state_dict: d-тензоры разной формы — '
+                          'легаси-путь (list-of-lists)', RuntimeWarning, stacklevel=2)
             _meta = [dict(m, d=torch.as_tensor(e['d']).tolist())
                      for m, e in zip(_meta, self.entries)]
             _d = None
@@ -190,6 +195,8 @@ class BirthLedger:
             _bd = (torch.stack([b['d'] for b in self.blacklist])
                    if self.blacklist else None)
         except RuntimeError:
+            warnings.warn('BirthLedger.state_dict: blacklist d разной формы — '
+                          'легаси-путь', RuntimeWarning, stacklevel=2)
             _bl_meta = [dict(m, d=torch.as_tensor(b['d']).tolist())
                         for m, b in zip(_bl_meta, self.blacklist)]
             _bd = None
