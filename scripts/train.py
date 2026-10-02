@@ -316,37 +316,6 @@ def train(cfg=None, resume_path=None):
     scaler = GradScaler(enabled=use_amp)
 
     # M42 (mirror of the notebook): one envelope builder + rolling latest.pt
-    def _full_env(_step):
-        model.flush_control_pending()
-        return {
-            'step': int(_step), 'model': model.state_dict(),
-            'code_fp': codebook_fingerprint(model),
-            'git_hash': GIT_HASH, 'cfg_fp': _cfg_fp(cfg),
-            'optimizer': optimizer.state_dict(),
-            'param_names': _opt_param_names(model, optimizer),
-            'scheduler': scheduler.state_dict(),
-            'best_val_loss': float(best_val_loss), 'cfg': cfg,
-            'reasoning_enabled_step': reasoning_enabled_step,
-            'active_depth': depth.active, 'depth_state': depth.get_state(),
-            'balancer': balancer.state_dict(),
-            # M58c: the M51 branch-anchor reference rides too — without it a
-            # resume re-seeds the anchor from the (possibly drifted) current
-            # branch variances instead of the original healthy scale.
-            'branch_var_ref': (model._branch_var_ref.detach().cpu()
-                               if getattr(model, '_branch_var_ref', None) is not None else None),
-            'stream_idx': int(stream_idx), 'offset': int(offset),
-            'rng': torch.get_rng_state(), 'data_rng': rng.get_state(),
-            'stream_state': _dstate(state), 'stream_gs': _dstate(gs if gs is not None else None),
-            'intent_stream': _dstate(model._intent_stream)
-                             if isinstance(getattr(model, '_intent_stream', None), list) else None,
-            'cuda_rng': torch.cuda.get_rng_state() if device == 'cuda' else None,
-        }
-
-    def _atomic42(env, name):
-        p = os.path.join(cfg.save_dir, name); q = p + '.tmp'
-        _save_checkpoint_safely(env, q)
-        os.replace(q, p)
-        return p
     if use_amp:
         print('  AMP: ON (mixed precision)')
 

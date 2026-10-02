@@ -447,8 +447,6 @@ class StreamingMemoryBank(nn.Module):
         self._fusion_tau_alpha = nn.Parameter(torch.zeros(3))  # learnable per-level τ-modulation
 
         # Track sentence boundaries
-        self._in_sentence = True
-        self._sent_start = 0
 
     def forward(self, h: torch.Tensor, tokens: torch.Tensor,
                 step: int = None, mat_gate: float = None,

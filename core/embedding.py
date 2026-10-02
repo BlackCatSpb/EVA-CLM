@@ -290,22 +290,6 @@ class LmHead(nn.Module):
 
 
 
-def _readout_rotated(head: nn.Module, B: int, L: int, D: int) -> torch.Tensor:
-    """B2 (agent-A roundtrip finding): the embedding applies RoPE AFTER
-    z⊗basis, so the TIED readout sitting unrotated computes ⟨R·e, r⟩ — not
-    position-invariant (measured code top-1 = 0.000 even at T=1). Rotating the
-    readout with the SAME rope recovers ⟨R e, R r⟩ = ⟨e, r⟩ exactly because R
-    is orthogonal; the code identity path is then alive at initialization."""
-    r = head.readout                                   # (K, d)
-    big = torch.zeros(1, L, D, device=r.device, dtype=r.dtype)
-    big.view(1, L, head.K, -1).copy_(r.view(1, 1, head.K, -1))
-    rp = getattr(head, '_embed_rope', None)
-    if rp is None:
-        return big.reshape(1, L, head.K, -1)          # broadcasts over B
-    big = rp(big.expand(B, L, D))
-    return big.reshape(B, L, head.K, -1)
-
-
 class PartitionedHead(nn.Module):
     """D-space -> vocab logits via segment-addressed readout + per-token bias.
     

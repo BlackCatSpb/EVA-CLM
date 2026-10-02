@@ -191,7 +191,6 @@ class EVAStack(nn.Module):
         # EMA for exploration (smoothed over ~500 steps)
         self.register_buffer('_expl_ema', torch.zeros(1), persistent=False)
         # Триада: сколько ре-циркуляций сделал Рассудок на последнем проходе (диагностика)
-        self._triad_passes = 0
         # U2: τ-norm for reasoning budget (mean across layers)
         self._tau_norm_reasoning = self.tau_config.tau_norm.mean().item()
         # ─── Logit Cache with Attention (long-context memory) ───
@@ -322,8 +321,6 @@ class EVAStack(nn.Module):
                 self._expl_ema.mul_(0.998).add_(_expl_raw * (1.0 - 0.998))
                 global_expl = self._expl_ema.clamp(0.0, 1.0).item()
 
-                self._pred_weight = (pred_weight if pred_weight is not None
-                    else AdaptiveController.pred_weight(self.layers))
                     # λ-tied defaults (λ⁻⁶..λ⁻²) — audit M7: a local 0.05/0.3
                     # override silently diverged from the LambdaConfig range
                 
@@ -468,7 +465,6 @@ class EVAStack(nn.Module):
                     _prev_kp = int(_head._kp_active.item())
                     _grew = _head.grow_phantom_bits(_dirs)
                     if _grew:
-                        self._m59_grew = int(getattr(self, '_m59_grew', 0)) + _grew
                         _bl = getattr(self, '_birth_ledger', None)
                         if _bl is not None:
                             for _j in range(_prev_kp, _prev_kp + _grew):
@@ -802,7 +798,6 @@ class EVAStack(nn.Module):
         # Только inference/generation: `not self.training` (eval измерение и
         # обучение не трогаем) И `step is not None` (generate передаёт step,
         # валидация — нет). Нет новых параметров => переобучение не нужно.
-        self._triad_passes = _triad_depth
         if (getattr(self.cfg, 'triad_reason', False)
                 and (not self.training)
                 and step is not None
@@ -830,7 +825,6 @@ class EVAStack(nn.Module):
                 # исходного и половина пересмотренного представления.
                 h = 0.5 * h + 0.5 * h2
                 reasoning_buffer, reasoning_count = rb
-                self._triad_passes = _triad_depth + 1
                 if _br_snap is not None:
                     self.bridge._preds = _br_snap[0]
                     self.bridge.bridge_stream.data.copy_(_br_snap[1])

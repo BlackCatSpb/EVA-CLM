@@ -245,7 +245,6 @@ class GroupedCognitiveMirror(nn.Module):
 
         # External gradient cache (устанавливается hook'ом после backward)
         self.register_buffer('_prev_grad_norm', torch.zeros(G), persistent=True)
-        self._expert_asymmetry = expert_asymmetry
         self._meta_trust = meta_trust
         # Private memory bank: expert confident K-space states (cross-expert recall)
         self._has_private_mem = has_private_mem
@@ -309,8 +308,6 @@ class GroupedCognitiveMirror(nn.Module):
         self._cached_pred_k = None
         self._cached_hp = None
         self._cached_pred_error_norm = None
-        self._cached_contra = None
-        self._cached_disagreement = None
         self._cached_contra_graph = None
         self._cached_contra_expert = None
         self._cached_concept_dendrogram = None
@@ -642,8 +639,6 @@ class GroupedCognitiveMirror(nn.Module):
             # high disagreement + uncertain expert → collective irrelevant → reduce help_k
             help_k = help_k_base * torch.sigmoid(self.w_help).unsqueeze(0).unsqueeze(0)
             help_k = help_k * trust.unsqueeze(-1)  # trust-weighted collective memory
-            self._cached_contra = contra.detach()  # for analysis
-            self._cached_disagreement = disagreement.detach()  # for analysis
         else:
             help_k = torch.zeros_like(hp)
             trust = torch.ones_like(hp.norm(dim=-1))  # no contradiction when disabled
@@ -919,7 +914,6 @@ class GroupedCognitiveMirror(nn.Module):
         _mn = torch.nn.functional.normalize(mirror, dim=-1)
         _gin = torch.cat([_hn, _mn], dim=-1)              # (B, L, G, 2d)
         alpha = torch.sigmoid(torch.einsum('blgk,gk->blg', _gin, self.w_alpha) + self.b_alpha)
-        self._cached_alpha = alpha.detach()
         mirror = mirror * alpha.unsqueeze(-1)
 
         # ─── K-Space Gate (per-token, per-expert) ───

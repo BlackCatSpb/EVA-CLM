@@ -309,22 +309,6 @@ def _fib_sequence(n_max: int) -> list:
     return fibs
 
 
-def _zeckendorf_levels(t: int, max_levels: int = 6) -> torch.Tensor:
-    fibs: list = _fib_sequence(100)[:max_levels]
-    weights: list = []
-    prev: int = -2
-    remaining: int = t
-    for f in fibs:
-        if f <= remaining and f > prev + 1:
-            weights.append(1.0 / f)
-            prev = f
-            remaining -= f
-        else:
-            weights.append(0.0)
-    w = torch.tensor(weights[:max_levels], dtype=torch.float32)
-    return w / (w.sum() + 1e-8)
-
-
 class TrajectorySpiralBind(nn.Module):
     def __init__(self, D: int, K: int, cfg: object) -> None:
         super().__init__()

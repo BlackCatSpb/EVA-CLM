@@ -288,7 +288,7 @@ class WideBindConfig:
     # отставала от кода; исправлено 2026-09-13 по MATHEMATICAL_ANALYSIS E3.
     # T0 — запасной time-floor, не блок: компетентный слой открывается раньше.
     # r0/rs (0.3/0.2) поднимают потолок readiness до ~0.97.
-    matur_bridge_readiness: bool = True
+
     matur_bridge_r0: float = 0.3    # центр сигмоиды готовности (доля падения лосса)
     matur_bridge_rs: float = 0.2    # наклон сигмоиды готовности
 
@@ -301,15 +301,15 @@ class WideBindConfig:
     collective_layer: bool = True
     collective_layer_idx: int = None
     collective_read_out: bool = True
-    collective_S: int = 8
+
     collective_uncert_theta: float = 0.5
     collective_uncert_kappa: float = 3.0
     collective_contra_thresh: float = -0.1
     collective_contra_gain: float = 6.0
-    collective_birth_gap: float = 0.55
+
     collective_maturity_thresh: float = 0.12
 
-    log_scale_l2_weight: float = 0.01  # L2 on exp(log_scale) > 10 to prevent gradient explosion
+
     div_weight: float = 10.0   # sigmoid-bounded log_scale divergence. NOTE
                                # (M64.10/T13): in the align mode every aux term
                                # (including this one) goes through the spectral
@@ -383,23 +383,23 @@ class WideBindConfig:
     conv_kernel: int = 48
 
     # Spectral
-    spec_lo: float = 0.5
-    spec_hi: float = 1.5
-    lambda_sliding: bool = True
+
+
+
 
     # Memory
-    cov_multi_timescale: bool = True
-    cov_tau_lo: int = 3
-    cov_tau_hi: int = 200
+
+
+
 
     # Gate sparsity (auxiliary loss weight for expert specialization)
-    gate_l1_weight: float = 0.0001   # L1 penalty on expert gates (0=disabled)
+
     # Expert reinforcement: align gate with usefulness prediction
-    reinforce_weight: float = 0.001  # MSE(gate, usefulness) aux loss weight
+
     # Load balancing: encourages uniform expert usage across tokens
-    balance_weight: float = 0.026  # λ⁻⁶ → HHI-based load balancing (adaptive)
+
     # Diversity loss: decorrelate per-group MLP outputs
-    diversity_weight: float = 0.001  # ||cov - I||² weight (0=disabled)
+
     # Nuclear norm regularization for bind W_proj
     orth_weight: float = 0.0  # B2: was 1e-4=ON with 24× D² gram products (multi-GB) — the other dataclass had documented 0; unified off
     # Surprisal-weighted loss: focus on informative tokens
@@ -581,7 +581,7 @@ class WideBindConfig:
 
     # ─── Unified τ-field (TauConfig) ───
     # All τ-dependent quantities derived from ONE set of parameters.
-    tau_enabled: bool = True          # use unified tau_config (replaces _vsa_log_param + _tau_l_dev)
+
     tau_min: float = 8.0              # fastest layer (shallow)
     tau_max: float = 512.0            # slowest layer (deep)
     tau_dev_max: float = 0.3          # max deviation of log-space increments (cumsum → monotonic tau)

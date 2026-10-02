@@ -235,7 +235,6 @@ class EVABlock(nn.Module):
         if tau_config is not None and hasattr(tau_config, 'tau_norm'):
             with torch.no_grad():
                 self._tau_norm = tau_config.tau_norm[layer_idx].item()
-                self._tau_norm_t = tau_config.tau_norm[layer_idx].detach()
         # Keep the τ-field so the mirror can bind its gate authorities to τ
         # (intent_alpha etc.); previously the mirror always saw tau_config=None,
         # which silently disabled all τ-ties inside GroupedCognitiveMirror.
@@ -518,6 +517,11 @@ class EVABlock(nn.Module):
         def _nan_ret(hh):
             # T9 (ревью R1/R2): при включённой ветви NaN-пути несут cov-состояние
             # (не теряют его молча); при выключенной — прежний 5-кортеж.
+            # M65-opt: _nan_at писался и НИКЕМ не читался — теперь
+            # одноразовый лог (иначе диагностика места NaN была мертва).
+            if self._nan_at and not getattr(self, '_nan_logged', False):
+                self._nan_logged = True
+                print(f'[NaN] L{self.layer_idx}: {self._nan_at}', flush=True)
             _t = (_nan_mem, _nan_mem, _nan_conv, None, None)
             if self.cov_memory is not None:
                 _t = _t + (cov_state_out,)
