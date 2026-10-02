@@ -9,7 +9,7 @@ from torch import nn
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.adaptation import GradientClipper, nonfinite_gradient_names  # noqa: E402
-from core.block import _scan_chunk  # noqa: E402
+from core.block import _scan_chunk, _soft_floor  # noqa: E402
 
 
 def _floored_case(ds0):
@@ -37,9 +37,10 @@ def test_floored_scan_matches_fp64_reference():
     torch.manual_seed(0)
     d_s = torch.tensor([0.3997, 0.7951, 0.9443, 0.9858])
     decay = (d_s.view(1, 1, 4, 1) * torch.rand(1, 32, 4, 256)).clamp(0.01, 1.0)
-    floored = torch.maximum(decay, d_s.view(1, 1, 4, 1).pow(2.0))
-    b = torch.randn(1, 32, 4, 256)
     floor_log = (2.0 * d_s.log()).view(1, 1, 4, 1)
+    # эталон: та же мягкая семантика пола, но в fp64 legacy-пути
+    floored = torch.exp(_soft_floor(torch.log(decay.clamp(min=1e-6)), floor_log))
+    b = torch.randn(1, 32, 4, 256)
     new = _scan_chunk(b, decay, floor_log=floor_log)[0]
     ref = _scan_chunk(b, floored)[0]                  # legacy fp64 exact path
     rel = float((new - ref).norm() / ref.norm())

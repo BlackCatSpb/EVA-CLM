@@ -225,16 +225,14 @@ def test_blacklist_threshold_is_strict():
     assert led.allow_birth(q, step=500, thr=cos - 1e-6) is False
 
 
-import pytest
-
-
-@pytest.mark.xfail(reason='ПРЕДСУЩЕСТВУЮЩИЙ баг (найден аудитом агентов): в '
-                          'чистом пути gc=False bind-параметры последнего слоя '
-                          '(w_d/b_d/w_d_pen) мёртвы — влияют только на detached '
-                          'состояние; градиенты им сейчас даёт recompute-'
-                          'артефакт gc=True. Корневой фикс — проводка '
-                          'градиента decay в чистый forward.', strict=True)
 def test_bind_pen_dead_in_clean_path():
+    # ИСПРАВЛЕНО (корневой фикс _soft_floor в core/block.py): жёсткий
+    # clamp_min(log_a, k*log(d_s)) в _scan_chunks у медленной лестницы
+    # (d_s -> 1) клампил ВСЕ входы (frac_clamped=1.0) -> локальный якобиан
+    # d(combined)/d(decay) == 0 -> bind-параметры последнего слоя получали
+    # ровно нулевой градиент в чистом gc=False пути. Мягкий пол возвращает
+    # градиент (softplus-колено), forward меняется <= ~0.7% на зажатых входах.
+    # Этот тест — замок на отсутствие регрессии: он ОБЯЗАН проходить.
     cfg = _cfg(n_layers=2, D=512, mlp_groups=4, code_dim=16, code_sparsity=4,
                vocab=1820, gradient_checkpointing=False,
                intent_bridge=True, memory_bank=True, bridge_conn=0.1,

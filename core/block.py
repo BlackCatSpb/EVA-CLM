@@ -34,6 +34,26 @@ def _stream_cap(x, cap):
     m = x.abs().amax(dim=-1, keepdim=True)
     return x * (cap / m.clamp_min(cap))
 
+_SOFT_FLOOR_T = 0.01   # температура мягкого пола (log-space, ~1% затухания)
+
+def _soft_floor(x: torch.Tensor, floor: torch.Tensor) -> torch.Tensor:
+    """Smooth max(x, floor): exact for x-floor > 20*T, softplus-knee below.
+
+    КОРНЕВОЙ ФИКС bind-градиента (найден аудитом, диагностирован зондами):
+    жёсткий clamp_min(log_a, k*log(d_s)) обнулял градиент bind-параметров.
+    У медленной лестницы (d_s -> 1, глубокие слои) пол k*log(d_s) лежит ВЫШЕ
+    каждого log(decay): маска клампа пуста (frac_clamped=1.0), локальный
+    якобиан d(combined)/d(decay) == 0 точно (замер: 0 против 3.8e4 у быстрого
+    слоя) -> w_d/b_d/w_d_pen получали ровно нулевой градиент в чистом пути
+    gc=False (в gc=True ненулевые значения давал fp-шум recompute, не
+    обучение). Ниже колена градиент softplus'(d) в (0,1) — никогда не ноль;
+    значение не ниже жёсткого пола (безопасность M26/F2 сохранена: |log_a| не
+    превышает прежней границы), отличие от клампа <= T*ln2 ~ 0.7%.
+    Паддинг (decay=1): d-floor > 0.2 -> точное x (бит-в-бит, как раньше)."""
+    t = _SOFT_FLOOR_T
+    d = x - floor
+    return floor + torch.where(d > 20.0 * t, d, F.softplus(d / t) * t)
+
 def pen_decay_factor(pen: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """Prediction-error modulation of the decay gate, CENTERED at 1.0 (audit
     M3): the old form 1 − 0.5·σ(pen+w) applied ≈0.75 to EVERY channel already
@@ -72,8 +92,8 @@ def _scan_chunk(b_chunk: torch.Tensor, d_chunk: torch.Tensor, floor_log=None,
     """
     if floor_log is not None:
         # M26: tail-referenced, caller dtype (fp32). floor_log itself is tiny.
-        log_a = torch.log(d_chunk.clamp(min=_EPS_SCAN))
-        log_a = log_a.clamp_min(floor_log.to(log_a.dtype))
+        log_a = _soft_floor(torch.log(d_chunk.clamp(min=_EPS_SCAN)),
+                            floor_log.to(torch.float32))
         log_cum = torch.cumsum(log_a, dim=1)
         anchor = log_cum[:, -1:]                                  # per-column tail
         u = b_chunk * torch.exp(anchor - log_cum)                 # |u| <= |b|
@@ -129,7 +149,7 @@ def _scan_chunks(b_in: torch.Tensor, d_in: torch.Tensor, floor_log=None,
     else:
         b4 = b_in.reshape(B * nc, chunk, S, D)
         d4 = d_in.reshape(B * nc, chunk, S, D)
-    log_a = torch.log(d4.clamp(min=_EPS_SCAN)).clamp_min(floor_log.to(d4.dtype))
+    log_a = _soft_floor(torch.log(d4.clamp(min=_EPS_SCAN)), floor_log.to(d4.dtype))
     log_cum = torch.cumsum(log_a, dim=1)                      # within-chunk
     anchor = log_cum[:, -1:]                                  # (B*nc,1,S,D)
     u = b4 * torch.exp(anchor - log_cum)                      # |u| <= |b|

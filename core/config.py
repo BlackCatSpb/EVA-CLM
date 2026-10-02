@@ -630,14 +630,18 @@ class WideBindConfig:
     accum_steps: int = 1  # effective batch = batch_size * seq_len * accum_steps
 
     compile: bool = False
-    # M65-opt2 (аудит A5, КРИТИЧНО): recompute при checkpointing повторно
-    # исполняет forward с УЖЕ сдвинутыми EMA (замер агента: 134 несовпадения
-    # градиентов, worst 5.8e-3; фикс зеркала в M65-opt2 снизил до 6.9e-6).
-    # НО: дефолт пока True вынужденно — в ЧИСТОМ пути (False) bind-параметры
-    # w_d/b_d/w_d_pen последнего слоя МЁРТВЫ (влияют лишь на detached
-    # состояние); градиенты им сейчас даёт ИМЕННО recompute-артефакт.
-    # Корневой фикс (проводка градиента decay + чистый recompute) —
-    # первоочередная задача; см. xfail-замок test_bind_pen_dead_in_clean_path.
+    # M65-opt2 (аудит A5): recompute при checkpointing повторно исполняет
+    # forward с уже сдвинутыми EMA (замер агента: 134 несовпадения градиентов,
+    # worst 5.8e-3; узкий restore зеркала снизил до 6.9e-6). Остаточная
+    # примесь pen-пути 6.9e-6 — fp-уровень; корневой фикс (вынос апдейтов из
+    # checkpointed-региона) в очереди.
+    # ИСТОРИЯ bind-бага (закрыт): в чистом пути gc=False w_d/b_d/w_d_pen
+    # последнего слоя получали РОВНО нулевой градиент — причина найдена
+    # зондами: жёсткий clamp_min(log_a, k*log(d_s)) в _scan_chunks у медленной
+    # лестницы (d_s -> 1) зажимал все входы (frac_clamped=1.0, локальный
+    # якобиан 0 против 3.8e4 у быстрого слоя). Фикс — _soft_floor (softplus-
+    # колено, T=0.01): градиент жив, forward <= 0.7% на зажатых входах.
+    # Замок: tests/test_audit_agents_fixes.py::test_bind_pen_dead_in_clean_path.
     gradient_checkpointing: bool = True
 
     # Training
