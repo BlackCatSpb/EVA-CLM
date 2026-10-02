@@ -466,6 +466,11 @@ class SigmoidCodedHead(nn.Module):
             # re-calibrates within ~1000 steps after a resume).
             self.lacuna_ema: float = float(getattr(cfg, 'head_lacuna_ema', 0.99))
             self.register_buffer('ell_ema', torch.zeros(1), persistent=False)
+            # M65-opt: python-флаги готовности lazy-init — убирают per-forward
+            # sync `float(ell_ema)` / `float(_chi_ladder.sum())` (проверка
+            # буфера случается максимум раз за сессию/резюм).
+            self._ell_ema_ready: bool = False
+            self._chi_ladder_ready: bool = False
             # T9.7 (мета-архитектура): ЛЕСТНИЦА ПРОТИВОРЕЧИЙ вместо одной EMA.
             # Регистры на τ-шкалах; по умолчанию — лестница кэша
             # (cfg.head_lacuna_ladder: 8/32/128/512/2048/8192, ×4), т.е. горизонты
@@ -760,17 +765,26 @@ class SigmoidCodedHead(nn.Module):
             _chi = getattr(self, '_chi_in', None)
             if _chi is not None and torch.is_tensor(_chi):
                 _cm = _chi.detach().float().mean()
-                if float(self._chi_ladder.sum()) <= 0.0:
-                    self._chi_ladder.fill_(_cm)
+                # M65-opt: готовность — python-флаг (см. __init__)
+                if not self._chi_ladder_ready:
+                    if float(self._chi_ladder.sum()) > 0.0:
+                        self._chi_ladder_ready = True    # восстановлена из чекпоинта
+                    else:
+                        self._chi_ladder.fill_(_cm)
+                        self._chi_ladder_ready = True
                 elif self.training:
                     self._chi_ladder.mul_(self._ladder_decay).add_(
                         (1.0 - self._ladder_decay) * _cm)
-            if float(self.ell_ema) <= 0.0:
-                # lazy init in BOTH modes (a fresh model must not saturate the
-                # gate at eval) ...
-                _m0 = float(ell.detach().mean())
-                self.ell_ema.fill_(_m0)
-                self.ell_ladder.fill_(_m0)
+            if not self._ell_ema_ready:
+                if float(self.ell_ema) > 0.0:
+                    self._ell_ema_ready = True           # восстановлена из чекпоинта
+                else:
+                    # lazy init in BOTH modes (a fresh model must not saturate the
+                    # gate at eval) ...
+                    _m0 = float(ell.detach().mean())
+                    self.ell_ema.fill_(_m0)
+                    self.ell_ladder.fill_(_m0)
+                    self._ell_ema_ready = True
             elif self.training:
                 # ... but the running statistic only moves in training (M55c:
                 # the M8 eval-isolation doctrine — eval must not drift it).

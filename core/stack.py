@@ -583,7 +583,8 @@ class EVAStack(nn.Module):
                 _alpha_i = (1.0 - 1.0 / _tau_l_i)
                 # U8: τ-scheduled per-expert DEVIATION of the carry fraction:
                 # centered (2σ(w)−1) so w=0 means exactly the τ-horizon base.
-                _expert_mod = (2.0 * torch.sigmoid(self._w_alpha_expert) - 1.0) * (2.0 * self.tau_config.tau_norm[i].item() - 1.0)
+                # M65-opt: снимок из update() вместо .item() на каждый слой
+                _expert_mod = (2.0 * torch.sigmoid(self._w_alpha_expert) - 1.0) * (2.0 * self.tau_config.tau_norm_py[i] - 1.0)
                 _alpha_i_per_expert = (_alpha_i * (1.0 + _expert_mod)).clamp(0.0, 0.999)  # (G,)
                 _a = _alpha_i_per_expert.view(1, 1, -1, 1)  # (1, 1, G, 1)
                 intent_streams[i] = _a * _bus_carried[i] + (1.0 - _a) * fresh_i
@@ -707,7 +708,7 @@ class EVAStack(nn.Module):
                     h, hp=_hp, pen=_pen, resvar=_resvar,
                     mat_gate=_mat, allow_write=True,
                     gate=layer.mirror._cached_gate,
-                    tau_norm=self.tau_config.tau_norm[0].item(),
+                    tau_norm=self.tau_config.tau_norm_py[0],   # M65-opt: снимок
                 )
                 h = h + _col_out
             if self.maturation is not None:
@@ -767,7 +768,9 @@ class EVAStack(nn.Module):
         # ─── Explicit Reasoning ───
         if self.explicit_reasoning:
             # U2: update τ-norm for reasoning budget
-            self._tau_norm_reasoning = self.tau_config.tau_norm.mean().item()
+            # M65-opt: среднее из снимка (без device-sync)
+            _tnp = self.tau_config.tau_norm_py
+            self._tau_norm_reasoning = sum(_tnp) / max(len(_tnp), 1)
             s = self.reasoning_scale
             if s > 0.0:
                 if self.reasoning_gate is not None:

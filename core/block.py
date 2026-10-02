@@ -467,9 +467,18 @@ class EVABlock(nn.Module):
         # gate-amplitude authority (intent_alpha) + τ-signal ladder every
         # forward so those τ-ties actually track the field (README §7/§8).
         if self.tau_config is not None:
-            with torch.no_grad():
-                _tn = float(self.tau_config.tau_norm[self.layer_idx].detach())
-                _ia = float(self.tau_config.intent_alpha[self.layer_idx].detach())
+            # M65-opt: Python-снимок τ-поля из TauConfig.update() (одна
+            # host-передача на forward вместо 24×2 .item() здесь). Снимок
+            # публикуется в update(), который вызывается ровно раз на forward.
+            _tn_py = getattr(self.tau_config, 'tau_norm_py', None)
+            _ia_py = getattr(self.tau_config, 'intent_alpha_py', None)
+            if _tn_py is not None and _ia_py is not None:
+                _tn = _tn_py[self.layer_idx]
+                _ia = _ia_py[self.layer_idx]
+            else:                       # фолбэк: чужой tau_config без снимков
+                with torch.no_grad():
+                    _tn = float(self.tau_config.tau_norm[self.layer_idx].detach())
+                    _ia = float(self.tau_config.intent_alpha[self.layer_idx].detach())
             self._tau_norm = _tn
             if hasattr(self.bind, '_tau_norm'):
                 self.bind._tau_norm = _tn
@@ -478,9 +487,10 @@ class EVABlock(nn.Module):
                 # как VSA/spectral). Флор — канонический TAU_MIN (tau_api),
                 # clamp здесь явный (конструкторный clamp живую запись не ловит).
                 from .tau_api import TAU_MIN as _TAU_MIN
-                self.cov_memory.tau = max(
-                    float(self.tau_config.tau_l[self.layer_idx].detach()),
-                    float(_TAU_MIN))
+                _tl_py = getattr(self.tau_config, 'tau_l_py', None)
+                _tl = (_tl_py[self.layer_idx] if _tl_py is not None
+                       else float(self.tau_config.tau_l[self.layer_idx].detach()))
+                self.cov_memory.tau = max(_tl, float(_TAU_MIN))
             mir = getattr(self, 'mirror', None)
             if mir is not None:
                 mir._intent_alpha = _ia

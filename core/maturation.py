@@ -139,7 +139,10 @@ class MaturationController(nn.Module):
         _tn_live = None
         if self.tau_config is not None:
             _tn_live = self.tau_config.tau_norm_live()      # B3: grad path to _tau_dev
-            self.tau_norm.data.copy_(_tn_live.detach())
+            # M65-opt: без `.data` (тот обходит счётчик версий тензора и прячет
+            # запись от version-стражей); no_grad делает то же без графа.
+            with torch.no_grad():
+                self.tau_norm.copy_(_tn_live.detach())
         elif tau_dev is not None:
             self._update_tau_norm(tau_dev)
         t: float = max(float(step), 1.0)

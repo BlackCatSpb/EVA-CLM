@@ -56,9 +56,16 @@ def layer_tau_ctx(layer, tau_config=None, layer_idx: Optional[int] = None) -> Tu
     m = getattr(layer, 'mirror', layer)
     li = getattr(layer, 'layer_idx', 0) or 0
     if tau_config is not None:
-        with torch.no_grad():
-            tau_norm = float(tau_config.tau_norm[li].detach().item())
-            alpha = float(tau_config.intent_alpha[li].detach().item())
+        # M65-opt: Python-снимки из TauConfig.update() (без sync'ов на слой)
+        _tn_py = getattr(tau_config, 'tau_norm_py', None)
+        _ia_py = getattr(tau_config, 'intent_alpha_py', None)
+        if _tn_py is not None and _ia_py is not None and li < len(_tn_py):
+            tau_norm = float(_tn_py[li])
+            alpha = float(_ia_py[li])
+        else:
+            with torch.no_grad():
+                tau_norm = float(tau_config.tau_norm[li].detach().item())
+                alpha = float(tau_config.intent_alpha[li].detach().item())
     else:
         tn = getattr(m, '_tau_norm_layer', None)
         al = getattr(m, '_intent_alpha', None)

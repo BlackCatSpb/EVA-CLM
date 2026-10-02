@@ -93,6 +93,11 @@ class TauConfig(nn.Module):
         # ─── Buffers (diagnostics) ───
         self.register_buffer('_tau_l_cache', torch.zeros(n_layers))
         self.register_buffer('_tau_norm_cache', torch.zeros(n_layers))
+        # M65-opt: Python-снимки τ-поля для горячего пути — заполняются в
+        # update() (ровно раз на forward); читатели берут их без device-sync'ов.
+        self.tau_l_py: list = [0.0] * n_layers
+        self.tau_norm_py: list = [0.0] * n_layers
+        self.intent_alpha_py: list = [0.0] * n_layers
         self.register_buffer('_mat_delay_cache', torch.zeros(n_layers))
         self.register_buffer('_gate_tau_cache', torch.zeros(n_layers))
         self.register_buffer('_alpha_cache', torch.zeros(n_layers))
@@ -261,6 +266,13 @@ class TauConfig(nn.Module):
             self._gate_tau_cache.copy_(self._compute_gate_tau(mat_gate).detach())
         else:
             self._gate_tau_cache.fill_(self.gate_tau_max)
+
+        # M65-opt: Python-снимки для горячего пути (блоки/мост/леджер читают без
+        # device-sync'ов). update() вызывается ровно раз на forward, поэтому это
+        # ОДНА host-передача вместо ~48 (24 слоя × 2 .item()) плюс точечных.
+        self.tau_l_py = tau_l.detach().tolist()
+        self.tau_norm_py = tau_norm.detach().tolist()
+        self.intent_alpha_py = self._alpha_live.detach().tolist()
 
     def get_tau_for_layer(self, layer_idx: int) -> float:
         return self._tau_l_cache[layer_idx].item()

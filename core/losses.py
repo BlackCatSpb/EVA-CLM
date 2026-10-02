@@ -212,7 +212,9 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         _anchor_w = float(getattr(stack.cfg, 'branch_var_anchor', 0.0))
         _ref = getattr(stack, '_branch_var_ref', None)
         _seen = []
-        _rms = {'conv': [], 'bind': [], 'mirror': []}   # M64.8r2 (M63-E telemetry)
+        # M65-opt: копим ТЕНЗОРЫ, один .tolist() после цикла — было 3 sync'а
+        # на слой (24 слоя × 3 = 72 host-передачи на шаг).
+        _rms_t = {'conv': [], 'bind': [], 'mirror': []}
         for layer in stack.layers:
             conv = getattr(layer, '_cache_conv_out', None)
             bnd = getattr(layer, '_cache_bind_out', None)
@@ -222,9 +224,9 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
                 vb = bnd.norm(dim=-1).var() + 1e-10
                 vm = mir.norm(dim=-1).var() + 1e-10
                 with torch.no_grad():
-                    _rms['conv'].append(float(vc.sqrt()))
-                    _rms['bind'].append(float(vb.sqrt()))
-                    _rms['mirror'].append(float(vm.sqrt()))
+                    _rms_t['conv'].append(vc.sqrt().detach().reshape(1))
+                    _rms_t['bind'].append(vb.sqrt().detach().reshape(1))
+                    _rms_t['mirror'].append(vm.sqrt().detach().reshape(1))
                 branch_loss = branch_loss + (torch.log(vc) - torch.log(vb)).pow(2)
                 branch_loss = branch_loss + (torch.log(vc) - torch.log(vm)).pow(2)
                 branch_loss = branch_loss + (torch.log(vb) - torch.log(vm)).pow(2)
@@ -244,10 +246,14 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         # the values ride in locals and are attached after it (the first landing
         # wrote them into the dict that was then overwritten — the round-3
         # verifier caught the loss).
-        if _rms['conv']:
-            _br_conv = sum(_rms['conv']) / len(_rms['conv'])
-            _br_bind = sum(_rms['bind']) / len(_rms['bind'])
-            _br_mirror = sum(_rms['mirror']) / len(_rms['mirror'])
+        if _rms_t['conv']:
+            # M65-opt: одна host-передача на все 3×N значений
+            _rms_vals = torch.stack(
+                [torch.cat(_rms_t[k]) for k in ('conv', 'bind', 'mirror')]
+            ).tolist()
+            _br_conv = sum(_rms_vals[0]) / len(_rms_vals[0])
+            _br_bind = sum(_rms_vals[1]) / len(_rms_vals[1])
+            _br_mirror = sum(_rms_vals[2]) / len(_rms_vals[2])
         else:
             _br_conv = _br_bind = _br_mirror = None
         if _anchor_w > 0.0 and _ref is not None:
@@ -352,19 +358,21 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     if n_decorr > 0:
         decorr_loss = decorr_loss / n_decorr
     
-    stack._cached_losses = {
-        'ce': ce_loss.item(),
-        'ce_raw': float(ce_raw.detach()) if ce_raw is not None else ce_loss.item(),  # M46
-        'pred': pred_loss.item() if isinstance(pred_loss, torch.Tensor) else pred_loss,
-        'gate_l1': gate_l1.item() if isinstance(gate_l1, torch.Tensor) else gate_l1,
-        'reinforce': reinforce_loss.item() if isinstance(reinforce_loss, torch.Tensor) else reinforce_loss,
-        'balance': balance_loss.item() if isinstance(balance_loss, torch.Tensor) else balance_loss,
-        'div': div_loss_raw.item() if isinstance(div_loss_raw, torch.Tensor) else div_loss_raw,
-        'alpha_novelty': alpha_novelty_loss.item() if isinstance(alpha_novelty_loss, torch.Tensor) else alpha_novelty_loss,
-        'signal_ent': signal_entropy.item() if isinstance(signal_entropy, torch.Tensor) else signal_entropy,
-        'ls_reg': log_scale_reg.item() if isinstance(log_scale_reg, torch.Tensor) else log_scale_reg,
-        'decorr': decorr_loss.item() if isinstance(decorr_loss, torch.Tensor) else decorr_loss,
-    }
+    # M65-opt: один device->host перенос вместо 11 `.item()` на шаг (каждый
+    # .item() сериализует пайплайн). Порядок ключей сохранён.
+    _tel_dev = ce_loss.device
+    _tel_flat = torch.cat([
+        (v.detach().float().reshape(1) if isinstance(v, torch.Tensor)
+         else torch.tensor([float(v)], dtype=torch.float32, device=_tel_dev))
+        for v in (ce_loss,
+                  ce_raw if ce_raw is not None else ce_loss,
+                  pred_loss, gate_l1, reinforce_loss, balance_loss,
+                  div_loss_raw, alpha_novelty_loss, signal_entropy,
+                  log_scale_reg, decorr_loss)
+    ]).tolist()
+    stack._cached_losses = dict(zip(
+        ('ce', 'ce_raw', 'pred', 'gate_l1', 'reinforce', 'balance', 'div',
+         'alpha_novelty', 'signal_ent', 'ls_reg', 'decorr'), _tel_flat))
     if _br_conv is not None:                      # M64.8r2: per-branch RMS
         stack._cached_losses['branch_r_conv'] = _br_conv
         stack._cached_losses['branch_r_bind'] = _br_bind
