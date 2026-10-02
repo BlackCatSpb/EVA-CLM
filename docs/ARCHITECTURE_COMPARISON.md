@@ -108,7 +108,7 @@ ADAPT = recurrence/adaptive compute.
 ## 5. Honest caveats (read before judging)
 
 - **Early research stage.** No standard LM benchmark numbers yet; all evidence is from a
-  single ~143M-param from-scratch run on a small corpus.
+  single ~183M-param from-scratch run on a small corpus.
 - **Unusual training dynamics by design.** CE routinely spikes (e.g. 10→32) during
   subsystem co-adaptation; this is expected, not a bug, per the monitoring policy.
 - **Phase-1 of the bridge is empirically not yet fully awake** at the checkpoint analyzed
@@ -122,7 +122,7 @@ ADAPT = recurrence/adaptive compute.
 
 ## 6. One-paragraph summary for a busy reviewer
 
-EVA is a 24-layer, ~143M-param cognitive-inspired LM that keeps a local
+EVA is a 24-layer, ~183M-param cognitive-inspired LM that keeps a local
 softmax-attention block per layer but surrounds it with VSA binding (`TrajectorySpiralBind`),
 vector-superposition memory, depthwise conv, spectral shaping, and gradient-aligned grouped
 experts. Its defining idea is an **Intent Bridge**: a detached, salience-gated cross-layer

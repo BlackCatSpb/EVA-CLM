@@ -32,12 +32,12 @@ EVA — нестандартная LLM-архитектура с метаког�
 
 **7. Что знать, если будешь править обучение**
 - **fp32 обязателен** (`use_amp=False`).
-- `notebooks/eva_colab.ipynb` имеет **СОБСТВЕННЫЙ inline training-loop (cell 9)** — он НЕ вызывает `scripts/train.py`. Правки `scripts/train.py` на Colab не применяются; меняй саму ячейку. В cell 9 обязательна строка `batch_size = getattr(cfg, 'batch_size', 1)` (иначе `NameError`).
+- `notebooks/eva_colab.ipynb` имеет **СОБСТВЕННЫЙ inline training-loop (cell 10; M65-OPT: сверено с JSON)** — он НЕ вызывает `scripts/train.py`. Правки `scripts/train.py` на Colab не применяются; меняй саму ячейку. В cell 10 обязательна строка `batch_size = getattr(cfg, 'batch_size', 1)` (иначе `NameError`).
 - В логах `loss` может быть **отрицательным** — это НОРМА для нестандартной композитной цели (куча aux-термов). Доверяй `ce` и `val_loss`, не `loss`.
 - `cos_sim(diversity, CE)` в `analyze.py` даёт взорванные числа (~1e10) — игнорируй.
 - `best.pt` — **живой** best-чекпоинт, перезаписывается при улучшении val (сейчас = step 3495).
 - **OOM-риск:** `scripts/diag_gate_gradalign.py` (сравнение `mlp_mod` с целью gradalign) грузит 2 чекпоинта × 2.2GB + графы и вызвал OOM на ноуте; делать memory-safe (batch=1, no графы сразу).
-- Журнал эксперимента: `docs/LIVE_TRAINING_LOG.md` (CRLF).
+- Журнал эксперимента: `docs/ARCHITECTURE_JOURNAL.md` (LIVE_TRAINING_LOG.md не существует — ссылка была битой).
 
 **8. Ключевые коммиты**
 Mini `f0aa2f5` (прототип) · main `6383883` (порт) · журнал `7b7078d`/`8666422`/`9aecb38`/`d6647d1`/`5944160`/`dc7bbeb`.
