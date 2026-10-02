@@ -7,6 +7,20 @@ import torch
 import torch.nn.functional as F
 
 
+# M65-opt: кэш единичных матриц (torch.eye аллоцировался на каждом шаге в
+# diversity/orthogonality/bridge-термах). Ключ — (n, device, dtype).
+_EYE_CACHE: dict = {}
+
+
+def _eye(n: int, device, dtype=torch.float32) -> torch.Tensor:
+    key = (int(n), str(device), dtype)
+    e = _EYE_CACHE.get(key)
+    if e is None:
+        e = torch.eye(n, device=device, dtype=dtype)
+        _EYE_CACHE[key] = e
+    return e
+
+
 def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
     """Compute CE and auxiliary losses separately. Returns raw (unweighted) values.
 
@@ -126,7 +140,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             # regardless of ‖y‖; raw covariance scaled as ‖y‖⁴ and exploded in A2.
             y = (y - y.mean(dim=0)) / (y.std(dim=0) + 1e-8)
             corr = y.T @ y / (y.shape[0] - 1 + 1e-10)
-            div = F.mse_loss(corr, torch.eye(G, device=group_out.device))
+            div = F.mse_loss(corr, _eye(G, group_out.device))   # M65-opt: кэш
             # τ-tied per-layer weight: intent_alpha = 1 − exp(−τ_l/τ_min)
             # (τ-field expresses exploration authority; deep layers explore more).
             alpha = 1.0 - torch.exp(-stack.tau_config.tau_l[i].detach() / stack.tau_config.tau_min)
@@ -156,7 +170,7 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             if bind_W is not None and bind_W.ndim == 2:
                 W_hat = bind_W / bind_W.norm(dim=0, keepdim=True).clamp(min=1e-8)
                 gram = W_hat.T @ W_hat
-                orth = F.mse_loss(gram, torch.eye(gram.shape[0], device=gram.device))
+                orth = F.mse_loss(gram, _eye(gram.shape[0], gram.device))  # M65-opt: кэш
                 orth_loss = orth_loss + orth
                 n_orth = n_orth + 1
     if n_orth > 0:
@@ -227,15 +241,17 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
                     _rms_t['conv'].append(vc.sqrt().detach().reshape(1))
                     _rms_t['bind'].append(vb.sqrt().detach().reshape(1))
                     _rms_t['mirror'].append(vm.sqrt().detach().reshape(1))
-                branch_loss = branch_loss + (torch.log(vc) - torch.log(vb)).pow(2)
-                branch_loss = branch_loss + (torch.log(vc) - torch.log(vm)).pow(2)
-                branch_loss = branch_loss + (torch.log(vb) - torch.log(vm)).pow(2)
+                # M65-opt: логи считаются один раз (было 6 log на слой)
+                _lc, _lb, _lm = torch.log(vc), torch.log(vb), torch.log(vm)
+                branch_loss = branch_loss + (_lc - _lb).pow(2)
+                branch_loss = branch_loss + (_lc - _lm).pow(2)
+                branch_loss = branch_loss + (_lb - _lm).pow(2)
                 n_branch = n_branch + 3
                 if _anchor_w > 0.0:
                     _vs = torch.stack([vc, vb, vm])
                     if _ref is None:
                         _ref = _vs.detach().mean().clone()
-                    branch_loss = branch_loss + _anchor_w * (torch.log(_vs) - torch.log(_ref)).pow(2).sum()
+                    branch_loss = branch_loss + _anchor_w * (torch.stack([_lc, _lb, _lm]) - torch.log(_ref)).pow(2).sum()
                     n_branch = n_branch + 3
                     _seen.append(_vs.detach().mean())
         if n_branch > 0:

@@ -225,7 +225,8 @@ class GroupedCognitiveMirror(nn.Module):
         self.w_gate = nn.Parameter(torch.randn(G, self.k) * gate_std)
         self.b_gate = nn.Parameter(torch.zeros(G))
         # w_delta_gate: (G, k) — maps delta (correction) to gate logit
-        self.w_delta_gate = nn.Parameter(torch.randn(G, self.k) / math.sqrt(self.k))
+        self._sqrt_k: float = math.sqrt(self.k)   # M65-opt
+        self.w_delta_gate = nn.Parameter(torch.randn(G, self.k) / self._sqrt_k)
         gate_bias_val: torch.Tensor = torch.linspace(-gate_bias_scale, gate_bias_scale, G)
         self.gate_bias = nn.Parameter(gate_bias_val)
         # M64.6: _alpha_novelty_weight removed with the push (the loss term owns

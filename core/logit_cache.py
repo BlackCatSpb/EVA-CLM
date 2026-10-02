@@ -412,6 +412,7 @@ class LogitAttention(nn.Module):
             self.K_bits = None
         self._bit_norm = float(max(sparsity, 1e-6))
         self.head_dim = self.kv_dim // n_heads
+        self._sqrt_head_dim = math.sqrt(self.head_dim)   # M65-opt
 
         # Projections for h (training mode)
         self.q_proj = nn.Linear(D, self.kv_dim, bias=False)
@@ -718,7 +719,7 @@ class LogitAttention(nn.Module):
         V_cache = V_cache.view(B, M, self.n_heads, self.head_dim).transpose(1, 2)
 
         tau = torch.exp(self.log_tau).clamp(min=0.1, max=10.0)
-        scale = math.sqrt(self.head_dim) * tau
+        scale = self._sqrt_head_dim * tau
         attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / scale
         attn_weights = F.softmax(attn_weights, dim=-1)
 

@@ -70,8 +70,16 @@ class ReasoningMemory(nn.Module):
         k: torch.Tensor = self.step_key(reasoning_buffer)
         v: torch.Tensor = self.step_value(reasoning_buffer)
 
-        attn: torch.Tensor = torch.sigmoid(q @ k.transpose(-2, -1) / math.sqrt(D))
-        mask: torch.Tensor = (torch.arange(self.max_steps, device=h.device, dtype=h.dtype)
+        # M65-opt: arange и sqrt(D) кэшируются на (device, dtype) вместо
+        # пересоздания на каждом шаге рассуждения
+        _key = (str(h.device), h.dtype)
+        if getattr(self, '_step_idx_key', None) != _key:
+            self._step_idx = torch.arange(self.max_steps, device=h.device, dtype=h.dtype)
+            self._step_idx_key = _key
+        if getattr(self, '_sqrt_D', None) is None:
+            self._sqrt_D = math.sqrt(D)
+        attn: torch.Tensor = torch.sigmoid(q @ k.transpose(-2, -1) / self._sqrt_D)
+        mask: torch.Tensor = (self._step_idx
                 < reasoning_count.to(h.dtype)).view(1, 1, self.max_steps)
         attn = attn * mask
         context: torch.Tensor = attn @ v

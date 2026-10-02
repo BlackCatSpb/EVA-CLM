@@ -182,6 +182,7 @@ class ExactSequenceMemory(nn.Module):
         self.proj: nn.Linear = nn.Linear(k, D)
         self.k: int = k
         self.softmax_free: bool = softmax_free
+        self._sqrt_k: float = math.sqrt(k)   # M65-opt: без math.sqrt на forward
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         q = self.query(h)
@@ -190,11 +191,11 @@ class ExactSequenceMemory(nn.Module):
         if self.softmax_free:
             # LaCUR: сигмоид-нормированное среднее (проводимость, не конкуренция).
             # Нормировка по сумме держит выход в выпуклой оболочке -> без взрыва.
-            scores = q @ k.transpose(-2, -1) / math.sqrt(self.k)
+            scores = q @ k.transpose(-2, -1) / self._sqrt_k
             A = torch.sigmoid(scores)
             A = A / A.sum(dim=-1, keepdim=True).clamp(min=1e-6)
             return self.proj(A @ v)
-        attn = torch.softmax(q @ k.transpose(-2, -1) / math.sqrt(self.k), dim=-1)
+        attn = torch.softmax(q @ k.transpose(-2, -1) / self._sqrt_k, dim=-1)
         return self.proj(attn @ v)
 
 class EVABlock(nn.Module):
@@ -733,7 +734,7 @@ class EVABlock(nn.Module):
             # e^{A_t-A_last} past fp32 -> inf*0 = NaN (measured: tau_s=0.3 NaN).
             # Bound the floor itself — the binding constraint on |log_a|; a
             # no-op in the healthy regime (tau_s ~ 8..512).
-            _fl18 = _fl18.clamp_min(-_SCAN_LOG_MAX / float(CHUNK))
+            _fl18 = _fl18.clamp_min(-_SCAN_LOG_MAX / CHUNK)
         # M26: floored scans are tail-referenced fp32 (finite fwd+bwd at any
         # floor); floor-off stays the legacy fp64 exactness path. No per-layer
         # precision decision, no GPU sync, no fp64 graph.
@@ -843,7 +844,7 @@ class EVABlock(nn.Module):
             BL = B * L
             hp_g = hp.permute(2, 0, 1, 3).reshape(g, BL, self.mirror.k)  # batched matmul (stable under AMP)
             read_mod = torch.matmul(hp_g, self.w_q_dyn)  # (g, BL, d)
-            read_mod = torch.sigmoid(read_mod.permute(1, 0, 2).view(B, L, g, d) / math.sqrt(self.mirror.k))
+            read_mod = torch.sigmoid(read_mod.permute(1, 0, 2).view(B, L, g, d) / self.mirror._sqrt_k)
             mem_read_g = mem_read.reshape(B, L, g, d)
             mem_expert = mem_read_g * read_mod
             mem_modulated = (mem_expert * mm).reshape(B, L, D)

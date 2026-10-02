@@ -99,6 +99,10 @@ class MaturationController(nn.Module):
         self.rs: float = float(getattr(cfg, "matur_rs", 0.2))
         self.ema: float = float(getattr(cfg, "matur_ema", 0.999))
         self.warm: int = int(getattr(cfg, "matur_warm", 300))
+        # M65-opt: лог-константы лестницы — один раз (было 5 math.log на шаг)
+        self._log_tau_min: float = math.log(self.tau_min)
+        self._log_tau_max: float = math.log(self.tau_max)
+        self._log_tau_range: float = self._log_tau_max - self._log_tau_min
 
         self.bridge_control_threshold: float = float(
             getattr(cfg, "matur_bridge_control_threshold", 0.1))
@@ -111,13 +115,11 @@ class MaturationController(nn.Module):
 
     def _update_tau_norm(self, dev: torch.Tensor) -> None:
         """Update tau_norm from deviation tensor."""
-        log_tau: float = math.log(self.tau_min) + (
-            math.log(self.tau_max) - math.log(self.tau_min)
-        ) * self._lf * (1.0 + 0.1 * dev)
-        denom: float = math.log(self.tau_max) - math.log(self.tau_min)
+        log_tau: float = self._log_tau_min + self._log_tau_range * self._lf * (1.0 + 0.1 * dev)
+        denom: float = self._log_tau_range
         if denom <= 0:
             denom = 1.0
-        self.tau_norm.copy_(((log_tau - math.log(self.tau_min)) / denom).clamp(0.0, 1.0))
+        self.tau_norm.copy_(((log_tau - self._log_tau_min) / denom).clamp(0.0, 1.0))
 
     def step_gate(
         self,
