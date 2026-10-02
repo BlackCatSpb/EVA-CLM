@@ -1,0 +1,150 @@
+﻿====================================================================================================
+FINAL gc=False: median step=1.7067s (n=3), per-step totals=['1.707', '2.016', '1.567']
+====================================================================================================
+--- TOP-LEVEL ---
+  embed                               0.0007s    0.04% of step  calls=1
+  stack.forward                       0.2736s   16.03% of step  calls=1
+  observe_output                      0.0002s    0.01% of step  calls=1
+  losses.compute_losses               0.0107s    0.63% of step  calls=1
+  balancer.backward                   1.3580s   79.57% of step  calls=1
+  clipper.clip                        0.0316s    1.85% of step  calls=1
+  optimizer.step                      0.0221s    1.29% of step  calls=1
+  scheduler.step                      0.0001s    0.00% of step  calls=1
+--- FORWARD COMPONENTS (inside stack.forward) ---
+  head.forward                        0.0083s    0.49% of step  calls=7
+  head.log_probs                      0.0020s    0.12% of step  calls=1
+  head.knowledge_signal               0.0026s    0.15% of step  calls=1
+  head.last_conf                      0.0025s    0.15% of step  calls=4
+  reasoning.loop                      0.0104s    0.61% of step  calls=1
+  bridge.inject                       0.0011s    0.07% of step  calls=4
+  bridge.probe                        0.0023s    0.13% of step  calls=4
+  bridge.record                       0.0000s    0.00% of step  calls=4
+  bridge.stream                       0.0003s    0.02% of step  calls=4
+  concept                             0.0032s    0.19% of step  calls=1
+  cache.augment                       0.0051s    0.30% of step  calls=1
+  intent_probe                        0.0010s    0.06% of step  calls=4
+  tau_config.update                   0.0004s    0.02% of step  calls=1
+--- BLOCK COMPONENTS (per-layer summed) ---
+  mirror.L0#                          1.0000s   58.59% of step  calls=0
+  mirror.L1#                          1.0000s   58.59% of step  calls=0
+  vpm.L2#                             1.0000s   58.59% of step  calls=0
+  bind.L0                             0.0193s    1.13% of step  calls=1
+  block.L1#                           1.0000s   58.59% of step  calls=0
+  block.L2                            0.0653s    3.82% of step  calls=1
+  block.L0                            0.0514s    3.01% of step  calls=1
+  vpm.L1#                             1.0000s   58.59% of step  calls=0
+  bind.L3#                            1.0000s   58.59% of step  calls=0
+  mirror.L2                           0.0224s    1.31% of step  calls=1
+  mirror.L0                           0.0110s    0.65% of step  calls=1
+  bind.L1                             0.0211s    1.24% of step  calls=1
+  vpm.L0                              0.0010s    0.06% of step  calls=1
+  mlp.L0#                             1.0000s   58.59% of step  calls=0
+  mlp.L2                              0.0020s    0.12% of step  calls=1
+  vpm.L0#                             1.0000s   58.59% of step  calls=0
+  mlp.L1                              0.0018s    0.11% of step  calls=1
+  block.L1                            0.0604s    3.54% of step  calls=1
+  vpm.L3                              0.0008s    0.05% of step  calls=1
+  block.L3                            0.0593s    3.47% of step  calls=1
+  vpm.L1                              0.0012s    0.07% of step  calls=1
+  mlp.L2#                             1.0000s   58.59% of step  calls=0
+  bind.L0#                            1.0000s   58.59% of step  calls=0
+  mirror.L3                           0.0127s    0.74% of step  calls=1
+  block.L3#                           1.0000s   58.59% of step  calls=0
+  mlp.L3#                             1.0000s   58.59% of step  calls=0
+  mirror.L3#                          1.0000s   58.59% of step  calls=0
+  vpm.L3#                             1.0000s   58.59% of step  calls=0
+  mlp.L0                              0.0011s    0.06% of step  calls=1
+  bind.L3                             0.0200s    1.17% of step  calls=1
+  vpm.L2                              0.0013s    0.08% of step  calls=1
+  block.L0#                           1.0000s   58.59% of step  calls=0
+  bind.L2                             0.0188s    1.10% of step  calls=1
+  bind.L2#                            1.0000s   58.59% of step  calls=0
+  mlp.L1#                             1.0000s   58.59% of step  calls=0
+  bind.L1#                            1.0000s   58.59% of step  calls=0
+  mirror.L2#                          1.0000s   58.59% of step  calls=0
+  mirror.L1                           0.0134s    0.78% of step  calls=1
+  mlp.L3                              0.0011s    0.06% of step  calls=1
+  block.L2#                           1.0000s   58.59% of step  calls=0
+--- SCAN ---
+  scan.chunks                         0.0164s    0.96% of step  calls=0
+  scan.combine                        0.0126s    0.74% of step  calls=0
+--- AUTOGRAD TRAVERSALS (last step) ---
+  traversal[0] 0.3774s
+  traversal[1] 0.3856s
+  traversal[2] 0.4273s
+  sum=1.1902s
+====================================================================================================
+FINAL gc=True: median step=3.7472s (n=3), per-step totals=['3.383', '4.324', '3.747']
+====================================================================================================
+--- TOP-LEVEL ---
+  embed                               0.0008s    0.02% of step  calls=1
+  stack.forward                       0.4869s   12.99% of step  calls=1
+  observe_output                      0.0003s    0.01% of step  calls=1
+  losses.compute_losses               0.0187s    0.50% of step  calls=1
+  balancer.backward                   3.0382s   81.08% of step  calls=1
+  clipper.clip                        0.0505s    1.35% of step  calls=1
+  optimizer.step                      0.0391s    1.04% of step  calls=1
+  scheduler.step                      0.0001s    0.00% of step  calls=1
+--- FORWARD COMPONENTS (inside stack.forward) ---
+  head.forward                        0.0108s    0.29% of step  calls=7
+  head.log_probs                      0.0027s    0.07% of step  calls=1
+  head.knowledge_signal               0.0039s    0.10% of step  calls=1
+  head.last_conf                      0.0033s    0.09% of step  calls=4
+  reasoning.loop                      0.0140s    0.37% of step  calls=1
+  bridge.inject                       0.0015s    0.04% of step  calls=4
+  bridge.probe                        0.0032s    0.09% of step  calls=4
+  bridge.record                       0.0000s    0.00% of step  calls=4
+  bridge.stream                       0.0005s    0.01% of step  calls=4
+  concept                             0.0048s    0.13% of step  calls=1
+  cache.augment                       0.0078s    0.21% of step  calls=1
+  intent_probe                        0.0013s    0.03% of step  calls=4
+  tau_config.update                   0.0005s    0.01% of step  calls=1
+--- BLOCK COMPONENTS (per-layer summed) ---
+  mirror.L0#                          4.0000s  106.75% of step  calls=0
+  mirror.L1#                          4.0000s  106.75% of step  calls=0
+  vpm.L2#                             4.0000s  106.75% of step  calls=0
+  bind.L0                             0.1201s    3.20% of step  calls=4
+  block.L1#                           4.0000s  106.75% of step  calls=0
+  block.L2                            0.3782s   10.09% of step  calls=4
+  block.L0                            0.4051s   10.81% of step  calls=4
+  vpm.L1#                             4.0000s  106.75% of step  calls=0
+  bind.L3#                            4.0000s  106.75% of step  calls=0
+  mirror.L2                           0.1028s    2.74% of step  calls=4
+  mirror.L0                           0.1015s    2.71% of step  calls=4
+  bind.L1                             0.1146s    3.06% of step  calls=4
+  vpm.L0                              0.0076s    0.20% of step  calls=4
+  mlp.L0#                             4.0000s  106.75% of step  calls=0
+  mlp.L2                              0.0144s    0.38% of step  calls=4
+  vpm.L0#                             4.0000s  106.75% of step  calls=0
+  mlp.L1                              0.0177s    0.47% of step  calls=4
+  block.L1                            0.4129s   11.02% of step  calls=4
+  vpm.L3                              0.0089s    0.24% of step  calls=4
+  block.L3                            0.3839s   10.25% of step  calls=4
+  vpm.L1                              0.0077s    0.20% of step  calls=4
+  mlp.L2#                             4.0000s  106.75% of step  calls=0
+  bind.L0#                            4.0000s  106.75% of step  calls=0
+  mirror.L3                           0.1231s    3.29% of step  calls=4
+  block.L3#                           4.0000s  106.75% of step  calls=0
+  mlp.L3#                             4.0000s  106.75% of step  calls=0
+  mirror.L3#                          4.0000s  106.75% of step  calls=0
+  vpm.L3#                             4.0000s  106.75% of step  calls=0
+  mlp.L0                              0.0136s    0.36% of step  calls=4
+  bind.L3                             0.1199s    3.20% of step  calls=4
+  vpm.L2                              0.0075s    0.20% of step  calls=4
+  block.L0#                           4.0000s  106.75% of step  calls=0
+  bind.L2                             0.1218s    3.25% of step  calls=4
+  bind.L2#                            4.0000s  106.75% of step  calls=0
+  mlp.L1#                             4.0000s  106.75% of step  calls=0
+  bind.L1#                            4.0000s  106.75% of step  calls=0
+  mirror.L2#                          4.0000s  106.75% of step  calls=0
+  mirror.L1                           0.1096s    2.92% of step  calls=4
+  mlp.L3                              0.0241s    0.64% of step  calls=4
+  block.L2#                           4.0000s  106.75% of step  calls=0
+--- SCAN ---
+  scan.chunks                         0.1069s    2.85% of step  calls=0
+  scan.combine                        0.0767s    2.05% of step  calls=0
+--- AUTOGRAD TRAVERSALS (last step) ---
+  traversal[0] 0.9499s
+  traversal[1] 0.9193s
+  traversal[2] 1.0803s
+  sum=2.9495s

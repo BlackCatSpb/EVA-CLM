@@ -410,8 +410,10 @@ class EVAStack(nn.Module):
         # commits to random codes (measured: ce 11.47 -> 22.39) and every
         # residual is noise for the phantom bank — both wait for real semantics.
         _head = getattr(self, 'lm_head', None)
+        # M65-opt (аудит A1): _st читается безусловно ниже — для голов без
+        # srl_on он был unbound (UnboundLocalError на каждом forward).
+        _st = -1 if step is None else int(step)
         if _head is not None and hasattr(_head, 'srl_on'):
-            _st = -1 if step is None else int(step)
             _head._srl_active = bool(_head.srl_on) and _st >= int(getattr(_head, 'srl_after', 0))
             _head._pb_active = _st >= int(getattr(_head, 'phantom_after', 0))
             _head._tokens = tokens   # T9.9: sentence-level наблюдения фантома
@@ -667,6 +669,9 @@ class EVAStack(nn.Module):
                 # U1: per-layer τ-consistent VSA scales
                 _layer_tau_ratio = tau_l[i] / tau_mid
                 _vsa_tau_i = _base_vsa * _layer_tau_ratio
+                # M65-opt2 (A5): маркер-объект различает recompute и
+                # ЛЕГИТИМНЫЙ повторный проход (reasoning re-entry)
+                _ckpt_mark = object()
                 _out = _cp(
                     EVAStack._checkpointed_block,
                     layer, h, s, gs_i,
@@ -675,7 +680,7 @@ class EVAStack(nn.Module):
                     tanh_bias_mod, pred_scale_mod, spectral_mod,
                     context_mem, allow_write, _vsa_tau_i, step, intent_i,
                     salience=_sal, maturity=(mat_gate[i] if mat_gate is not None else None),
-                    sep_mask=_sep_mask,
+                    sep_mask=_sep_mask, mark=_ckpt_mark,
                     use_reentrant=False,
                 )
                 h, s_out, layer.mirror._cached_pred_error_norm, layer.mirror._cached_hp = _out
@@ -1356,7 +1361,9 @@ class EVAStack(nn.Module):
         _ex = {}
         for _an in ('_last_bus', '_intent_stream',            # B1: non-buffer streaming state
                     '_reasoning_buffer', '_reasoning_count',   # M32: chain is snapshot-covered
-                    '_last_logits'):                           # M56: the R1 stash
+                    '_last_logits',                            # M56: the R1 stash
+                    # M65-opt2 (аудит A2/A4): потерянные при резюме
+                    '_last_salience', '_gs_velocity'):
             _a = getattr(self, _an, None)
             if isinstance(_a, torch.Tensor):
                 _ex[_an] = _a.detach().clone()
@@ -1367,8 +1374,12 @@ class EVAStack(nn.Module):
                                        # boundary reset is state, not absence)
         # M58b: the memory<->head channel lives on SUBMODULES (the chain found
         # the eval handing the head a stale training direction).
+        # M65-opt2 (A4): лакуна-телеметрия головы — тоже состояние forward'а
         for _pfx, _mod, _an in (('bank', getattr(self, 'memory_bank', None), '_last_read'),
-                                ('head', getattr(self, 'lm_head', None), '_mem_dir')):
+                                ('head', getattr(self, 'lm_head', None), '_mem_dir'),
+                                ('head', getattr(self, 'lm_head', None), '_last_lacuna_rel'),
+                                ('head', getattr(self, 'lm_head', None), '_last_lacuna_gate'),
+                                ('head', getattr(self, 'lm_head', None), '_last_lacuna')):
             if _mod is None:
                 continue
             _a = getattr(_mod, _an, None)
@@ -1379,7 +1390,9 @@ class EVAStack(nn.Module):
             _mir = getattr(_l, 'mirror', None)
             if _mir is not None:
                 for _an in ('_cached_hp', '_cached_pred_k', '_cached_pred_error_norm',
-                            '_cached_gate', '_cached_usefulness'):
+                            '_cached_gate', '_cached_usefulness',
+                            '_alpha_override_py',      # M65-opt2 (A2): python-двойник
+                            '_alpha_pending'):         # M65-opt2 (A2): отложенный write
                     _a = getattr(_mir, _an, None)
                     if isinstance(_a, torch.Tensor):
                         _ex[f'mir.{_i}.{_an}'] = _a.detach().clone()
@@ -1392,6 +1405,7 @@ class EVAStack(nn.Module):
             _tr = getattr(_l, '_traj_state', None)
             if isinstance(_tr, torch.Tensor):
                 _ex[f'blk.{_i}._traj_state'] = _tr.detach().clone()
+            _ex[f'blk.{_i}._mlp_cnt_py'] = getattr(_l, '_mlp_cnt_py', 0)  # M65-opt2 (A2)
         snap['__attrs__'] = _ex
         return snap
 
@@ -1457,7 +1471,7 @@ class EVAStack(nn.Module):
                              mem2v_scale, diff, noise_scale,
                              tanh_bias_mod, pred_scale_mod, spectral_mod,
                              context_mem, allow_write, tau_s, step, intent=None,
-                             salience=None, maturity=None, sep_mask=None):
+                             salience=None, maturity=None, sep_mask=None, mark=None):
         """Wrapper for gradient checkpointing.
         Mirror cache is passed as explicit args/returns so checkpoint saves/restores it,
         preventing stale-cache mismatch between forward and backward recomputation."""
@@ -1469,7 +1483,7 @@ class EVAStack(nn.Module):
                              spectral_mod=spectral_mod, context_mem=context_mem,
                              allow_write=allow_write, tau_s=tau_s, step=step,
                              intent=intent, salience=salience, maturity=maturity,
-                             sep_mask=sep_mask)
+                             sep_mask=sep_mask, _ckpt_mark=mark)
         return h_out, s_out, layer.mirror._cached_pred_error_norm, layer.mirror._cached_hp
 
     def param_count(self):

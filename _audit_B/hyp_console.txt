@@ -1,0 +1,111 @@
+﻿
+==========================================================================================
+H1: full trunk passes per training step
+==========================================================================================
+--- gc=False gradalign_weight=0.0 ---
+  EVABlock.forward                       4
+  EVAStack.forward                       1
+  _scan_chunks                           8
+  bridge.probe_layer                     4
+  embed.forward                          2
+  head.forward                           7
+  tau_config.update                      1
+  torch.autograd.grad calls: 2
+  Tensor.backward calls: 0
+  TOTAL graph traversals: 2
+--- gc=True gradalign_weight=0.0 ---
+  EVABlock.forward                       12
+  EVAStack.forward                       1
+  _scan_chunks                           24
+  bridge.probe_layer                     4
+  checkpointed_block(recompute)          12
+  embed.forward                          2
+  head.forward                           7
+  tau_config.update                      1
+  torch.autograd.grad calls: 2
+  Tensor.backward calls: 0
+  TOTAL graph traversals: 2
+--- gc=False gradalign_weight=0.3 ---
+  EVABlock.forward                       4
+  EVAStack.forward                       1
+  _scan_chunks                           8
+  bridge.probe_layer                     4
+  embed.forward                          2
+  head.forward                           7
+  tau_config.update                      1
+  torch.autograd.grad calls: 3
+  Tensor.backward calls: 0
+  TOTAL graph traversals: 3
+--- gc=True gradalign_weight=0.3 ---
+  EVABlock.forward                       16
+  EVAStack.forward                       1
+  _scan_chunks                           32
+  bridge.probe_layer                     4
+  checkpointed_block(recompute)          16
+  embed.forward                          2
+  head.forward                           7
+  tau_config.update                      1
+  torch.autograd.grad calls: 3
+  Tensor.backward calls: 0
+  TOTAL graph traversals: 3
+
+==========================================================================================
+H2: host-sync-ish c_call counts per step
+==========================================================================================
+--- gc=False c_call counts in ONE step ---
+  Tensor.detach       483
+  Tensor.item         450
+  Tensor.clone        442
+  Tensor.float        110
+  Tensor.to           97
+  Tensor.tolist       9
+  Tensor.cpu          2
+  Tensor.contiguous   1
+--- gc=True c_call counts in ONE step ---
+  Tensor.detach       6339
+  Tensor.clone        466
+  Tensor.item         450
+  Tensor.to           249
+  Tensor.float        206
+  Tensor.tolist       9
+  Tensor.cpu          2
+  Tensor.contiguous   1
+
+==========================================================================================
+H3: balancer cadence timing
+==========================================================================================
+--- align cadence effect (gc=False) ---
+  align_every=1 (full align, 3 traversals)   median=2.1238s  all=['1.868', '2.449', '2.124']
+  align_every=2 (every 2nd aligns)           median=1.7802s  all=['1.780', '1.432', '2.395']
+  align_every=0 (cheap only after seed)      median=1.7159s  all=['1.716', '2.010', '1.653']
+  align=False (raw sum, 1 traversal)         median=2.2566s  all=['1.838', '2.257', '2.344']
+
+==========================================================================================
+H4: tracemalloc
+==========================================================================================
+--- tracemalloc top-15 allocation sites (Python allocations in one step) ---
+  C:\EVA_CLM_OPT\core\block.py:154: size=20.0 KiB (+20.0 KiB), count=160 (+160), average=128 B
+  C:\EVA_CLM_OPT\core\mirror.py:780: size=15.0 KiB (+15.0 KiB), count=120 (+120), average=128 B
+  C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\functional.py:1866: size=12.1 KiB (+12.1 KiB), count=97 (+97), average=128 B
+  C:\EVA_CLM_OPT\core\block.py:532: size=12.0 KiB (+12.0 KiB), count=96 (+96), average=128 B
+  C:\EVA_CLM_OPT\core\block.py:159: size=12.0 KiB (+12.0 KiB), count=96 (+96), average=128 B
+  C:\EVA_CLM_OPT\core\block.py:534: size=11.0 KiB (+11.0 KiB), count=88 (+88), average=128 B
+  C:\EVA_CLM_OPT\core\block.py:34: size=7168 B (+7168 B), count=56 (+56), average=128 B
+  C:\EVA_CLM_OPT\core\block.py:797: size=6144 B (+6144 B), count=48 (+48), average=128 B
+  C:\EVA_CLM_OPT\core\block.py:752: size=6144 B (+6144 B), count=48 (+48), average=128 B
+  C:\EVA_CLM_OPT\core\mirror.py:779: size=5120 B (+5120 B), count=40 (+40), average=128 B
+  C:\EVA_CLM_OPT\core\mirror.py:778: size=5120 B (+5120 B), count=40 (+40), average=128 B
+  C:\EVA_CLM_OPT\core\mirror.py:777: size=5120 B (+5120 B), count=40 (+40), average=128 B
+  C:\EVA_CLM_OPT\core\mirror.py:776: size=5120 B (+5120 B), count=40 (+40), average=128 B
+  C:\EVA_CLM_OPT\core\mirror.py:759: size=5120 B (+5120 B), count=40 (+40), average=128 B
+  C:\EVA_CLM_OPT\_audit_B\run_hypotheses.py:34: size=4608 B (+4608 B), count=38 (+38), average=121 B
+  total Python alloc delta: 0.37 MB over 3047 objects
+
+==========================================================================================
+H5: scaling
+==========================================================================================
+--- forward-only time scaling (batch=1, seq=384) ---
+  D=256  layers=4 fwd(head+loss,no-grad)=0.2267s params=2,687,909
+  D=256  layers=8 fwd(head+loss,no-grad)=0.4218s params=4,033,033
+  D=512  layers=4 fwd(head+loss,no-grad)=0.2563s params=7,387,941
+  D=512  layers=8 fwd(head+loss,no-grad)=0.5711s params=10,826,121

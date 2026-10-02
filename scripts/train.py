@@ -372,6 +372,10 @@ def train(cfg=None, resume_path=None):
             else:
                 _filtered[k] = v
         missing, unexpected = model.load_state_dict(_filtered, strict=False)
+        # M65-opt2 (A2): восстановить runtime-состояние (старые чекпоинты
+        # без 'runtime' — тихо пропускаем, поведение как раньше)
+        if ckpt.get('runtime') is not None:
+            model.restore_runtime_buffers(ckpt['runtime'])
         # M65-opt: документированная ручка резюма (0 = off, обычное резюме
         # не меняется) — восстановлена потерянная проводка.
         _n_ro = (model.apply_resume_reopen(cfg)
@@ -438,7 +442,10 @@ def train(cfg=None, resume_path=None):
         else:
             depth.set_depth(min(8 + (ckpt['step'] // 15000) * 4, cfg.n_layers))  # legacy fallback (pre-fix ckpts)
         print('  Optimizer/scheduler rebuilt FRESH (no momentum restore)')
-        start_step = ckpt['step']
+        # M65-opt (аудит A3): чекпойнт сохраняется ПОСЛЕ optimizer.step()
+        # шага s; курсор данных уже указывает на следующий батч — резюм
+        # обязан начинать с s+1 (иначе повтор шага и сдвиг расписаний).
+        start_step = int(ckpt['step']) + 1
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
         depth.put_state(ckpt.get('depth_state'))  # B14 (F4-06)
         if ckpt.get('balancer') is not None:
@@ -733,6 +740,9 @@ def train(cfg=None, resume_path=None):
                     _save_checkpoint_safely({
                         'step': step,
                         'model': model.state_dict(), 'code_fp': codebook_fingerprint(model),
+                        # M65-opt2 (A2): non-persistent runtime-состояние —
+                        # без него резюм терял 27 буферов (maxdiff 9.7e-2)
+                        'runtime': model.snapshot_runtime_buffers(),
                         'optimizer': optimizer.state_dict() if not args.no_save_optimizer else None,
                         'param_names': _opt_param_names(model, optimizer) if not args.no_save_optimizer else None,
                         'scheduler': scheduler.state_dict(),
@@ -908,7 +918,11 @@ if __name__ == '__main__':
                         help='Do NOT save optimizer state in checkpoints (avoids resume OOM on <=16GB GPU)')
     args = parser.parse_args()
     
+    # M65-opt2 (A6): --head молча игнорировался (проводки не было);
+    # 'codec' — легаси-имя cognitive_coded.
+    _head_mode = 'cognitive_coded' if args.head == 'codec' else args.head
     cfg = EVAConfig(
+        head_mode=_head_mode,
         data_dir=args.data_dir,
         save_dir=args.save_dir,
         batch_size=args.batch_size,

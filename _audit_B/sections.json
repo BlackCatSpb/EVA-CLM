@@ -1,0 +1,102 @@
+{
+ "gc_False": {
+  "gc": false,
+  "phaseA": {
+   "embed": 0.00257279998913873,
+   "intent_probe": 0.0013218000094639137,
+   "bridge.inject_layer": 0.0025535000022500753,
+   "bridge.probe_layer": 0.0033527000050526112,
+   "bridge.record": 5.89998671784997e-06,
+   "bridge.update_stream": 0.000693499983754009,
+   "bind": 0.08903029999055434,
+   "scan._scan_chunks": 0.023174000016297214,
+   "scan._combine_chunks": 0.019270900011179037,
+   "mirror": 0.12059100001351908,
+   "precgate": 0.0005633999971905723,
+   "vpm": 0.006023399997502565,
+   "mlp": 0.007531299983384088,
+   "block.forward(total)": 0.3563677999773063,
+   "concept": 0.004695299998275004,
+   "head.forward": 0.017608099966309965,
+   "reasoning": 0.005536199998459779,
+   "logit_cache.augment": 0.008503100005327724,
+   "head.log_probs_for_target": 0.0038422999932663515
+  },
+  "phaseB": {
+   "scan._scan_chunks": 0.02807120002398733,
+   "scan._combine_chunks": 0.01906660001259297
+  },
+  "toplevel": {
+   "embed": 0.0009410000056959689,
+   "model.forward": 0.4878013999987161,
+   "observe_output": 0.00044079999497625977,
+   "compute_losses": 0.0244302999926731,
+   "balancer.backward": 2.908564400000614,
+   "clipper.clip": 0.08513459999812767,
+   "optimizer.step": 0.07434219999413472,
+   "scheduler.step": 0.0001297000126214698
+  },
+  "forward_total": 0.42578069999581203,
+  "observe": 0.00437890000466723,
+  "losses": 0.018452200005413033,
+  "autograd": {
+   "n": 3,
+   "t": 2.7657734000094933
+  },
+  "counts": {
+   "scan._scan_chunks": 8,
+   "scan._combine_chunks": 8
+  },
+  "per_layer": {}
+ },
+ "gc_True": {
+  "gc": true,
+  "phaseA": {
+   "embed": 0.002547900003264658,
+   "intent_probe": 0.0021093999966979027,
+   "bridge.inject_layer": 0.002875799997127615,
+   "bridge.probe_layer": 0.004849999997531995,
+   "bridge.record": 9.199997293762863e-06,
+   "bridge.update_stream": 0.0008985000022221357,
+   "bind": 0.15235970001958776,
+   "scan._scan_chunks": 0.02899950000573881,
+   "scan._combine_chunks": 0.02690879997680895,
+   "mirror": 0.22096290001354646,
+   "precgate": 0.0008522999996785074,
+   "vpm": 0.01276490000600461,
+   "mlp": 0.05383020000590477,
+   "block.forward(total)": 0.6305457999987993,
+   "concept": 0.004679999998188578,
+   "head.forward": 0.0211464000021806,
+   "reasoning": 0.007418300010613166,
+   "logit_cache.augment": 0.011527299997396767,
+   "head.log_probs_for_target": 0.004775500012328848
+  },
+  "phaseB": {
+   "scan._scan_chunks": 0.2318948000029195,
+   "scan._combine_chunks": 0.12815500002761837
+  },
+  "toplevel": {
+   "embed": 0.0010812999971676618,
+   "model.forward": 0.6180189000006067,
+   "observe_output": 0.0007405000069411471,
+   "compute_losses": 0.0655380999960471,
+   "balancer.backward": 4.984581400000025,
+   "clipper.clip": 0.15189490000193473,
+   "optimizer.step": 0.10352639999473467,
+   "scheduler.step": 0.00017780000052880496
+  },
+  "forward_total": 0.7278967000020202,
+  "observe": 0.005045800004154444,
+  "losses": 0.028582200000528246,
+  "autograd": {
+   "n": 3,
+   "t": 4.865063999997801
+  },
+  "counts": {
+   "scan._scan_chunks": 32,
+   "scan._combine_chunks": 32
+  },
+  "per_layer": {}
+ }
+}

@@ -1,0 +1,79 @@
+﻿[gc=False] PHASE A forward-only: embed=0.4258s(whole model fwd incl embed) observe_output=0.0044s compute_losses=0.0185s total=0.4486s
+section                                           sec       %
+block.forward(total)                           0.3564  83.70%
+mirror                                         0.1206  28.32%
+bind                                           0.0890  20.91%
+scan._scan_chunks                              0.0232   5.44%
+scan._combine_chunks                           0.0193   4.53%
+head.forward                                   0.0176   4.14%
+logit_cache.augment                            0.0085   2.00%
+mlp                                            0.0075   1.77%
+vpm                                            0.0060   1.41%
+reasoning                                      0.0055   1.30%
+concept                                        0.0047   1.10%
+head.log_probs_for_target                      0.0038   0.90%
+bridge.probe_layer                             0.0034   0.79%
+embed                                          0.0026   0.60%
+bridge.inject_layer                            0.0026   0.60%
+intent_probe                                   0.0013   0.31%
+bridge.update_stream                           0.0007   0.16%
+precgate                                       0.0006   0.13%
+bridge.record                                  0.0000   0.00%
+TOTAL                                          0.4258 100.00%
+[gc=False] PHASE B full step top-level: total=3.5818s
+section                                           sec       %
+balancer.backward                              2.9086  81.20%
+model.forward                                  0.4878  13.62%
+clipper.clip                                   0.0851   2.38%
+optimizer.step                                 0.0743   2.08%
+compute_losses                                 0.0244   0.68%
+embed                                          0.0009   0.03%
+observe_output                                 0.0004   0.01%
+scheduler.step                                 0.0001   0.00%
+TOTAL                                          3.5818 100.00%
+section                                           sec       %
+scan._scan_chunks                              0.0281  59.55%
+scan._combine_chunks                           0.0191  40.45%
+TOTAL                                          0.0471 100.00%
+autograd traversals this step: n=3 t=2.7658s (backward+grad total)
+counts: {'scan._combine_chunks': 8, 'scan._scan_chunks': 8}
+[gc=True] PHASE A forward-only: embed=0.7279s(whole model fwd incl embed) observe_output=0.0050s compute_losses=0.0286s total=0.7615s
+section                                           sec       %
+block.forward(total)                           0.6305  86.63%
+mirror                                         0.2210  30.36%
+bind                                           0.1524  20.93%
+mlp                                            0.0538   7.40%
+scan._scan_chunks                              0.0290   3.98%
+scan._combine_chunks                           0.0269   3.70%
+head.forward                                   0.0211   2.91%
+vpm                                            0.0128   1.75%
+logit_cache.augment                            0.0115   1.58%
+reasoning                                      0.0074   1.02%
+bridge.probe_layer                             0.0048   0.67%
+head.log_probs_for_target                      0.0048   0.66%
+concept                                        0.0047   0.64%
+bridge.inject_layer                            0.0029   0.40%
+embed                                          0.0025   0.35%
+intent_probe                                   0.0021   0.29%
+bridge.update_stream                           0.0009   0.12%
+precgate                                       0.0009   0.12%
+bridge.record                                  0.0000   0.00%
+TOTAL                                          0.7279 100.00%
+[gc=True] PHASE B full step top-level: total=5.9256s
+section                                           sec       %
+balancer.backward                              4.9846  84.12%
+model.forward                                  0.6180  10.43%
+clipper.clip                                   0.1519   2.56%
+optimizer.step                                 0.1035   1.75%
+compute_losses                                 0.0655   1.11%
+embed                                          0.0011   0.02%
+observe_output                                 0.0007   0.01%
+scheduler.step                                 0.0002   0.00%
+TOTAL                                          5.9256 100.00%
+section                                           sec       %
+scan._scan_chunks                              0.2319  64.41%
+scan._combine_chunks                           0.1282  35.59%
+TOTAL                                          0.3600 100.00%
+autograd traversals this step: n=3 t=4.8651s (backward+grad total)
+counts: {'scan._combine_chunks': 32, 'scan._scan_chunks': 32}
+saved sections.json

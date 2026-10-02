@@ -1,0 +1,135 @@
+===== torch.profiler (gc=False) =====
+total profiler events: 196927
+op                                                   self_cpu_s cpu_total_s   #calls
+aten::_index_put_impl_                                   0.4592      0.4593       12
+aten::mul                                                0.4276      0.4693    10182
+aten::bmm                                                0.1997      0.2192      521
+aten::add_                                               0.1840      0.1945     6030
+aten::sum                                                0.1805      0.2133     3317
+aten::div                                                0.1260      0.1442     3291
+aten::copy_                                              0.1128      0.1128    13090
+aten::mm                                                 0.1123      0.1136      693
+aten::fill_                                              0.0732      0.0732     6159
+aten::add                                                0.0656      0.0752     3040
+aten::index                                              0.0646      0.0648       12
+autograd::engine::evaluate_function: MulBackward0        0.0598      0.4840     2707
+aten::cumsum                                             0.0493      0.0494       93
+aten::_to_copy                                           0.0489      0.1210     8519
+aten::convolution_backward                               0.0446      0.0458       24
+Optimizer.step#AdamW.step                                0.0446      0.1253        1
+aten::eq                                                 0.0333      0.0366      849
+aten::linalg_vector_norm                                 0.0330      0.0366     1862
+aten::neg                                                0.0304      0.0304      798
+autograd::engine::evaluate_function: IndexBackward0      0.0276      0.4890       12
+aten::as_strided                                         0.0265      0.0265    17059
+MulBackward0                                             0.0255      0.2731     2707
+aten::abs                                                0.0252      0.0465     1378
+aten::where                                              0.0250      0.0260      508
+aten::view                                               0.0234      0.0234     4199
+autograd::engine::evaluate_function: DivBackward0        0.0228      0.1266      584
+autograd::engine::evaluate_function: ViewBackward0       0.0224      0.0552     1573
+autograd::engine::evaluate_function: SliceBackward0      0.0216      0.2143     1552
+aten::empty_strided                                      0.0215      0.0215     9250
+aten::flip                                               0.0215      0.0237      138
+autograd::engine::evaluate_function: CloneBackward0      0.0213      0.0248      139
+aten::sub                                                0.0213      0.0233      426
+aten::dot                                                0.0199      0.0234     1233
+aten::slice                                              0.0198      0.0258     3749
+aten::to                                                 0.0194      0.1404    10084
+aten op kinds: 193; total aten calls: 162084
+top-20 aten by call count:
+  aten::as_strided                                        17059 calls  self=0.0265s
+  aten::copy_                                             13090 calls  self=0.1128s
+  aten::mul                                               10182 calls  self=0.4276s
+  aten::to                                                10084 calls  self=0.0194s
+  aten::empty_strided                                      9250 calls  self=0.0215s
+  aten::_to_copy                                           8519 calls  self=0.0489s
+  aten::empty                                              6173 calls  self=0.0187s
+  aten::fill_                                              6159 calls  self=0.0732s
+  aten::add_                                               6030 calls  self=0.1840s
+  aten::view                                               4199 calls  self=0.0234s
+  aten::resolve_conj                                       4082 calls  self=0.0010s
+  aten::select                                             3812 calls  self=0.0157s
+  aten::slice                                              3749 calls  self=0.0198s
+  aten::reshape                                            3553 calls  self=0.0126s
+  aten::sum                                                3317 calls  self=0.1805s
+  aten::div                                                3291 calls  self=0.1260s
+  aten::add                                                3040 calls  self=0.0656s
+  aten::zero_                                              2409 calls  self=0.0087s
+  aten::zeros                                              2350 calls  self=0.0143s
+  aten::item                                               1873 calls  self=0.0042s
+aten categories by self time:
+  _index_put_impl_                         self=0.4592s calls=12
+  mul                                      self=0.4276s calls=10182
+  bmm                                      self=0.1997s calls=521
+  add_                                     self=0.1840s calls=6030
+  sum                                      self=0.1805s calls=3317
+  div                                      self=0.1260s calls=3291
+  copy_                                    self=0.1128s calls=13090
+  mm                                       self=0.1123s calls=693
+  fill_                                    self=0.0732s calls=6159
+  add                                      self=0.0656s calls=3040
+  index                                    self=0.0646s calls=12
+  cumsum                                   self=0.0493s calls=93
+  _to_copy                                 self=0.0489s calls=8519
+  convolution_backward                     self=0.0446s calls=24
+  eq                                       self=0.0333s calls=849
+  linalg_vector_norm                       self=0.0330s calls=1862
+  neg                                      self=0.0304s calls=798
+  as_strided                               self=0.0265s calls=17059
+  abs                                      self=0.0252s calls=1378
+  where                                    self=0.0250s calls=508
+  view                                     self=0.0234s calls=4199
+  empty_strided                            self=0.0215s calls=9250
+  flip                                     self=0.0215s calls=138
+  sub                                      self=0.0213s calls=426
+  dot                                      self=0.0199s calls=1233
+===== cProfile tottime top-40 =====
+         62657 function calls (59981 primitive calls) in 4.750 seconds
+
+   Ordered by: internal time
+   List reduced from 412 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        3    1.336    0.445    1.339    0.446 {method 'run_backward' of 'torch._C._EngineBase' objects}
+        4    0.327    0.082    0.762    0.191 C:\EVA_CLM_OPT\core\bind.py:396(forward)
+        2    0.276    0.138    0.775    0.387 C:\EVA_CLM_OPT\core\embedding.py:194(forward)
+        2    0.262    0.131    0.263    0.131 C:\EVA_CLM_OPT\core\tau_config.py:112(_compute_tau_ladder)
+        2    0.256    0.128    0.257    0.129 C:\EVA_CLM_OPT\core\embedding.py:157(sent_masks)
+     1862    0.247    0.000    0.261    0.000 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\functional.py:1734(norm)
+        3    0.241    0.080    0.241    0.080 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\nn\functional.py:2503(embedding)
+       12    0.238    0.020    0.238    0.020 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\__init__.py:1537(are_deterministic_algorithms_enabled)
+       96    0.230    0.002    0.232    0.002 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\_tensor.py:1106(__rsub__)
+        1    0.212    0.212    0.212    0.212 {method 'disable' of '_lsprof.Profiler' objects}
+       74    0.182    0.002    0.182    0.002 {built-in method torch.cat}
+       32    0.180    0.006    0.193    0.006 C:\EVA_CLM_OPT\core\block.py:530(_ln)
+        2    0.167    0.084    0.167    0.084 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\autograd\profiler.py:932(__exit__)
+        3    0.110    0.037    1.449    0.483 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\autograd\graph.py:966(_engine_run_backward)
+        4    0.030    0.008    0.085    0.021 C:\EVA_CLM_OPT\core\mirror.py:421(forward)
+      107    0.029    0.000    0.029    0.000 {built-in method torch._C._nn.linear}
+        1    0.024    0.024    1.496    1.496 C:\EVA_CLM_OPT\core\training_control.py:465(backward)
+        4    0.023    0.006    1.193    0.298 C:\EVA_CLM_OPT\core\block.py:456(forward)
+    191/5    0.018    0.000    2.781    0.556 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\module.py:1782(_call_impl)
+      454    0.017    0.000    0.017    0.000 {method 'mean' of 'torch._C.TensorBase' objects}
+     1862    0.014    0.000    0.014    0.000 {built-in method torch._C._linalg.linalg_vector_norm}
+       39    0.013    0.000    0.013    0.000 {built-in method torch.einsum}
+     1155    0.012    0.000    0.012    0.000 {method 'reshape' of 'torch._C.TensorBase' objects}
+      423    0.011    0.000    0.011    0.000 {built-in method torch.isfinite}
+        8    0.011    0.001    0.016    0.002 C:\EVA_CLM_OPT\core\block.py:144(_combine_chunks)
+        1    0.010    0.010    0.035    0.035 C:\EVA_CLM_OPT\core\adaptation.py:466(clip)
+      163    0.009    0.000    0.009    0.000 {method 'pow' of 'torch._C.TensorBase' objects}
+      152    0.008    0.000    0.008    0.000 {method 'sum' of 'torch._C.TensorBase' objects}
+        8    0.007    0.001    0.007    0.001 {built-in method torch.conv1d}
+       28    0.007    0.000    0.016    0.001 C:\EVA_CLM_OPT\core\block.py:25(_stream_cap)
+       32    0.007    0.000    0.024    0.001 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\optim\adam.py:347(_single_tensor_adam)
+        8    0.007    0.001    0.025    0.003 C:\EVA_CLM_OPT\core\block.py:94(_scan_chunks)
+       95    0.007    0.000    0.007    0.000 {built-in method torch.exp}
+      106    0.007    0.000    0.007    0.000 {method 'any' of 'torch._C.TensorBase' objects}
+      795    0.007    0.000    0.007    0.000 {method 'mul_' of 'torch._C.TensorBase' objects}
+        1    0.006    0.006    0.010    0.010 C:\Users\black\AppData\Roaming\Python\Python314\site-packages\torch\_dynamo\eval_frame.py:1423(_fn)
+       20    0.006    0.000    0.006    0.000 {built-in method torch.cumsum}
+       62    0.006    0.000    0.006    0.000 {method 'amax' of 'torch._C.TensorBase' objects}
+        1    0.006    0.006    2.001    2.001 C:\EVA_CLM_OPT\core\stack.py:226(forward)
+       91    0.006    0.000    0.006    0.000 {method 'abs' of 'torch._C.TensorBase' objects}
+
+

@@ -458,7 +458,31 @@ class EVABlock(nn.Module):
                 tanh_bias_mod: float = 1.0, pred_scale_mod: Optional[torch.Tensor] = None, spectral_mod: float = 1.0,
                 context_mem: Optional[torch.Tensor] = None, allow_write: Optional[bool] = None, tau_s: Optional[torch.Tensor] = None, step: Optional[int] = None, intent: Optional[torch.Tensor] = None,
                 salience: Optional[torch.Tensor] = None, maturity: Optional[torch.Tensor] = None,
-                sep_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple]:
+                sep_mask: Optional[torch.Tensor] = None,
+                _ckpt_mark: object = None) -> Tuple[torch.Tensor, Tuple]:
+        # M65-opt2 (аудит A5, доказано: backward менял _signal_norm_ema на
+        # 0.32, 134 несовпадения градиентов): recompute при gradient
+        # checkpointing повторно исполняет forward. checkpoint сохраняет
+        # ТОТ ЖЕ объект h (проверено) — детектор по identity; EMA-снимок
+        # восстанавливается, апдейты затем повторяются идемпотентно.
+        # M65-opt2 (A5): recompute детектится МАРКЕРОМ вызова checkpoint
+        # (h-identity ловил легитимный reasoning re-entry и гасил градиенты
+        # bind — доказано бисектом). Прямые вызовы (mark=None) — не recompute.
+        _rc = (_ckpt_mark is not None
+               and getattr(self, '_ckpt_mark_seen', None) is _ckpt_mark)
+        if _ckpt_mark is not None:
+            self._ckpt_mark_seen = _ckpt_mark
+        _mir_rc = getattr(self, 'mirror', None)
+        # M65-opt2 (A5 v4): restore _pen_ema ЗАПРЕЩЁН — он сдвигает pen и
+        # переключает дискретную ветку записи концептов, гася градиенты bind
+        # (доказано бисектом). Чистота pen-EMA — в очереди (вынести апдейты из
+        # checkpointed-региона); зеркало чинится отдельно (его EMA — узкий restore).
+        if _rc:
+            self._mlp_cnt_py = self._fwd_py_snap
+        else:
+            self._fwd_py_snap = self._mlp_cnt_py
+        if _mir_rc is not None:
+            _mir_rc._recomp = _rc
         mem_state = mu_state = conv_state = traj_state = pen = cov_state = None
         cov_state_out = None
         if state is not None:
@@ -672,6 +696,11 @@ class EVABlock(nn.Module):
             # tau; the dead-parameter detector caught it). w_d_pen keeps a
             # live gradient as the sensitivity around the baseline.
             with torch.no_grad():
+                # M65-opt2 (A5, финал): pen-EMA НЕ трогаем ни restore'ом, ни
+                # пропуском апдейта — оба варианта переключают дискретную ветку
+                # записи концептов и гасят градиенты bind (бисекты v3/v5).
+                # Остаточная примесь pen-пути: замер 6.9e-6 (fp-уровень);
+                # корневой фикс (вынос апдейтов из checkpointed-региона) — в очереди.
                 self._pen_ema.mul_(0.999).add_(pen.detach().mean() * 0.001)
             _pc = pen - self._pen_ema
             d_pen_factor = pen_decay_factor(

@@ -1,0 +1,38 @@
+﻿### probe_headmodes.py
+                           tokens=x, step=step)
+UnboundLocalError: cannot access local variable '_st' where it is not associated with a value
+                           tokens=x, step=step)
+UnboundLocalError: cannot access local variable '_st' where it is not associated with a value
+    h = m.embed_tokens(x)
+  File "C:\EVA_CLM_OPT\core\stack.py", line 1081, in embed_tokens
+    return self.embed(tokens)
+RuntimeError: cannot reshape tensor of 0 elements into shape [0, 8, -1] because the unspecified dimension size -1 can be any value and is ambiguous
+============================== partitioned
+============================== cognitive_coded
+============================== empty-B
+### probe_resume_bufs.py
+remaining unrecovered tensor attrs after restore_runtime_buffers: 37
+plain load_state_dict : maxdiff=9.695101e-02  bit_equal=False
++restore_runtime_bufs : maxdiff=2.195220e-04  bit_equal=False
+signal_norm_ema m1 vs fresh: 6.318092346191406e-05
+### probe_leak2.py
+memory_bank (lacuna leak)                bit_equal=True maxdiff=0.000e+00
+intent_bridge (salience leak)            bit_equal=False maxdiff=1.576e-03
+### probe_ckpt_impure.py
+gc=False: forward changed EMA by 3.276e-01; backward changed EMA by 0.000e+00
+gc=True: forward changed EMA by 3.276e-01; backward changed EMA by 3.243e-01
+### probe_ckpt_pure.py
+adaptive=False: ce 10.098256/10.098256 equal=True grad mismatches=134 worst=5.795e-03 (layers.0.mirror.W_proj)
+adaptive=True: ce 10.097960/10.097960 equal=True grad mismatches=134 worst=5.795e-03 (layers.0.mirror.W_proj)
+### probe_bl1.py
+B=1 L=1: ce=7.7893 bad_aux={'diversity': nan}
+B=1 L=2: ce=10.0862 bad_aux={}
+B=2 L=1: ce=10.0222 bad_aux={}
+B=2 L=2: ce=10.5630 bad_aux={}
+### probe_ms_acc.py
+after doc A forward: _ms_acc_n = {8: 0, 32: 8} _ms_lens = {8: [8], 32: []}
+after reset_cache(): _ms_acc_n = {8: 0, 32: 8} _ms_lens = {8: [], 32: []}
+after doc B forward: _ms_acc_n = {8: 0, 32: 16} pools = {8: 1, 32: 0}
+### probe_opt_restore.py
+moved>0: True | slots old: 157 new: 157
+optimizer restore mismatches: 0 worst 0.0

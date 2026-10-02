@@ -128,8 +128,9 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
             y = group_out.norm(dim=-1).reshape(-1, G)
             # Scale-invariant: correlation matrix (column-standardized) → bounded
             # regardless of ‖y‖; raw covariance scaled as ‖y‖⁴ and exploded in A2.
-            y = (y - y.mean(dim=0)) / (y.std(dim=0) + 1e-8)
-            corr = y.T @ y / (y.shape[0] - 1 + 1e-10)
+            # M65-opt (аудит A7): unbiased std при N=1 даёт NaN
+            y = (y - y.mean(dim=0)) / (y.std(dim=0, unbiased=False) + 1e-8)
+            corr = y.T @ y / (max(y.shape[0] - 1, 1) + 1e-10)
             div = F.mse_loss(corr, _eye(G, group_out.device))   # M65-opt: кэш
             # τ-tied per-layer weight: intent_alpha = 1 − exp(−τ_l/τ_min)
             # (τ-field expresses exploration authority; deep layers explore more).
@@ -458,7 +459,10 @@ def compute_losses(stack, h, targets, pred_weight=None, h_emb=None):
         if _u_last is not None:
             _u0 = float(getattr(stack.cfg, 'head_u_wall_u0', 6.0))
             _wall = _hw * F.relu(_u_last.abs() - _u0).pow(2).mean()
-            if float(_wall.detach()) != 0.0:
+            # M65-opt (аудит агентов B1): микро-значения (1e-8..1e-6)
+            # покупали ЦЕЛЫЙ третий backward (safety-обход 22-25% шага).
+            # Порог 1e-6: реальные стены (u≫u0) проходят, шум — нет.
+            if float(_wall.detach()) > 1e-6:
                 aux_dict['head_wall'] = _wall
     if branch_loss != 0:
         aux_dict['branch'] = branch_loss

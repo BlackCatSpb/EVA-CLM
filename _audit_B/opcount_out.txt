@@ -1,0 +1,4 @@
+D=256 L=4 V=512 params=2,687,909: profiler events=159263, aten calls=135013, autograd events=12287, distinct aten kinds=192
+D=256 L=8 V=512 params=4,033,033: profiler events=294972, aten calls=249483, autograd events=23073, distinct aten kinds=192
+D=512 L=8 V=512 params=10,826,121: profiler events=365661, aten calls=300345, autograd events=33364, distinct aten kinds=193
+D=1024 L=8 V=4096 params=33,220,009: profiler events=369775, aten calls=304042, autograd events=33565, distinct aten kinds=193

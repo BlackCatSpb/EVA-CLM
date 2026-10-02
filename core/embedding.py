@@ -221,7 +221,10 @@ class PartitionedEmbedding(nn.Module):
             codes = codes - self._sig_mean.to(codes.dtype)
         B, L = tokens.shape
         # Внешнее произведение вместо einsum (стабильно под AMP на любых GPU)
-        out: torch.Tensor = (codes.unsqueeze(-1) * self.basis.view(1, 1, self.K, -1)).reshape(B, L, -1)
+        # M65-opt (аудит A8): при B=0 reshape(..., -1) неоднозначен —
+        # явный размер
+        out: torch.Tensor = (codes.unsqueeze(-1) * self.basis.view(1, 1, self.K, -1)).reshape(
+            B, L, self.K * self.basis.shape[1])
         # T9.9: сигнал границ предложений — во ВСЁМ стволе (см. __init__).
         if self._sent_on:
             # P0-5b: in the AR decode (L=1) the window-internal masks degenerate

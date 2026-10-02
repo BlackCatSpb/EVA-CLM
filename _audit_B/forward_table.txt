@@ -1,0 +1,55 @@
+===== FORWARD-ONLY (gc=False), batch=1 seq=384, median of 5 passes =====
+total embed+trunk+head+losses = 0.2528s   trunk(stack.forward) = 0.2343s   head+losses+observe = 0.0180s
+section                          sec  % trunk  % total  calls
+stack.forward                 0.2343  100.00%   92.66%      1
+block                         0.2049   87.48%   81.06%      0
+bind                          0.0717   30.59%   28.35%      0
+mirror                        0.0487   20.78%   19.26%      0
+scan.chunks                   0.0157    6.69%    6.20%      0
+scan.combine                  0.0112    4.78%    4.43%      0
+losses                        0.0093    3.97%    3.68%      1
+head.forward                  0.0078    3.33%    3.09%      7
+mlp                           0.0047    2.02%    1.87%      0
+cache.augment                 0.0044    1.87%    1.73%      1
+vpm                           0.0034    1.45%    1.35%      0
+concept                       0.0030    1.26%    1.17%      1
+bridge.probe                  0.0023    0.99%    0.92%      4
+reasoning_memory              0.0020    0.85%    0.79%      5
+head.log_probs                0.0018    0.75%    0.70%      1
+bridge.inject                 0.0011    0.47%    0.44%      4
+intent_probe                  0.0009    0.38%    0.36%      4
+embed                         0.0005    0.23%    0.21%      1
+tau.update                    0.0003    0.15%    0.14%      1
+bridge.stream                 0.0003    0.12%    0.11%      4
+observe_output                0.0002    0.07%    0.06%      1
+bridge.record                 0.0000    0.00%    0.00%      4
+
+per-layer block times: L0=48.1ms, L1=53.6ms, L2=52.0ms, L3=51.3ms
+
+===== FORWARD-ONLY (gc=True), batch=1 seq=384, median of 5 passes =====
+total embed+trunk+head+losses = 0.3052s   trunk(stack.forward) = 0.2796s   head+losses+observe = 0.0250s
+section                          sec  % trunk  % total  calls
+stack.forward                 0.2796  100.00%   91.61%      1
+block                         0.2284   81.68%   74.83%      0
+bind                          0.0853   30.49%   27.93%      0
+mirror                        0.0557   19.91%   18.24%      0
+scan.chunks                   0.0126    4.52%    4.14%      0
+scan.combine                  0.0113    4.04%    3.70%      0
+losses                        0.0108    3.86%    3.54%      1
+head.forward                  0.0080    2.86%    2.62%      7
+cache.augment                 0.0054    1.93%    1.77%      1
+mlp                           0.0049    1.74%    1.59%      0
+vpm                           0.0038    1.37%    1.26%      0
+concept                       0.0032    1.15%    1.06%      1
+bridge.probe                  0.0021    0.77%    0.70%      4
+reasoning_memory              0.0020    0.73%    0.67%      5
+head.log_probs                0.0018    0.64%    0.58%      1
+bridge.inject                 0.0010    0.37%    0.34%      4
+intent_probe                  0.0009    0.32%    0.30%      4
+embed                         0.0006    0.21%    0.19%      1
+tau.update                    0.0003    0.11%    0.10%      1
+bridge.stream                 0.0003    0.11%    0.10%      4
+observe_output                0.0002    0.07%    0.07%      1
+bridge.record                 0.0000    0.00%    0.00%      4
+
+per-layer block times: L0=57.4ms, L1=53.6ms, L2=57.5ms, L3=59.9ms

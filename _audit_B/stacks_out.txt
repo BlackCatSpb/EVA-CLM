@@ -1,0 +1,73 @@
+=== key_averages(group_by_stack_n=6), top-60 by self_cpu_time ===
+aten::_index_put_impl_                       self=  0.2592s n=8       
+aten::mul                                    self=  0.2024s n=8147    
+<built-in method run_backward of torch._C._E self=  0.1198s n=2       
+aten::sum                                    self=  0.1052s n=2492    
+aten::bmm                                    self=  0.0961s n=375     
+aten::add_                                   self=  0.0760s n=4343    
+aten::div                                    self=  0.0565s n=2788    
+aten::copy_                                  self=  0.0540s n=11274   
+aten::mm                                     self=  0.0526s n=494     
+aten::index                                  self=  0.0467s n=12      
+aten::add                                    self=  0.0319s n=2910    
+aten::fill_                                  self=  0.0309s n=5012    
+core\mirror.py(421): forward                 self=  0.0292s n=4       
+aten::_to_copy                               self=  0.0265s n=7813    
+aten::convolution_backward                   self=  0.0234s n=16      
+aten::cumsum                                 self=  0.0229s n=70      
+autograd::engine::evaluate_function: MulBack self=  0.0219s n=1864    
+autograd::engine::evaluate_function: IndexBa self=  0.0215s n=8       
+core\training_control.py(465): backward      self=  0.0211s n=1       
+aten::eq                                     self=  0.0185s n=760     
+aten::linalg_vector_norm                     self=  0.0164s n=1858    
+core\block.py(456): forward                  self=  0.0145s n=4       
+aten::where                                  self=  0.0134s n=348     
+torch\nn\modules\module.py(1782): _call_impl self=  0.0132s n=191     
+aten::neg                                    self=  0.0129s n=600     
+aten::view                                   self=  0.0125s n=3395    
+aten::as_strided                             self=  0.0120s n=13464   
+MulBackward0                                 self=  0.0119s n=1864    
+torch\optim\adam.py(347): _single_tensor_ada self=  0.0118s n=32      
+aten::sub                                    self=  0.0109s n=426     
+aten::to                                     self=  0.0108s n=9233    
+aten::abs                                    self=  0.0104s n=1378    
+Optimizer.zero_grad#AdamW.zero_grad          self=  0.0103s n=1       
+aten::addmm                                  self=  0.0098s n=98      
+aten::ge                                     self=  0.0098s n=335     
+aten::empty_strided                          self=  0.0092s n=8487    
+aten::slice                                  self=  0.0092s n=2724    
+torch\functional.py(1734): norm              self=  0.0088s n=1858    
+autograd::engine::evaluate_function: ExpBack self=  0.0086s n=130     
+aten::sqrt                                   self=  0.0084s n=470     
+aten::pow                                    self=  0.0083s n=420     
+core\adaptation.py(466): clip                self=  0.0081s n=1       
+autograd::engine::evaluate_function: CloneBa self=  0.0081s n=114     
+run_stacks.py(18): <module>                  self=  0.0079s n=1       
+autograd::engine::evaluate_function: SliceBa self=  0.0076s n=1037    
+aten::empty                                  self=  0.0076s n=4933    
+aten::select                                 self=  0.0076s n=2786    
+aten::cat                                    self=  0.0076s n=89      
+aten::ne                                     self=  0.0071s n=491     
+aten::slice_backward                         self=  0.0068s n=1037    
+aten::flip                                   self=  0.0068s n=92      
+autograd::engine::evaluate_function: AddBack self=  0.0066s n=1194    
+core\stack.py(226): forward                  self=  0.0062s n=1       
+aten::reshape                                self=  0.0062s n=2869    
+aten::any                                    self=  0.0062s n=114     
+aten::exp                                    self=  0.0059s n=101     
+aten::masked_fill_                           self=  0.0059s n=173     
+aten::zeros                                  self=  0.0055s n=1604    
+<built-in function linalg_vector_norm>       self=  0.0055s n=1858    
+aten::gt                                     self=  0.0053s n=832     
+=== _index_put_impl_ raw events ===
+#1 dur=0.0302s stack=
+#2 dur=0.0352s stack=
+#3 dur=0.0315s stack=
+#4 dur=0.0309s stack=
+#5 dur=0.0302s stack=
+#6 dur=0.0301s stack=
+#7 dur=0.0329s stack=
+#8 dur=0.0382s stack=
+total index_put events: 8
+=== self cpu time by nearest Python frame (aten+autograd events) ===
+NO_STACK                                                                 3.1730s

@@ -630,7 +630,15 @@ class WideBindConfig:
     accum_steps: int = 1  # effective batch = batch_size * seq_len * accum_steps
 
     compile: bool = False
-    gradient_checkpointing: bool = True  # trade compute for memory, essential on T4
+    # M65-opt2 (аудит A5, КРИТИЧНО): recompute при checkpointing повторно
+    # исполняет forward с УЖЕ сдвинутыми EMA (замер агента: 134 несовпадения
+    # градиентов, worst 5.8e-3; фикс зеркала в M65-opt2 снизил до 6.9e-6).
+    # НО: дефолт пока True вынужденно — в ЧИСТОМ пути (False) bind-параметры
+    # w_d/b_d/w_d_pen последнего слоя МЁРТВЫ (влияют лишь на detached
+    # состояние); градиенты им сейчас даёт ИМЕННО recompute-артефакт.
+    # Корневой фикс (проводка градиента decay + чистый recompute) —
+    # первоочередная задача; см. xfail-замок test_bind_pen_dead_in_clean_path.
+    gradient_checkpointing: bool = True
 
     # Training
     max_steps: int = 500000

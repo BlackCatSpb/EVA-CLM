@@ -324,6 +324,12 @@ class LogitCache(nn.Module):
         self._h_lens.clear()
         self._l_scores.clear()
         self._l_lens.clear()
+        # M65-opt (аудит A9): незавершённые пулы старших шкал переносили
+        # хвост документа A в документ B (контракт «новый документ ⇒
+        # холодный кэш» нарушался). Guard: bare-инстансы тестов без __init__.
+        for _d in ('_ms_acc_k', '_ms_acc_v', '_ms_acc_n'):
+            if hasattr(self, _d):
+                getattr(self, _d).clear()
         self._position = 0
 
     def size_mb(self, training: bool = True) -> float:

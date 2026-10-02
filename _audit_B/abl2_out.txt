@@ -1,0 +1,24 @@
+=== gc=False (interleaved, 6 rounds x 1 step each) ===
+baseline               wall: min=1.6730 med=1.9530 | cpu: min=12.9688 med=14.3516
+no_reasoning           wall: min=1.7738 med=2.0584 | cpu: min=13.6875 med=15.0156
+no_logit_cache         wall: min=1.6103 med=1.7251 | cpu: min=12.6406 med=13.2500
+no_bridge              wall: min=1.5893 med=1.8270 | cpu: min=12.2500 med=13.8281
+no_concept             wall: min=1.7517 med=2.1188 | cpu: min=13.4062 med=14.7656
+align_every=0          wall: min=1.3241 med=1.5601 | cpu: min=10.2812 med=11.5078
+gradalign=0.3          wall: min=2.0220 med=2.4771 | cpu: min=16.0000 med=18.2109
+
+=== gc=True (interleaved, 4 rounds x 1 step each) ===
+baseline               wall: min=2.2314 med=3.4917 | cpu: min=16.4219 med=25.2812
+no_reasoning           wall: min=2.1907 med=3.0751 | cpu: min=16.7656 med=23.6250
+align_every=0          wall: min=1.2765 med=2.8498 | cpu: min=9.8750 med=19.9766
+
+=== derived (min cpu time) ===
+  no_reasoning           cpu=13.6875s  speedup_vs_base=0.95x
+  no_logit_cache         cpu=12.6406s  speedup_vs_base=1.03x
+  no_bridge              cpu=12.2500s  speedup_vs_base=1.06x
+  no_concept             cpu=13.4062s  speedup_vs_base=0.97x
+  align_every=0          cpu=10.2812s  speedup_vs_base=1.26x
+  gradalign=0.3          cpu=16.0000s  speedup_vs_base=0.81x
+  gc=True no_reasoning     cpu=16.7656s  speedup_vs_gc_base=0.98x
+  gc=True align_every=0    cpu=9.8750s  speedup_vs_gc_base=1.66x
+  gc=True baseline min_cpu=16.4219s vs gc=False baseline min_cpu=12.9688s => gc penalty 1.27x

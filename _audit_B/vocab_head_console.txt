@@ -1,0 +1,24 @@
+﻿--- mini D=256 layers=4 vocab=512 K=16 S=4 params=2,687,909 ---
+  step median=1.618s all=['1.478', '1.618', '1.726']
+  balancer.backward      1.3138s (81.19% of step) calls=1
+  embed                  0.0008s (0.05% of step) calls=1
+  head                   0.0091s (0.56% of step) calls=7
+  intent_probe           0.0010s (0.06% of step) calls=4
+  reasoning_memory       0.0025s (0.16% of step) calls=5
+  stack.forward          0.3002s (18.55% of step) calls=1
+--- production-vocab D=256 layers=4 vocab=65536 K=32 S=6 params=2,771,141 ---
+  step median=1.846s all=['1.785', '1.846', '1.853']
+  balancer.backward      1.3583s (73.57% of step) calls=1
+  embed                  0.0008s (0.04% of step) calls=1
+  head                   0.1103s (5.98% of step) calls=7
+  intent_probe           0.0009s (0.05% of step) calls=4
+  reasoning_memory       0.0035s (0.19% of step) calls=5
+  stack.forward          0.3372s (18.26% of step) calls=1
+--- production-like-D D=1024 layers=8 vocab=4096 K=32 S=4 params=33,220,009 ---
+  step median=15.446s all=['8.841', '44.166', '15.446']
+  balancer.backward      11.2712s (72.97% of step) calls=1
+  embed                  0.1077s (0.70% of step) calls=1
+  head                   0.0582s (0.38% of step) calls=7
+  intent_probe           0.0218s (0.14% of step) calls=8
+  reasoning_memory       0.0441s (0.29% of step) calls=5
+  stack.forward          2.6733s (17.31% of step) calls=1

@@ -1,0 +1,21 @@
+=== head_wall / traversal census over first 8 steps (gc=False, cfg.head_u_wall=1.0e-03) ===
+  step=0 traversals=3 head_wall=present wall=2.8730764825013466e-05 u_max=7.20 aux_n=15
+  step=1 traversals=2 head_wall=absent wall=None u_max=5.49 aux_n=14
+  step=2 traversals=2 head_wall=absent wall=None u_max=5.93 aux_n=14
+  step=3 traversals=3 head_wall=present wall=8.784174099218944e-08 u_max=6.15 aux_n=15
+  step=4 traversals=3 head_wall=present wall=1.408148136761156e-06 u_max=6.30 aux_n=15
+  step=5 traversals=3 head_wall=present wall=3.2575246677879477e-06 u_max=6.39 aux_n=15
+  step=6 traversals=3 head_wall=present wall=4.827254997508135e-06 u_max=6.46 aux_n=15
+  step=7 traversals=3 head_wall=present wall=5.649061677104328e-06 u_max=6.50 aux_n=15
+
+=== head forward / log_probs cost vs vocab (D=256, L=384, code_dim=16, batch=1) ===
+  V=512    head.forward=1.53ms  log_probs_for_target=1.58ms
+  V=4096   head.forward=3.17ms  log_probs_for_target=3.35ms
+  V=16384  head.forward=9.01ms  log_probs_for_target=8.66ms
+  V=65536  head.forward=33.58ms  log_probs_for_target=33.50ms
+
+=== production-like step (D=1024, n_layers=8, vocab=4096, seq=384, gc=False) ===
+  build=0.3s params=33,220,009
+  step0 wall=7.94s ce=16.365
+  step1 wall=16.84s ce=14.673
+  forward-only wall=1.48s

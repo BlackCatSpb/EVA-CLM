@@ -431,6 +431,22 @@ class GroupedCognitiveMirror(nn.Module):
                 maturity: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B, L, D = h.shape
         G, d, k = self.G, self.d, self.k
+        # M65-opt2 (аудит A5): recompute-чистота EMA (флаг ставит блок —
+        # h зеркала производный, identity там не работает). Восстановить
+        # снимок, затем апдейты повторяются идентично.
+        # M65-opt2 (A5 v3): УЗКИЙ restore измеренных EMA — полный restore всех
+        # буферов ломал градиенты bind (доказано бисектом).
+        if getattr(self, '_recomp', False):
+            for _n, _v in getattr(self, '_ema_fwd_snap', {}).items():
+                getattr(self, _n).copy_(_v)
+            self._alpha_override_py = self._fwd_py_snap.get(
+                '_alpha_override_py', self._alpha_override_py)
+        elif self.training:
+            self._ema_fwd_snap = {
+                _n: getattr(self, _n).detach().clone()
+                for _n in ('_signal_norm_ema', '_grad_norm_ema',
+                           '_delta_var', '_residual_var_ema')}
+            self._fwd_py_snap = {'_alpha_override_py': self._alpha_override_py}
         
         # Split into subspaces
         h_g = h.reshape(B, L, G, d)           # (B, L, G, d)
@@ -1096,6 +1112,23 @@ class GroupedCognitiveMirror(nn.Module):
         заданное значение. Вызывается только при значении > 0 (см. stack)."""
         with torch.no_grad():
             self.mod_scale_mlp.data.fill_(float(value))
+
+    def _snapshot_fwd_buffers(self) -> None:
+        """M65-opt2 (A5): снимок ВСЕХ буферов зеркала для recompute-чистоты."""
+        self._fwd_buf_snap = {k: v.detach().clone()
+                              for k, v in self.named_buffers()}
+        self._fwd_py_snap = {'_alpha_override_py': self._alpha_override_py}
+        self._pending_fwd_snap = getattr(self, '_alpha_pending', None)
+
+    def _restore_fwd_buffers(self) -> None:
+        own = dict(self.named_buffers())
+        with torch.no_grad():
+            for k, v in self._fwd_buf_snap.items():
+                b = own.get(k)
+                if b is not None and b.shape == v.shape:
+                    b.copy_(v)
+        self._alpha_override_py = self._fwd_py_snap['_alpha_override_py']
+        self._alpha_pending = self._pending_fwd_snap
 
     def _signal_weights(self) -> torch.Tensor:
         """M65-opt: единая точка сигнальных весов.

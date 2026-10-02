@@ -1,0 +1,21 @@
+=== module ablations (gc=False, batch=1 seq=384, median of 6) ===
+baseline (all defaults)                          median=2.1685s  min=1.7349  max=2.3403  all=['2.340', '2.279', '1.950', '2.304', '2.058', '1.735']
+explicit_reasoning=False                         median=1.9063s  min=1.4167  max=2.0628  all=['1.417', '1.880', '2.063', '1.933', '1.823', '2.045']
+logit_cache=None                                 median=2.6769s  min=1.8252  max=2.8911  all=['1.825', '2.708', '2.646', '2.646', '2.837', '2.891']
+bridge=None                                      median=3.1907s  min=2.4339  max=4.2799  all=['3.815', '4.280', '3.825', '2.434', '2.566', '2.549']
+concept_layer=None                               median=2.3859s  min=1.6186  max=2.5215  all=['1.619', '2.364', '2.476', '2.522', '2.376', '2.396']
+balancer.align_every=0 (1 traversal)             median=1.8286s  min=1.3044  max=2.1345  all=['1.304', '1.682', '1.836', '1.821', '1.938', '2.135']
+balancer.align=False (raw sum)                   median=1.9455s  min=1.2521  max=2.5044  all=['1.252', '1.919', '1.859', '1.972', '2.504', '2.410']
+gradalign_weight=0.3 (4th traversal)             median=2.0512s  min=1.6910  max=2.2683  all=['1.691', '2.268', '1.883', '1.924', '2.178', '2.267']
+
+=== gradient checkpointing (fresh builds) ===
+gradient_checkpointing=True                      median=2.6483s all=['2.242', '2.489', '2.807', '2.922']
+
+=== reasoning internals (gc=False, per full step) ===
+full step = 1.4017s; internal totals:
+  adaptive_reasoning         0.0119s  calls=1
+  embed.forward              0.0015s  calls=2
+  head.forward               0.0117s  calls=7
+  knowledge_signal           0.0025s  calls=1
+  last_conf                  0.0034s  calls=4
+  reasoning_memory           0.0022s  calls=5
