@@ -92,6 +92,37 @@ def test_head_lacuna_off_with_memory_bank_and_temper_no_crash():
     assert torch.isfinite(loss)
 
 
+def test_validation_head_calls_do_not_move_running_stats():
+    # Round 7 (аудит): _last_conf/_knowledge_signal (валидационные вызовы в
+    # reasoning-цикле, до K раз за шаг) не должны двигать running-статистики
+    # головы — иначе горизонт в шагах падает в ~(K+1) раз.
+    torch.manual_seed(0)
+    cfg = EVAConfig(D=64, n_layers=2, mlp_groups=2, code_dim=8, code_sparsity=2,
+                    vocab=16, save_dir='.', logit_cache_enabled=False,
+                    gradient_checkpointing=False, head_lacuna=True,
+                    head_temper=True, head_temper_after=0, memory_bank=True,
+                    mem_min_write_mat=0.0, explicit_reasoning=True,
+                    intent_bridge=True, bridge_conn=0.1)
+    m = EVAStack(cfg).train()
+    x = torch.randint(1, 16, (1, 12))
+    h = m.embed_tokens(x)
+    with torch.no_grad():
+        m(h, None, step=2000, tokens=x)          # главный forward двигает статистики
+    head = m.lm_head
+    e0 = head.ell_ema.detach().clone()
+    l0 = head.ell_ladder.detach().clone()
+    c0 = head._chi_ladder.detach().clone()
+    s0 = int(head._srl_step.item()) if hasattr(head, '_srl_step') else None
+    for _ in range(3):
+        _ = m._last_conf(h)
+        _ = m._knowledge_signal(h)
+    assert torch.equal(head.ell_ema, e0), 'ell_ema сдвинулся валидацией'
+    assert torch.equal(head.ell_ladder, l0), 'ell_ladder сдвинулся валидацией'
+    assert torch.equal(head._chi_ladder, c0), '_chi_ladder сдвинулся валидацией'
+    if s0 is not None:
+        assert int(head._srl_step.item()) == s0, '_srl_step сдвинулся валидацией'
+
+
 def test_restore_never_shares_storage_with_snapshot():
     # Round 4 (саботаж S3): restore-путь не должен отдавать модели тензоры
     # снимка — ни через _restore_value, ни через list-ветку с иной формой.

@@ -578,7 +578,11 @@ class LossBalancer:
             return
         ce_grads = torch.autograd.grad(ce_loss, params, retain_graph=True,
                                        allow_unused=True)
-        aux_tensors = [v for v in aux_dict.values() if isinstance(v, torch.Tensor)]
+        # Round 7 (аудит): тензоры без requires_grad роняли autograd.grad
+        # ("element 0 does not require grad") — фильтруем; пустой список
+        # уходит в CE-only ветку ниже.
+        aux_tensors = [v for v in aux_dict.values()
+                       if isinstance(v, torch.Tensor) and v.requires_grad]
         if not aux_tensors:
             for p, g in zip(params, ce_grads):
                 # clone() ОБЯЗАТЕЛЕН: autograd.grad при retain_graph отдаёт

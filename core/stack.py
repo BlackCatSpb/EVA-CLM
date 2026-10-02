@@ -880,7 +880,9 @@ class EVAStack(nn.Module):
         specialization/collective memory/concept space).
         Zero-initialized know_proj keeps resume unchanged."""
         with torch.no_grad():
-            logits = self.lm_head(h)  # (B, L, V)
+            # Round 7 (аудит): валидационный вызов — статистики головы
+            # (ell_ema/ell_ladder/_chi_ladder/_srl_step) не двигаются
+            logits = self._head_frozen(h)  # (B, L, V)
             if getattr(self.cfg, 'softmax_free', True):
                 # Режим Б: per-class уверенность (сигмоида), без нормировки к
                 # симплексу и без конкуренции. Верификатор читает потенциал
@@ -919,10 +921,26 @@ class EVAStack(nn.Module):
             ], dim=-1)  # (B, 8)
         return know
 
+    def _head_frozen(self, h):
+        """Вызов головы БЕЗ обновления running-статистик (валидация/зонды).
+
+        Round 7 (аудит): _last_conf в reasoning-цикле вызывается до K раз за
+        шаг, и каждый вызов двигал ell_ema/ell_ladder/_chi_ladder/_srl_step —
+        горизонт статистик в шагах падал в ~(K+1) раз и зависел от глубины
+        цикла (замер: +5.3% ell_ladder за один forward). Флаг _stats_freeze
+        глушит только обновления, forward/логиты не меняются."""
+        _head = self.lm_head
+        _prev = getattr(_head, '_stats_freeze', False)
+        _head._stats_freeze = True
+        try:
+            return _head(h)
+        finally:
+            _head._stats_freeze = _prev
+
     def _last_conf(self, h):
         """p1 of the last position — confidence of the head on `h`."""
         with torch.no_grad():
-            logits = self.lm_head(h[:, -1:, :])
+            logits = self._head_frozen(h[:, -1:, :])
             if getattr(self.cfg, 'softmax_free', True):
                 p = logits.sigmoid()
             else:

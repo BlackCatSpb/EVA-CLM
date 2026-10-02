@@ -72,6 +72,9 @@ def test_ladder_updates_in_training_only():
     x2 = torch.randint(3, cfg.vocab, (1, 16))
     h2 = m.embed(x2)
     out, *_ = m(h2, None, step=1, tokens=x2)
+    # Round 7: валидационные вызовы головы не двигают лестницу — её двигает
+    # реальный вызов головы в training (как CE-путь)
+    m.lm_head(h2)
     assert not torch.equal(lvl_eval, hd.ell_ladder), 'лестница не обновляется в train'
 
 

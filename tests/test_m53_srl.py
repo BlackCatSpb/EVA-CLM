@@ -86,6 +86,10 @@ def test_forward_runs_srl_and_reports_telemetry():
     x = torch.randint(1, SMALL['vocab'], (1, 8))
     h = m.embed_tokens(x)
     out, st, gs, _ = m(h, None, step=1, tokens=x)
+    # Round 7: валидационные вызовы головы (_knowledge_signal/_last_conf) не
+    # двигают телеметрию/каденцию SRL — её ставит реальный вызов головы
+    # (в проде — CE-вызов из compute_losses)
+    m.lm_head(h)
     assert hasattr(m.lm_head, '_last_srl'), 'SRL telemetry missing'
     for k in ('conf', 'ent', 'expl'):
         assert k in m.lm_head._last_srl
@@ -103,8 +107,10 @@ def test_srl_waits_for_the_warmup():
     x = torch.randint(1, SMALL['vocab'], (1, 8))
     h = m.embed_tokens(x)
     m(h, None, step=0, tokens=x)
+    m.lm_head(h)   # Round 7: реальный вызов головы (валидационные — не в счёт)
     assert not hasattr(m.lm_head, '_last_srl'), 'SRL ran before the warmup'
     m(h, None, step=10, tokens=x)
+    m.lm_head(h)   # реальный вызов после прогрева
     assert hasattr(m.lm_head, '_last_srl'), 'SRL did not activate at the warmup step'
 
 

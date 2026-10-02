@@ -575,8 +575,11 @@ def test_tokenstream_wrapped(tmp_path=None):
     import importlib.util, numpy as np, tempfile, pathlib
     if tmp_path is None:
         tmp_path = pathlib.Path(tempfile.mkdtemp())
+    # Round 7 (аудит): абсолютный Windows-путь ломал портируемость
+    # (Colab/Linux) — путь относительно корня репо.
+    _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     spec = importlib.util.spec_from_file_location(
-        '_train_mod', r'C:\Users\black\OneDrive\Desktop\EVA CLM\scripts\train.py')
+        '_train_mod', os.path.join(_repo, 'scripts', 'train.py'))
     # import train.py for its class only: it guards side effects under __main__,
     # but heavy top-level imports could fail — fall back to source exec of class
     src = open(spec.origin, encoding='utf-8').read()

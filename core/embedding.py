@@ -772,7 +772,11 @@ class SigmoidCodedHead(nn.Module):
                     else:
                         self._chi_ladder.fill_(_cm)
                         self._chi_ladder_ready = True
-                elif self.training:
+                elif self.training and not getattr(self, '_stats_freeze', False):
+                    # Round 7 (аудит): валидационные вызовы головы (_last_conf/
+                    # _knowledge_signal) не двигают running-статистики — иначе
+                    # горизонт в шагах падает в ~(K+1) раз и зависит от глубины
+                    # reasoning-цикла (замер: +5.3% ell_ladder за forward)
                     self._chi_ladder.mul_(self._ladder_decay).add_(
                         (1.0 - self._ladder_decay) * _cm)
             if not self._ell_ema_ready:
@@ -785,9 +789,11 @@ class SigmoidCodedHead(nn.Module):
                     self.ell_ema.fill_(_m0)
                     self.ell_ladder.fill_(_m0)
                     self._ell_ema_ready = True
-            elif self.training:
+            elif self.training and not getattr(self, '_stats_freeze', False):
                 # ... but the running statistic only moves in training (M55c:
                 # the M8 eval-isolation doctrine — eval must not drift it).
+                # Round 7 (аудит): и не двигается валидационными вызовами
+                # головы (см. _stats_freeze в stack._last_conf).
                 _m = ell.detach().mean()
                 self.ell_ema.mul_(self.lacuna_ema).add_(
                     _m, alpha=1.0 - self.lacuna_ema)
@@ -1042,10 +1048,13 @@ class SigmoidCodedHead(nn.Module):
             _u_srl, _srl_info = self.srl(u)
             if self.srl_apply:
                 u = _u_srl              # M53d: opt-in; diagnostic-only otherwise
-            if self.training:
+            if self.training and not getattr(self, '_stats_freeze', False):
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
-        if self.srl_on and getattr(self, '_srl_active', True):
+        if self.srl_on and getattr(self, '_srl_active', True) \
+                and not getattr(self, '_stats_freeze', False):
             self._srl_step += 1         # M53e: the cadence counter
+            # Round 7 (аудит): валидационные вызовы не должны ускорять каденцию
+            # SRL/статистик головы (см. stack._last_conf)
         # M55a (P5): `base` is EXACTLY dead in the normalized path (a constant
         # over the vocab cancels in the logsumexp — verified 0 gradient), so it
         # is only added when the raw logits are returned. The "unknown" channel
