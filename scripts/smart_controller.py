@@ -17,6 +17,10 @@ SmartController сам подбирает параметры генерации 
 import os, sys, math, torch
 import torch.nn.functional as F
 from core import EVAStack
+try:
+    from generate import decode_step          # M65-opt: общий L=1 шаг
+except ImportError:                            # запуск из другого CWD
+    from scripts.generate import decode_step
 
 
 def lerp(a, b, t):
@@ -329,16 +333,11 @@ def smart_generate(model, prompt, controller, max_new_tokens=64, rep_window=8,
         out_ids.append(nt)
         tokens = torch.cat([tokens, torch.tensor([nt], dtype=torch.long, device=device)])
 
-        # P0-6: incremental decode — ONE new token per step, the state carried.
+        # P0-6: incremental decode — единый хелпер generate.decode_step
+        # (M65-opt: расхождение путей генерации было источником P0-6)
         tok1 = torch.tensor([[nt]], dtype=torch.long, device=device)
-        h1 = model.embed_tokens(tok1)
-        out, state, gs, rb = model(h1, state, global_state=gs, adaptive=False,
-                                   context_mem=context_mem, allow_write=allow_write,
-                                   step=base_step + step + 1,
-                                   intent_state=intent_state,
-                                   reasoning_buffer=rb[0] if rb is not None else None,
-                                   reasoning_count=rb[1] if rb is not None else None,
-                                   tokens=tok1)
-        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
-        model.observe_output(head(out))  # salience of THIS step -> next intent
+        out, state, gs, rb, intent_state = decode_step(
+            model, tok1, head, state, gs, rb, intent_state,
+            step=base_step + step + 1,
+            context_mem=context_mem, allow_write=allow_write)
     return det(out_ids), controller.decisions

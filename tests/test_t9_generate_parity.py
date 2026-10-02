@@ -67,14 +67,48 @@ def test_step_gates_match_training_regime():
 
 
 def test_source_locks():
-    """Статические локи (R1-класс: правка wiring не должна откатиться)."""
+    """Статические локи (R1-класс: правка wiring не должна откатиться).
+
+    M65-opt: декод-блок вынесен в общий generate.decode_step — лок проверяет
+    ЕДИНЫЙ путь (раньше текстовые паттерны жили в двух файлах и разошлись —
+    ровно баг P0-6).
+    """
     base = os.path.join(os.path.dirname(__file__), '..', 'scripts')
     for fname in ('generate.py', 'smart_controller.py'):
         src = open(os.path.join(base, fname), encoding='utf-8').read()
-        assert 'global_state=gs' in src, f'{fname}: gs не ведётся'
-        assert 'intent_state=intent_state' in src, f'{fname}: intent не ведётся'
+        assert 'decode_step(' in src, f'{fname}: декод не через общий decode_step'
         assert 'base_step + step' in src, f'{fname}: step не сдвинут к шагу чекпойнта'
     g = open(os.path.join(base, 'generate.py'), encoding='utf-8').read()
+    assert 'global_state=gs' in g, 'decode_step: gs не ведётся'
+    assert 'intent_state=intent_state' in g, 'decode_step: intent не ведётся'
     assert 'prompt_tokens + [2]' in g, 'generate.py: нет SEP на конце промпта'
     sc = open(os.path.join(base, 'smart_controller.py'), encoding='utf-8').read()
     assert 'ids + [2]' in sc, 'smart_controller.py: нет SEP на конце промпта'
+
+
+def test_decode_step_helper_threads_state():
+    """Поведенческий замок общего decode_step: gs/intent_state ведутся,
+    observe_output вызывается ровно раз (класс P0-6 — молчаливое расхождение)."""
+    import importlib.util
+    base = os.path.join(os.path.dirname(__file__), '..', 'scripts')
+    spec = importlib.util.spec_from_file_location(
+        'gen_mod', os.path.join(base, 'generate.py'))
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    cfg, m = _model()
+    torch.manual_seed(7)
+    tok1 = torch.randint(3, cfg.vocab, (1, 1))
+    seen = {'obs': 0}
+    orig_obs = m.observe_output
+
+    def _obs(x):
+        seen['obs'] += 1
+        return orig_obs(x)
+
+    m.observe_output = _obs
+    with torch.no_grad():
+        out, state, gs, rb, intent_state = gen.decode_step(
+            m, tok1, m.lm_head, None, None, None, None, step=1500)
+    assert gs is not None, 'decode_step: gs не вернулся'
+    assert seen['obs'] == 1, 'decode_step: observe_output не вызван'
+    assert out.shape[0] == 1

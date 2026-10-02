@@ -166,6 +166,26 @@ def load_russian_tokenizer(path=None):
 
 
 @torch.no_grad()
+def decode_step(model, tok1, head, state, gs, rb, intent_state, step,
+                context_mem=None, allow_write=None):
+    """M65-opt: единый инкрементальный L=1 шаг декодирования.
+
+    generate.py и smart_controller.py дублировали этот блок — ровно тот класс
+    кода, где жил баг P0-6 (расхождение путей генерации). Возвращает
+    (out, state, gs, rb, intent_state).
+    """
+    h1 = model.embed_tokens(tok1)
+    out, state, gs, rb = model(h1, state, global_state=gs, adaptive=False,
+                               context_mem=context_mem, allow_write=allow_write,
+                               step=step, intent_state=intent_state,
+                               reasoning_buffer=rb[0] if rb is not None else None,
+                               reasoning_count=rb[1] if rb is not None else None,
+                               tokens=tok1)
+    intent_state = getattr(model, '_last_intent_state', None)   # T9.11
+    model.observe_output(head(out))  # salience of THIS step -> next intent
+    return out, state, gs, rb, intent_state
+
+
 def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
              show_mind=False, continuous_learn=False, context_mem=None,
              sampler=None, rep_penalty=2.0, rep_window=5, reset_reasoning=False,
@@ -277,16 +297,10 @@ def generate(model, prompt, max_new_tokens=128, temperature=1.0, top_k=50,
 
         # Incremental decode: ONE new token per step, the state carried.
         tok1 = next_token.view(1, 1)
-        h1 = model.embed_tokens(tok1)
-        out, state, gs, rb = model(h1, state, global_state=gs, adaptive=False,
-                                   context_mem=context_mem, allow_write=allow_write,
-                                   step=base_step + step + 1,
-                                   intent_state=intent_state,
-                                   reasoning_buffer=rb[0] if rb is not None else None,
-                                   reasoning_count=rb[1] if rb is not None else None,
-                                   tokens=tok1)
-        intent_state = getattr(model, '_last_intent_state', None)  # T9.11
-        model.observe_output(head(out))  # salience of THIS step -> next intent
+        out, state, gs, rb, intent_state = decode_step(
+            model, tok1, head, state, gs, rb, intent_state,
+            step=base_step + step + 1,
+            context_mem=context_mem, allow_write=allow_write)
     
     if show_mind and mind_log:
         import json

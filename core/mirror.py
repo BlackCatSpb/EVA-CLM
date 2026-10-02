@@ -765,18 +765,8 @@ class GroupedCognitiveMirror(nn.Module):
         # base _tau_signal_log is a LOG-SPACE OFFSET to the geometric ladder:
         # 0 ⇒ exactly the τ-schedule (identity at init, checkpoint-compatible),
         # training may adapt the signal temperature beyond the fixed schedule.
-        if self._tau_norm_layer is not None:
-            tau_norm = self._tau_norm_layer
-            log_base = (math.log(self._tau_gate_min)
-                        + (math.log(self._tau_gate_max) - math.log(self._tau_gate_min))
-                        * (1 - tau_norm))
-            tau_signal = (log_base + self._tau_signal_log).clamp(
-                min=math.log(0.01), max=2 * math.log(max(self._tau_gate_max, 1.01))).exp()
-            w = torch.sigmoid(self._signal_log_weights / tau_signal)
-            self._tau_signal_used = tau_signal.detach() if torch.is_tensor(tau_signal) else float(tau_signal)
-        else:
-            w = torch.sigmoid(self._signal_log_weights)  # (n_sig,), no sum-to-1 constraint
-        
+        w = self._signal_weights()
+
         # ─── Decorrelation: orthogonalize WEIGHTED signals (gradient flows to _signal_log_weights) ───
         n_sig = len(signals)
         decorr = 0.0
@@ -1100,6 +1090,29 @@ class GroupedCognitiveMirror(nn.Module):
         elif getattr(self, '_hp_grad', None) is not None and torch.isfinite(self._hp_grad).all():
             self._prev_grad_norm.copy_(self._hp_grad)
 
+    def _signal_weights(self) -> torch.Tensor:
+        """M65-opt: единая точка сигнальных весов.
+
+        forward и debug_mind дублировали τ-сигнальный блок (риск расхождения —
+        класс P0-6). U5: τ-scheduled signal temperature — границы из τ-поля
+        (tau_config.gate_tau_min/max), обучаемый _tau_signal_log — лог-смещение
+        геометрической лестницы (0 ⇒ чистое расписание, identity на ините).
+        """
+        if self._tau_norm_layer is not None:
+            tau_norm = self._tau_norm_layer
+            log_base = (math.log(self._tau_gate_min)
+                        + (math.log(self._tau_gate_max) - math.log(self._tau_gate_min))
+                        * (1 - tau_norm))
+            tau_signal = (log_base + self._tau_signal_log).clamp(
+                min=math.log(0.01), max=2 * math.log(max(self._tau_gate_max, 1.01))).exp()
+            w = torch.sigmoid(self._signal_log_weights / tau_signal)
+            self._tau_signal_used = (tau_signal.detach()
+                                     if torch.is_tensor(tau_signal)
+                                     else float(tau_signal))
+        else:
+            w = torch.sigmoid(self._signal_log_weights)
+        return w
+
     @property
     def _cached_ig_eff(self):
         """M65-opt: intent-эффективность как property — device-sync случается
@@ -1116,19 +1129,9 @@ class GroupedCognitiveMirror(nn.Module):
         info['private_mem_norm'] = self._private_mem.norm(dim=-1).mean().item()
         info['w_help'] = torch.sigmoid(self.w_help).mean().item()
         info['w_contra'] = self.w_contra.mean().item()
-        # U5: τ-scheduled signal temperature (consistent with forward: geometric
-        # ladder × exp(learnable log-space offset _tau_signal_log))
-        if self._tau_norm_layer is not None:
-            tau_norm = self._tau_norm_layer
-            log_base = (math.log(self._tau_gate_min)
-                        + (math.log(self._tau_gate_max) - math.log(self._tau_gate_min))
-                        * (1 - tau_norm))
-            tau_signal = (log_base + self._tau_signal_log).clamp(
-                min=math.log(0.01), max=2 * math.log(max(self._tau_gate_max, 1.01))).exp()
-            w = torch.sigmoid(self._signal_log_weights / tau_signal)
-            self._tau_signal_used = tau_signal.detach() if torch.is_tensor(tau_signal) else float(tau_signal)
-        else:
-            w = torch.sigmoid(self._signal_log_weights)
+        # U5: τ-scheduled signal temperature — единый хелпер (M65-opt:
+        # forward и debug_mind дублировали блок; консистентность гарантирована)
+        w = self._signal_weights()
         w_norm = w / (w.sum() + 1e-10)
         for i, label in enumerate(['temp','pred','smooth','sym','help'][:len(w)]):
             info[f'signal_w_{label}'] = w_norm[i].item()
