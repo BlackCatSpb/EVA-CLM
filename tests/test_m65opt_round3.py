@@ -70,15 +70,23 @@ def test_head_lacuna_off_with_memory_bank_and_temper_no_crash():
     # memory_bank=True падало AttributeError (_temper_rel) на
     # step>=head_temper_after. Комбинация валидная.
     torch.manual_seed(0)
+    # Round 6 (аудит): с дефолтным mem_min_write_mat=0.3 на step=2000 bank
+    # заперт maturation-гейтом -> _mem_dir=None -> ветка temper НЕ исполнялась
+    # и тест проходил даже на откаченном гарде. mem_min_write_mat=0.0
+    # открывает запись, а assert ниже гарантирует, что ветка реально была.
     cfg = EVAConfig(D=64, n_layers=2, mlp_groups=2, code_dim=8, code_sparsity=2,
                     vocab=16, save_dir='.', logit_cache_enabled=False,
                     gradient_checkpointing=False, head_lacuna=False,
                     head_temper=True, head_temper_after=0, memory_bank=True,
-                    intent_bridge=True, bridge_conn=0.1)
+                    mem_min_write_mat=0.0, intent_bridge=True, bridge_conn=0.1)
     m = EVAStack(cfg).train()
     x = torch.randint(1, 16, (1, 12))
     h = m.embed_tokens(x)
     out, state, gs, r = m(h, None, step=2000, tokens=x)
+    assert getattr(m.lm_head, '_mem_dir', None) is not None, \
+        'ветка temper не исполнена (bank не записал) — тест не покрывает краш'
+    assert hasattr(m.lm_head, '_last_conflict'), \
+        'temper-ветка не исполнилась (нет _last_conflict) — тест не покрывает краш'
     assert torch.isfinite(out).all()
     loss, aux = m.compute_losses(out, x, h_emb=h)
     assert torch.isfinite(loss)

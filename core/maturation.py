@@ -110,8 +110,12 @@ class MaturationController(nn.Module):
         if self.tau_config is None:
             self._update_tau_norm(torch.zeros(self.n_layers))
         else:
-            self.tau_config.update()
-            self.tau_norm.copy_(self.tau_config.tau_norm)
+            # Round 6 (аудит): copy_ в grad-режиме оставлял на буфере
+            # init-time grad_fn (CopyBackwards) навсегда — буфер не должен
+            # нести граф (release_step_graph его не чистит).
+            with torch.no_grad():
+                self.tau_config.update()
+                self.tau_norm.copy_(self.tau_config.tau_norm)
 
     def _update_tau_norm(self, dev: torch.Tensor) -> None:
         """Update tau_norm from deviation tensor."""
