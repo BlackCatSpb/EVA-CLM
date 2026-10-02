@@ -95,3 +95,37 @@ def test_measure_gives_a_verdict_and_restores():
     led2 = BirthLedger()
     led2.load_state_dict(sd)
     assert led2.stats() == led.stats()
+
+
+def test_state_dict_d_is_a_stacked_tensor_not_lists():
+    """EXT §7.2: чекпоинт не должен раздуваться list-of-lists на запись."""
+    led = BirthLedger()
+    for i in range(5):
+        led.record('phantom_bit', torch.randn(64), step=i, r=96, slot=i)
+    led.blacklist.append(dict(d=torch.randn(64), until=10))
+    sd = led.state_dict()
+    assert isinstance(sd['d_stack'], torch.Tensor)
+    assert sd['d_stack'].shape == (5, 64)
+    assert all('d' not in e for e in sd['entries'])
+    assert isinstance(sd['bl_d_stack'], torch.Tensor)
+    led2 = BirthLedger()
+    led2.load_state_dict(sd)
+    assert len(led2.entries) == 5
+    assert all(torch.equal(a['d'], b['d'])
+               for a, b in zip(led.entries, led2.entries))
+    assert torch.equal(led2.blacklist[0]['d'], led.blacklist[0]['d'])
+    assert led2.stats() == led.stats()
+
+
+def test_load_legacy_lists_format_still_works():
+    """Старые чекпоинты (d = список в каждой записи) обязаны грузиться."""
+    led = BirthLedger()
+    led.record('phantom_bit', torch.randn(64), step=0, r=96, slot=1)
+    legacy = dict(entries=[dict(led.entries[0], d=led.entries[0]['d'].tolist())],
+                  blacklist=[dict(d=[0.0] * 64, until=7)])
+    led2 = BirthLedger()
+    led2.load_state_dict(legacy)
+    assert len(led2.entries) == 1
+    assert torch.equal(led2.entries[0]['d'], led.entries[0]['d'])
+    assert led2.blacklist[0]['until'] == 7
+    assert isinstance(led2.blacklist[0]['d'], torch.Tensor)

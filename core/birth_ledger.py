@@ -176,13 +176,38 @@ class BirthLedger:
         return float(vs[len(vs) // 2])
 
     def state_dict(self) -> dict:
-        return dict(entries=[{**e, 'd': e['d'].tolist()} for e in self.entries],
-                    blacklist=[{'d': b['d'].tolist(), 'until': b['until']}
-                               for b in self.blacklist])
+        # EXT §7.2: 'd' — ОДИН стек-тензор вместо list-of-lists на каждую запись
+        # (10.5k записей × 2560 float в Python-списках = +225MB к чекпоинту).
+        _meta = [{k: v for k, v in e.items() if k != 'd'} for e in self.entries]
+        _bl_meta = [{k: v for k, v in b.items() if k != 'd'} for b in self.blacklist]
+        try:
+            _d = torch.stack([e['d'] for e in self.entries]) if self.entries else None
+        except RuntimeError:                       # разные формы — легаси-путь
+            _meta = [dict(m, d=torch.as_tensor(e['d']).tolist())
+                     for m, e in zip(_meta, self.entries)]
+            _d = None
+        try:
+            _bd = (torch.stack([b['d'] for b in self.blacklist])
+                   if self.blacklist else None)
+        except RuntimeError:
+            _bl_meta = [dict(m, d=torch.as_tensor(b['d']).tolist())
+                        for m, b in zip(_bl_meta, self.blacklist)]
+            _bd = None
+        return dict(entries=_meta, d_stack=_d,
+                    blacklist=_bl_meta, bl_d_stack=_bd)
 
     def load_state_dict(self, sd: Optional[dict]) -> None:
         if not sd:
             return
-        self.entries = [{**e, 'd': torch.tensor(e['d'])} for e in sd.get('entries', [])]
-        self.blacklist = [{'d': torch.tensor(b['d']), 'until': b['until']}
-                          for b in sd.get('blacklist', [])]
+        _entries = sd.get('entries', [])
+        _ds = sd.get('d_stack', None)
+        if _ds is not None and len(_entries) == len(_ds):
+            self.entries = [dict(e, d=_ds[i]) for i, e in enumerate(_entries)]
+        else:                                      # легаси: d внутри записи
+            self.entries = [dict(e, d=torch.as_tensor(e['d'])) for e in _entries]
+        _bl = sd.get('blacklist', [])
+        _bds = sd.get('bl_d_stack', None)
+        if _bds is not None and len(_bl) == len(_bds):
+            self.blacklist = [dict(b, d=_bds[i]) for i, b in enumerate(_bl)]
+        else:
+            self.blacklist = [dict(b, d=torch.as_tensor(b['d'])) for b in _bl]
