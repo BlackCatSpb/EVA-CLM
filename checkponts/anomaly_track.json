@@ -238,5 +238,295 @@
   "gate_min": 0.4419126808643341,
   "gate_min_layer": 14,
   "births": []
+ },
+ {
+  "step": 2970,
+  "hp_max": 2.8271842002868652,
+  "hp_layer": 1,
+  "predmse_max": 1.8225054740905762,
+  "predmse_layer": 0,
+  "gate_min": 0.017543436959385872,
+  "gate_min_layer": 2,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.816545009613037,
+  "hp_layer": 0,
+  "predmse_max": 3.5009493827819824,
+  "predmse_layer": 6,
+  "gate_min": 0.4637220799922943,
+  "gate_min_layer": 2,
+  "births": []
+ },
+ {
+  "step": 7315,
+  "hp_max": 5.650157928466797,
+  "hp_layer": 16,
+  "predmse_max": 2.4530317783355713,
+  "predmse_layer": 7,
+  "gate_min": 0.34714728593826294,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 3135,
+  "hp_max": 5.702683448791504,
+  "hp_layer": 7,
+  "predmse_max": 31.96162986755371,
+  "predmse_layer": 1,
+  "gate_min": 6.995293558818838e-13,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 3135,
+  "hp_max": 5.850644111633301,
+  "hp_layer": 7,
+  "predmse_max": 33.39403533935547,
+  "predmse_layer": 1,
+  "gate_min": 2.8814442693848863e-13,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 3135,
+  "hp_max": 5.815001487731934,
+  "hp_layer": 7,
+  "predmse_max": 32.34089660644531,
+  "predmse_layer": 1,
+  "gate_min": 3.6236974792352994e-13,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 10450,
+  "hp_max": 10.005080223083496,
+  "hp_layer": 6,
+  "predmse_max": 145.82261657714844,
+  "predmse_layer": 6,
+  "gate_min": 0.0312519371509552,
+  "gate_min_layer": 9,
+  "births": []
+ },
+ {
+  "step": 500,
+  "hp_max": 3.6680355072021484,
+  "hp_layer": 0,
+  "predmse_max": 6.012601852416992,
+  "predmse_layer": 0,
+  "gate_min": 6.891425528010586e-06,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.3223743438720703,
+  "hp_layer": 0,
+  "predmse_max": 2.5000672340393066,
+  "predmse_layer": 20,
+  "gate_min": 0.10475149005651474,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.5083556175231934,
+  "hp_layer": 1,
+  "predmse_max": 3.2555360794067383,
+  "predmse_layer": 12,
+  "gate_min": 0.2437833547592163,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.5347578525543213,
+  "hp_layer": 1,
+  "predmse_max": 3.2483279705047607,
+  "predmse_layer": 12,
+  "gate_min": 0.24359266459941864,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.5658047199249268,
+  "hp_layer": 1,
+  "predmse_max": 3.2712810039520264,
+  "predmse_layer": 12,
+  "gate_min": 0.2449617087841034,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.594583034515381,
+  "hp_layer": 1,
+  "predmse_max": 3.315480947494507,
+  "predmse_layer": 12,
+  "gate_min": 0.2437729686498642,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.594583034515381,
+  "hp_layer": 1,
+  "predmse_max": 3.315480947494507,
+  "predmse_layer": 12,
+  "gate_min": 0.2437729686498642,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.594583034515381,
+  "hp_layer": 1,
+  "predmse_max": 3.315480947494507,
+  "predmse_layer": 12,
+  "gate_min": 0.2437729686498642,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.594583034515381,
+  "hp_layer": 1,
+  "predmse_max": 3.315480947494507,
+  "predmse_layer": 12,
+  "gate_min": 0.2437729686498642,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.594583034515381,
+  "hp_layer": 1,
+  "predmse_max": 3.315480947494507,
+  "predmse_layer": 12,
+  "gate_min": 0.2437729686498642,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 250,
+  "hp_max": 2.594583034515381,
+  "hp_layer": 1,
+  "predmse_max": 3.315480947494507,
+  "predmse_layer": 12,
+  "gate_min": 0.2437729686498642,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 1250,
+  "hp_max": 5.75303840637207,
+  "hp_layer": 22,
+  "predmse_max": 7.955510139465332,
+  "predmse_layer": 0,
+  "gate_min": 0.034048788249492645,
+  "gate_min_layer": 4,
+  "births": []
+ },
+ {
+  "step": 3960,
+  "hp_max": 5.35788631439209,
+  "hp_layer": 19,
+  "predmse_max": 5.094357490539551,
+  "predmse_layer": 0,
+  "gate_min": 6.978484456965361e-11,
+  "gate_min_layer": 7,
+  "births": []
+ },
+ {
+  "step": 5720,
+  "hp_max": 7.0731306076049805,
+  "hp_layer": 11,
+  "predmse_max": 8.448722839355469,
+  "predmse_layer": 11,
+  "gate_min": 2.601531338236295e-38,
+  "gate_min_layer": 8,
+  "births": []
+ },
+ {
+  "step": 3080,
+  "hp_max": 3.816351890563965,
+  "hp_layer": 5,
+  "predmse_max": 9.251252174377441,
+  "predmse_layer": 4,
+  "gate_min": 1.805803081375785e-22,
+  "gate_min_layer": 5,
+  "births": []
+ },
+ {
+  "step": 10560,
+  "hp_max": 9.436068534851074,
+  "hp_layer": 4,
+  "predmse_max": 111.3027114868164,
+  "predmse_layer": 7,
+  "gate_min": 0.0017576199024915695,
+  "gate_min_layer": 3,
+  "births": []
+ },
+ {
+  "step": 13640,
+  "hp_max": 4.869708061218262,
+  "hp_layer": 7,
+  "predmse_max": 51.786312103271484,
+  "predmse_layer": 7,
+  "gate_min": 0.06943716108798981,
+  "gate_min_layer": 19,
+  "births": []
+ },
+ {
+  "step": 16720,
+  "hp_max": 5.057579040527344,
+  "hp_layer": 4,
+  "predmse_max": 48.074554443359375,
+  "predmse_layer": 4,
+  "gate_min": 0.00039123703027144074,
+  "gate_min_layer": 18,
+  "births": []
+ },
+ {
+  "step": 18920,
+  "hp_max": 3.267660617828369,
+  "hp_layer": 17,
+  "predmse_max": 3.2575230598449707,
+  "predmse_layer": 1,
+  "gate_min": 0.004042600281536579,
+  "gate_min_layer": 18,
+  "births": []
+ },
+ {
+  "step": 18920,
+  "hp_max": 5.276517391204834,
+  "hp_layer": 3,
+  "predmse_max": 85.31065368652344,
+  "predmse_layer": 3,
+  "gate_min": 3.1181754400755324e-10,
+  "gate_min_layer": 18,
+  "births": []
+ },
+ {
+  "step": 16720,
+  "hp_max": 6.787319660186768,
+  "hp_layer": 2,
+  "predmse_max": 242.4546356201172,
+  "predmse_layer": 2,
+  "gate_min": 0.12499923259019852,
+  "gate_min_layer": 18,
+  "births": []
+ },
+ {
+  "step": 18920,
+  "hp_max": 5.276517391204834,
+  "hp_layer": 3,
+  "predmse_max": 85.31065368652344,
+  "predmse_layer": 3,
+  "gate_min": 3.1181754400755324e-10,
+  "gate_min_layer": 18,
+  "births": []
  }
 ]

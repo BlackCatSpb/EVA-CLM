@@ -449,6 +449,9 @@ class SigmoidCodedHead(nn.Module):
                 _orth_rows(torch.randn(self._Kp_max, D, generator=_pgen)))
             self.phantom_mix: nn.Parameter = nn.Parameter(torch.zeros(self.K, self._Kp_max))
             self.register_buffer('_kp_active', torch.tensor(self.Kp, dtype=torch.long))
+            # M65-opt: python-кэш активного среза (ленивый; инвалидируется в
+            # grow_phantom_bits и при загрузке состояния)
+            self._kp_active_py: Optional[int] = None
             # M65 (аудит 19360 §3): EMA общего режима лакуны (центрирование
             # наблюдения). Non-persistent: на резюме стартует с первой пробы.
             self._lacuna_mode_decay: float = float(
@@ -601,6 +604,7 @@ class SigmoidCodedHead(nn.Module):
         # иначе он остался бы копией свежего инита (найдено симуляцией).
         _has_full = (prefix + 'readout_full') in state_dict
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        self._kp_active_py = None   # M65-opt: инвалидация python-кэша среза
         if self._read_full and not _has_full and hasattr(self, 'readout_full'):
             self._sync_readout_full_from_readout()
 
@@ -687,7 +691,11 @@ class SigmoidCodedHead(nn.Module):
                         'n': _sn,
                         'u_max': float(u.detach().abs().max()),
                         'u_std': float(u.detach().std()),
-                        'h_norm': float(h_norm) if h_norm is not None else -1.0,
+                        # M65-opt: h_norm может прийти тензором — .item()
+                        # считается только внутри спайк-снимка (редко)
+                        'h_norm': (float(h_norm.detach().norm(dim=-1).mean())
+                                   if torch.is_tensor(h_norm)
+                                   else (float(h_norm) if h_norm is not None else -1.0)),
                         'sat': float(self._last_sat),
                     }
         # M65 (аудит 19360 §1): ST-кламп log-odds — forward |u|≤U, backward
@@ -813,7 +821,7 @@ class SigmoidCodedHead(nn.Module):
             e_in = e_l + _eta * self._noise_like(e_l)
         else:
             e_in = e_l
-        _kp = int(self._kp_active.item())                    # M59c: the active slice
+        _kp = self._kp()                                    # M59c: the active slice
         _pt = torch.tanh(e_in @ self.phantom_basis[:_kp].T)  # (...,Kp_active)
         g = torch.sigmoid(self.lacuna_w * (ell_rel - 1.0) + self.lacuna_b)
         p = _pt * g
@@ -952,7 +960,7 @@ class SigmoidCodedHead(nn.Module):
                 # novelties become the channel's own readout instead of the
                 # bank staying a pure observer.
                 if (int(self._pb_step.item()) % (self.phantom_every * 4) == 0
-                        and int(self._kp_active.item()) > 0):
+                        and self._kp() > 0):
                     _srcs = [_pb.confirmed_directions()]
                     _ext = getattr(self, '_ext_phantom_dirs', None)   # M59 (B): UCL
                     if _ext is not None and _ext.shape[0] > 0:
@@ -960,11 +968,18 @@ class SigmoidCodedHead(nn.Module):
                     _cd = torch.cat([x for x in _srcs if x.shape[0] > 0], dim=0) \
                         if any(x.shape[0] > 0 for x in _srcs) else _srcs[0]
                     if _cd.shape[0] > 0:
-                        _n = min(_cd.shape[0], int(self._kp_active.item()))
+                        _n = min(_cd.shape[0], self._kp())
                         _sub = self.phantom_basis.data[:_n]
                         _sub.mul_(0.99).add_(_cd[:_n].to(_sub.dtype), alpha=0.01)
                 self._pb_step += 1
         return u + p @ self.phantom_mix[:, :_kp].T
+
+    def _kp(self) -> int:
+        """M65-opt: активный срез Kp без device-sync (python-кэш; буфер
+        persistent — после загрузки состояния кэш сбрасывается в None)."""
+        if self._kp_active_py is None:
+            self._kp_active_py = int(self._kp_active.item())
+        return self._kp_active_py
 
     @torch.no_grad()
     def grow_phantom_bits(self, directions: torch.Tensor) -> int:
@@ -975,7 +990,7 @@ class SigmoidCodedHead(nn.Module):
         Returns the number of bits added."""
         if directions is None or directions.shape[0] == 0 or self.Kp <= 0:
             return 0
-        _kp = int(self._kp_active.item())
+        _kp = self._kp()
         if _kp >= self._Kp_max:
             return 0
         dn = F.normalize(directions.detach().float(), dim=-1)
@@ -988,6 +1003,7 @@ class SigmoidCodedHead(nn.Module):
         n = min(int(dn.shape[0]), self._Kp_max - _kp)
         self.phantom_basis.data[_kp:_kp + n].copy_(dn[:n].to(self.phantom_basis.dtype))
         self._kp_active.fill_(_kp + n)
+        self._kp_active_py = _kp + n
         return n
 
     def _noise_like(self, x: torch.Tensor) -> torch.Tensor:
@@ -1027,7 +1043,7 @@ class SigmoidCodedHead(nn.Module):
         else:
             squeeze = False
         zt, z_data, e_l = self._gates(h, bus_bias=bus_bias, return_data=True)
-        u, base = self._su(zt, z_data, h_norm=float(h.detach().norm(dim=-1).mean()))
+        u, base = self._su(zt, z_data, h_norm=h)   # M65-opt: тензор, не float()
         u = self._phantom_mix(u, e_l, h)
         if self.srl_on and getattr(self, '_srl_active', True) and (
                 self.srl_every <= 1 or int(self._srl_step.item()) % self.srl_every == 0):

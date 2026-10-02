@@ -17,7 +17,7 @@ Architecture:
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -94,6 +94,9 @@ class UnifiedConceptLayer(nn.Module):
         self.register_buffer('concept_count', torch.zeros(S))
         self.register_buffer('concept_confidence', torch.zeros(S))
         self.register_buffer('_mature', torch.tensor(0.5))  # continuous: [0, 1]
+        # M65-opt: python-снимок зрелости (пишется в _update_maturity; на
+        # резюме подтягивается лениво в forward — буфер persistent).
+        self._mature_py: Optional[float] = None
         self.register_buffer('_resvar_ema', torch.tensor(0.0))
         self.register_buffer('_resvar_var', torch.tensor(1.0))
         self.register_buffer('_step', torch.zeros(1, dtype=torch.long))
@@ -145,7 +148,10 @@ class UnifiedConceptLayer(nn.Module):
         # Continuous maturity: sigmoid((1/cv - λ) · τ)
         tau_mat = torch.exp(self.log_tau_maturity).clamp(0.1, 10.0)
         mat_raw = (1.0 / max(cv, 1e-8) - lam) * tau_mat.item()
-        self._mature.fill_(torch.sigmoid(torch.tensor(mat_raw)).item())
+        # M65-opt: python-снимок рядом с буфером (читатели forward'а — без sync)
+        _mv = 1.0 / (1.0 + math.exp(-mat_raw))
+        self._mature.fill_(_mv)
+        self._mature_py = _mv
 
     @property
     def maturity(self) -> float:
@@ -200,18 +206,24 @@ class UnifiedConceptLayer(nn.Module):
 
         # Update momentum α (learnable, live scalar in the blend)
         alpha = torch.sigmoid(-self.log_tau_update).clamp(0.001, 0.5)
-        mat = self._mature.item()
+        # M65-opt: python-снимок зрелости (ленивая подтяжка на первом вызове
+        # после резюма — один sync за сессию, дальше пишет _update_maturity)
+        if self._mature_py is None:
+            self._mature_py = self._mature.item()
+        mat = self._mature_py
 
         if mat >= 0.3:
             conf_floor = conf.median().clamp(min=0.01)
             upd_idx, upd_keys, upd_vals = [], [], []
+            # M65-opt: счётчики слотов одним tolist (было .item() на слот)
+            _cc = self.concept_count.tolist()
             for s in range(self.S):
                 mask = (best == s) & (conf >= conf_floor)
                 if not bool(mask.any()):
                     continue
                 new_key = F.normalize(q_n[mask].mean(dim=0), dim=-1)
                 new_val = val_proj[mask].mean(dim=0)
-                if int(self.concept_count[s].item()) < 3:
+                if int(_cc[s]) < 3:
                     k_upd, v_upd = new_key, new_val
                 else:
                     a = alpha
@@ -241,8 +253,10 @@ class UnifiedConceptLayer(nn.Module):
         # `novelty_score > 0.5` was equivalent to sim<1 — the τ knob never
         # gated anything).
         gap = torch.sigmoid(self._log_tau_novelty_thr)
-        base_thr = torch.sigmoid(self._log_tau_birth_thr).item()
-        decay = torch.sigmoid(self._log_tau_decay_thr).item()
+        # M65-opt: пороги остаются ТЕНЗОРАМИ (сравнение с тензором — без
+        # .item()-синков на forward; было 2)
+        base_thr = torch.sigmoid(self._log_tau_birth_thr)
+        decay = torch.sigmoid(self._log_tau_decay_thr)
         tau_norm_val = self._tau_norm if self._tau_norm is not None else 0.5
         birth_thresh = base_thr * (1.0 - tau_norm_val * decay)
         novel = ((1.0 - best_sim) > gap) & (conf >= birth_thresh)
@@ -394,8 +408,9 @@ class UnifiedConceptLayer(nn.Module):
         out = out * (0.25 * _hn / (_o + 1e-8)).clamp(max=1.0)
 
         # Cache birth gate for diagnostics
+        # M65-opt: без .item() — храним тензор (читатели конвертируют сами)
         if write_event.any():
-            self._cached_birth_gate.fill_(attn[write_event].mean().item())
+            self._cached_birth_gate.fill_(attn[write_event].mean().detach())
         else:
             self._cached_birth_gate.mul_(0.99)  # decay
 

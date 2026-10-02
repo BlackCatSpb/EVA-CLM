@@ -301,6 +301,9 @@ class GroupedCognitiveMirror(nn.Module):
         # Alpha override: set to 0.5 during warmup to force large pred_error
         # 0.0 = use learned alpha; >0 = override alpha for all experts
         self.register_buffer('_alpha_override', torch.zeros(1), persistent=False)
+        # M65-opt: python-двойник override (пишет lr_scheduler рядом с буфером;
+        # forward читает без device-sync)
+        self._alpha_override_py: float = 0.0
         # Cache for alpha auxiliary loss
         self._cached_pred_k = None
         self._cached_hp = None
@@ -497,7 +500,8 @@ class GroupedCognitiveMirror(nn.Module):
         # state; the old mode branch made eval run a different alpha schedule
         # than train (part of the residual regime-split after the cache fix).
         # The pending-write FLUSH (F4-01) remains a training-only act.
-        override = self._alpha_override.item()
+        # M65-opt: python-снимок override (без .item() на слой на forward)
+        override = self._alpha_override_py
         if override > 0:
             alpha_eff = (1 - override) * alpha_eff + override * 1.0
         pred_k = hp_prev * alpha_eff.view(1, 1, G, k)  # (B, L, G, k)
@@ -528,7 +532,8 @@ class GroupedCognitiveMirror(nn.Module):
         #   rel_var=1 (noise) → α=0.9 (init), rel_var=0.5 → α=0.95, rel_var=2 → α=0.82
         if self.training:
             with torch.no_grad():
-                override = self._alpha_override.item()
+                # M65-opt: значение не может измениться внутри forward —
+                # переиспользуем снимок, прочитанный выше (был второй .item())
                 if override < 0.1 and not getattr(self, '_ggeo_freeze', False):
                     # B13 (F4-01): flush the previous step's deferred control
                     # write. The freeze flag is raised around BACKWARD (where
@@ -657,9 +662,10 @@ class GroupedCognitiveMirror(nn.Module):
                 behavior_div = 1.0 - behavior_sim
                 self._behavior_div_ema.mul_(0.99).add_(behavior_div, alpha=0.01)
                 self._div_run.mul_(0.99).add_(self._behavior_div_ema.mean().detach(), alpha=0.01)
-                rec = self._div_run_rec.item()
-                self._div_run_rec.mul_(0.99).add_(
-                    (self._behavior_div_ema.mean() / max(rec, 1e-8)).detach(), alpha=0.01)
+                # M65-opt: отношение считается ДО mul_ тензорно (был .item()+max)
+                _rec_ratio = (self._behavior_div_ema.mean()
+                              / self._div_run_rec.clamp(min=1e-8)).detach()
+                self._div_run_rec.mul_(0.99).add_(_rec_ratio, alpha=0.01)
                 trust_weights = attn.mean(dim=(0, 1))
                 if self._meta_trust and self._has_private_mem:
                     self._prev_trust_matrix.copy_(self._trust_matrix)
@@ -675,7 +681,8 @@ class GroupedCognitiveMirror(nn.Module):
                 sim_vals = concept_sim[~torch.eye(self.G, dtype=torch.bool, device=concept_sim.device)]
                 q_hi = sim_vals.float().quantile(0.75)
                 q_lo = sim_vals.float().quantile(0.25)
-                self._cached_concept_dendrogram = (q_hi.item(), q_lo.item())
+                # M65-opt: храним тензоры (читатель debug_mind конвертирует сам)
+                self._cached_concept_dendrogram = (q_hi.detach(), q_lo.detach())
                 dominance = self._trust_matrix.sum(dim=0)
                 isolation = 1.0 - (self._trust_matrix.sum(dim=-1) / self.G)
                 self._cached_dominance = dominance
@@ -960,7 +967,11 @@ class GroupedCognitiveMirror(nn.Module):
             # insensitive to the raw ‖w_intent‖ growth — replaces intent_w as the
             # actionable stability metric.
             with torch.no_grad():
-                self._cached_ig_eff = float(ig.abs().mean().item() * self._intent_alpha)
+                # M65-opt: храним тензор; sync происходит только при чтении
+                # (ноутбук читает _cached_ig_eff раз в log-интервал через
+                # property ниже)
+                self._cached_ig_eff_t = (ig.abs().mean().detach()
+                                         * self._intent_alpha)
             gate_logits = gate_logits + ig * self._intent_alpha
         # Contradiction signal: expert vs collective disagreement opens gate.
         # Same pattern as the intent bridge: running-RMS normalization + τ-authority
@@ -1094,6 +1105,13 @@ class GroupedCognitiveMirror(nn.Module):
         elif getattr(self, '_hp_grad', None) is not None and torch.isfinite(self._hp_grad).all():
             self._prev_grad_norm.copy_(self._hp_grad)
 
+    @property
+    def _cached_ig_eff(self):
+        """M65-opt: intent-эффективность как property — device-sync случается
+        только при чтении (ноутбук: раз в log-интервал), а не каждый forward."""
+        _t = getattr(self, '_cached_ig_eff_t', None)
+        return None if _t is None else float(_t.item())
+
     @torch.no_grad()
     def debug_mind(self) -> Dict[str, object]:
         """Return a dict of meta-cognitive stats for generation interpretability."""
@@ -1129,7 +1147,10 @@ class GroupedCognitiveMirror(nn.Module):
         if self._cached_isolation is not None:
             info['isolation'] = self._cached_isolation.tolist()
         if self._cached_concept_dendrogram is not None:
-            info['concept_q_hi'], info['concept_q_lo'] = self._cached_concept_dendrogram
+            # M65-opt: снимок хранит тензоры — конвертация при чтении (редко)
+            _qh, _ql = self._cached_concept_dendrogram
+            info['concept_q_hi'] = float(_qh.item()) if torch.is_tensor(_qh) else float(_qh)
+            info['concept_q_lo'] = float(_ql.item()) if torch.is_tensor(_ql) else float(_ql)
         info['gate_ema'] = self._gate_ema.tolist()
         info['gate_ema_mean'] = self._gate_ema.mean().item()
         info['gate_selectivity'] = self._last_gates.std().item()

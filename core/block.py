@@ -391,7 +391,9 @@ class EVABlock(nn.Module):
         self.register_buffer('_mlp_now_ema', torch.ones(1), persistent=False)
         self.register_buffer('_mlp_base_ema', torch.ones(1), persistent=False)
         self.register_buffer('_mlp_cnt', torch.zeros(1), persistent=False)
-        self._mlp_ratio = 1.0
+        # M65-opt: python-двойник счётчика (чтение без device-sync); сброс —
+        # единой точкой reset_mlp_observer()
+        self._mlp_cnt_py: int = 0
         base = 0.5 + layer_idx / max(cfg.n_layers - 1, 1)
         # Per-dim variation: low frequencies get slight boost, high get slight cut
         # Creates natural 1/f-like distribution encouraging frequency band separation
@@ -442,6 +444,15 @@ class EVABlock(nn.Module):
         self._cov_y_norm: Optional[torch.Tensor] = None
         self._cov_h_norm: Optional[torch.Tensor] = None
     
+    def reset_mlp_observer(self) -> None:
+        """M65-opt: холодный рестарт MLP-наблюдателя единой точкой (буфер +
+        python-счётчик + EMA): раньше stack звал .zero_() напрямую и счётчик-
+        близнец остался бы несинхронным."""
+        self._mlp_cnt.zero_()
+        self._mlp_cnt_py = 0
+        self._mlp_now_ema.zero_()
+        self._mlp_base_ema.zero_()
+
     def forward(self, h: torch.Tensor, state: Optional[Tuple] = None, global_state: Optional[torch.Tensor] = None,
                 mem2v_scale: float = 1.0, diff: Optional[torch.Tensor] = None, noise_scale: float = 0.0,
                 tanh_bias_mod: float = 1.0, pred_scale_mod: Optional[torch.Tensor] = None, spectral_mod: float = 1.0,
@@ -914,7 +925,7 @@ class EVABlock(nn.Module):
         if _chk(h_mlp, 'mlp_out'): return _nan_ret(h)
         with torch.no_grad():
             _mrms = torch.norm(h_mlp.detach().reshape(-1)).float()
-            if self._mlp_cnt.item() == 0:
+            if self._mlp_cnt_py == 0:
                 # cold-start: baseline = first observed level, not the init 1.0
                 # (else ratio is inflated while the slow EMA climbs for ~700 steps)
                 self._mlp_now_ema.copy_(_mrms)
@@ -923,7 +934,9 @@ class EVABlock(nn.Module):
                 self._mlp_now_ema.mul_(0.99).add_(_mrms, alpha=0.01)
                 self._mlp_base_ema.mul_(0.999).add_(_mrms, alpha=0.001)
             self._mlp_cnt.add_(1)
-            self._mlp_ratio = float((self._mlp_now_ema / (self._mlp_base_ema + 1e-12)).item())
+            self._mlp_cnt_py += 1
+            # (M65-opt: `_mlp_ratio` удалён — write-only атрибут, ни один
+            # читатель не найден; он тянул .item() каждый forward)
         h = h + _stream_cap(h_mlp, self.branch_cap)
         if _chk(h, 'post_mlp'): return _nan_ret(h)
 

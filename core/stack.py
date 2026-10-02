@@ -1295,10 +1295,9 @@ class EVAStack(nn.Module):
         # Restore = a fresh healthy state: the mlp-scale observer must re-warm
         # from the restored weights, not carry a pre-rollback baseline.
         for l in self.layers:
-            if getattr(l, '_mlp_cnt', None) is not None and l._mlp_cnt.item() != 0:
-                l._mlp_cnt.zero_()
-                l._mlp_now_ema.zero_()
-                l._mlp_base_ema.zero_()
+            # M65-opt: единая точка сброса (без .item()-синка на слой)
+            if getattr(l, '_mlp_cnt_py', 0) != 0 and hasattr(l, 'reset_mlp_observer'):
+                l.reset_mlp_observer()
         # Audit M8: rollback restores weights, but the NON-persistent runtime
         # EMAs (bus RMS, ig norms, delta-var, scheduler temps …) survive the
         # load — a NaN-poisoned EMA after rollback means an instant NaN zombie

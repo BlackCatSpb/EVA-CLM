@@ -641,13 +641,18 @@ class LogitAttention(nn.Module):
                     # R1/R2-ревью: только сегменты, завершённые во ВСЕХ батчах
                     # (иначе — нулевые/чужие пулы при B>1)
                     _valid = (_cnt > 0).all(dim=0)
-                    for _s in torch.unique(_sid[_sep]).tolist():
-                        if not bool(_valid[_s]):
+                    # M65-opt: валидность и максимумы — двумя tolist вместо
+                    # bool(...)/.item() на каждый сегмент цикла
+                    _seg_ids = torch.unique(_sid[_sep]).tolist()
+                    _valid_l = _valid.tolist()
+                    _cnt_max = _cnt.max(dim=0).values.tolist()
+                    for _s in _seg_ids:
+                        if not _valid_l[_s]:
                             continue
                         cache.push_kv_sent(
                             _mk[:, _s, :].view(B, 1, -1).detach(),
                             _mv[:, _s, :].view(B, 1, -1).detach(),
-                            int(_cnt[:, _s].max().item()))
+                            int(_cnt_max[_s]))
             # T9.15: многоразрешающие пулы (сборка снизу вверх от атомов)
             if self.ms_spans:
                 self._push_multiscale(cache, k_new, v_new)

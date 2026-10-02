@@ -197,10 +197,13 @@ class MirrorLRScheduler:
                 temp = temp_min + (1.0 - blend) * (temp_max - temp_min) * 0.3
             for layer in self.model.layers:
                 layer.mirror._alpha_override.fill_(override)
+                # M65-opt: python-двойник (forward читает без device-sync)
+                layer.mirror._alpha_override_py = float(override)
                 layer.mirror._usefulness_temp.fill_(max(temp, 0.1))
         else:
             for layer in self.model.layers:
                 layer.mirror._alpha_override.fill_(0.0)
+                layer.mirror._alpha_override_py = 0.0
             var, mag, mean_1malpha, gate_var = self._mirror_stats()
 
             if self._tau_var is None:
