@@ -517,8 +517,10 @@ class TestIntegration:
         x = torch.randint(0, cfg.vocab, (1, 4), device=device)
         h = model.embed_tokens(x)
         model(h)
-        # Save
-        path = '/tmp/test_tau_ckpt.pt'
+        # Save (портируемый путь: внешний аудит нашёл жёсткий /tmp/ —
+        # падало на Windows)
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), 'test_tau_ckpt.pt')
         torch.save(model.state_dict(), path)
         # Load into fresh model
         model2 = EVAStack(cfg).to(device)
