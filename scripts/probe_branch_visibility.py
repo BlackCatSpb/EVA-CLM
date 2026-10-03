@@ -91,6 +91,11 @@ def parse_args():
     ap.add_argument('--json', default=None, help='куда сохранить сводку JSON')
     ap.add_argument('--no-null-test', action='store_true',
                     help='не делать зануление ветвей (быстрее)')
+    ap.add_argument('--no-tokens', action='store_true',
+                    help='ABLATION: вызвать model(h) БЕЗ tokens. Это ОТКЛЮЧАЕТ '
+                         'memory_bank (core/stack.py:659: банк работает только '
+                         'при tokens is not None) и меняет режим замера. '
+                         'По умолчанию tokens ПЕРЕДАЮТСЯ — как в train и eval.')
     return ap.parse_args()
 
 
@@ -120,7 +125,8 @@ def load_windows(args, vocab):
 
 # ─────────────────────────── замер ───────────────────────────
 
-def measure_arm(cfg, model, windows, device, step, null_test=True):
+def measure_arm(cfg, model, windows, device, step, null_test=True,
+                use_tokens=True):
     """Один прогон замера. Возвращает dict с таблицами по слоям."""
     n_layers = len(model.layers)
 
@@ -139,8 +145,23 @@ def measure_arm(cfg, model, windows, device, step, null_test=True):
         return hook
 
     _store = {}
+    _bind_store = {}
     for i, layer in enumerate(model.layers):
         handles.append(layer.register_forward_hook(make_hook(i)))
+
+    # dCE/d(bind_out) — третья величина: сигнал на ВЫХОДЕ ветки. Именно её
+    # (а не параметр-градиент) цитирует журнал как "bind L0 = 5.95e-14".
+    def make_bind_hook(j):
+        def hook(_mod, _inp, out):
+            t = out[0] if isinstance(out, tuple) else out
+            if isinstance(t, torch.Tensor) and t.requires_grad:
+                t.retain_grad()
+                _bind_store[j] = t
+        return hook
+
+    for i, layer in enumerate(model.layers):
+        if hasattr(layer, 'bind'):
+            handles.append(layer.bind.register_forward_hook(make_bind_hook(i)))
 
     model.train()
     torch.set_grad_enabled(True)
@@ -151,7 +172,10 @@ def measure_arm(cfg, model, windows, device, step, null_test=True):
         _store.clear()
 
         h_in = model.embed_tokens(x)
-        out = model(h_in)
+        # КРИТИЧНО: `tokens=` включает memory_bank (core/stack.py:659). Без него
+        # банк выключен, поток h не раздувается, и ветки выглядят видимыми.
+        # Реальный train/eval всегда передают tokens -> режим по умолчанию.
+        out = model(h_in, tokens=(x if use_tokens else None))
         h_out = out[0] if isinstance(out, tuple) else out
         ce = model.compute_loss(h_out, x)
         ce.backward()
@@ -190,6 +214,9 @@ def measure_arm(cfg, model, windows, device, step, null_test=True):
                 else:
                     branch_g['other'][i].append(v)
 
+    g_bindout = {i: (float(t.grad.norm()) if t.grad is not None else float('nan'))
+                 for i, t in _bind_store.items()}
+
     for hd in handles:
         hd.remove()
 
@@ -198,6 +225,8 @@ def measure_arm(cfg, model, windows, device, step, null_test=True):
         return sum(xs) / len(xs) if xs else float('nan')
 
     result = {
+        'g_bindout': g_bindout,
+        'use_tokens': use_tokens,
         'h_grad': {i: mean(h_grads[i]) for i in range(n_layers)},
         'h_norm': {i: mean(h_norms[i]) for i in range(n_layers)},
         'branch': {b: {i: math.sqrt(mean(v)) for i, v in d.items()}
