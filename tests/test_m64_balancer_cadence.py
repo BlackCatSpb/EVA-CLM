@@ -209,3 +209,55 @@ def test_state_dict_roundtrips_the_scale_seed():
     lb2 = LossBalancer(align=True, eval_interval=100)
     lb2.load_state_dict(sd)
     assert abs(lb2.scale_ema - sd['scale_ema']) < 1e-12
+
+
+def test_cheap_guard_ce_only_on_aux_drift():
+    """(a) B20/WATCHDOG: an aux value x500 its align-step EMA (scale_ema=5)
+    must cut the cheap step to CE-only and count n_cheap_guard."""
+    lb = LossBalancer(align=True, align_every=0, eval_interval=100,
+                      aux_drift_cap=100.0)
+    a, b = _toy()
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)
+    assert lb.ema_aux.get('x') is not None, 'align-шаг не набрал EMA aux'
+    lb.scale_ema = 5.0                       # s, измеренный до выброса
+    a.grad = b.grad = None
+    lb.backward(a ** 2 + b ** 2, {'x': 50.0 * b ** 2}, [a, b], step=1)
+    assert lb.last_path == 'balance'
+    assert lb.n_cheap_guard == 1
+    # CE-only: d(ce)/db = 2; aux (s*100) НЕ должен попасть в градиент
+    assert abs(float(b.grad) - 2.0) < 1e-3, f'guard не срезал aux: {float(b.grad)}'
+    assert abs(float(a.grad) - 2.0) < 1e-3
+
+
+def test_cheap_guard_normal_aux_is_bit_identical():
+    """(b) при нормальных aux (дрейф ~1.1x < cap) cheap-шаг бит-идентичен
+    старой формуле; сравнение с balancer'ом cap=inf (старое поведение)."""
+    def run(cap):
+        lb = LossBalancer(align=True, align_every=0, eval_interval=100,
+                          aux_drift_cap=cap)
+        a, b = _toy()
+        lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)
+        lb.scale_ema = 5.0
+        a.grad = b.grad = None
+        lb.backward(a ** 2 + b ** 2, {'x': 0.11 * b ** 2}, [a, b], step=1)
+        return lb, float(a.grad), float(b.grad)
+    lb_new, ga, gb = run(100.0)
+    lb_old, oa, ob = run(float('inf'))
+    assert lb_new.n_cheap_guard == 0 and lb_old.n_cheap_guard == 0
+    assert ga == oa and gb == ob, 'нормальный aux: не бит-идентично старому'
+    assert abs(gb - (2.0 + 5.0 * 0.22)) < 1e-3   # d(aux)/db = 0.22 at b=1
+
+
+def test_cheap_guard_default_cap_100_and_inert_without_ema():
+    """(c) дефолт cap=100.0; без EMA (align-опоры ещё нет) guard не срабатывает
+    и cheap-путь остаётся прежним raw s*sum(aux)."""
+    lb = LossBalancer(align=True, align_every=0, eval_interval=100)
+    assert lb.aux_drift_cap == 100.0
+    a, b = _toy()
+    lb.backward(a ** 2 + b ** 2, {'x': 0.1 * b ** 2}, [a, b], step=0)
+    lb.scale_ema = 5.0
+    lb.ema_aux.clear()                      # нет reference => guard молчит
+    a.grad = b.grad = None
+    lb.backward(a ** 2 + b ** 2, {'x': 50.0 * b ** 2}, [a, b], step=1)
+    assert lb.last_path == 'balance' and lb.n_cheap_guard == 0
+    assert abs(float(b.grad) - (2.0 + 5.0 * 100.0)) < 1e-1, float(b.grad)

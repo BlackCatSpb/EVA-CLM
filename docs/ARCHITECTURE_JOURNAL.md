@@ -2798,3 +2798,20 @@ FFT-bind, bounded_residual) + независимые проверки контр
    LogitAttention, clear() их не видел (logit_cache.py:568,829 + stack.py) —
    исправлено; head_wall безусловный; deterministic допуск 50.
 ИТОГ: 700 passed (691+9). Деревья main==песочница. Все проверенные наработки в main.
+
+
+## ПРЕДЗАПУСКОВЫЕ ПУНКТЫ 1-4 ЗАКРЫТЫ (704 passed)
+
+1. НОУТБУК: cell4 cfg.bounded_residual = True (+комментарий: стенд 5.63 vs
+   7.82); JSON/ast.parse OK.
+2. WATCHDOG: телеметрия bounded подключена — training_telemetry дренирует
+   _bounded_flow -> b_flow/b_flow_max/b_drift (EMA 0.9); RED FLAG >10x в
+   scripts/train.py (live) и analyze.py (health + HTML-секция); тест 4 шага OK.
+3. GUARD CHEAP-ПУТИ: aux_drift_cap=100.0; на cheap-шаге max|aux_i|/ema_aux_i >
+   cap -> s=0 (CE-only) + n_cheap_guard; EMA aux на align; тесты: дрейф ×500 ->
+   CE-only, норма -> бит-идентично cap=inf, дефолт inert.
+4. GC=TRUE: OFF+gc=True бит-идентичен OFF+gc=False (torch.equal); ON+gc=True —
+   конечен, градиенты gate_W/gate_b/post_norm живы.
+ИТОГ: 704 passed. ПОСЛЕ ЭТОГО: всё готово к запуску; остаётся решение о GPU-
+бюджете (один цикл; продление после watchdog 3-5k). Не блокирует: 11 source-
+локов, stability-guard v4, больший стенд профиля, NaN-гард.

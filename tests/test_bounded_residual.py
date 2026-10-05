@@ -132,3 +132,42 @@ def test_snapshot_restore_and_state_dict_resume():
     m2.memory_bank.reset()
     with torch.no_grad():
         assert torch.equal(_fwd(src, x), _fwd(m2, x)), 'resume roundtrip diverged'
+
+
+def test_gc_true_bounded_residual_train_step_and_gate_grads():
+    """M65-opt x Stage 3: gradient_checkpointing=True (recompute) must keep the
+    bounded path trainable — finite output, alive W_g/b_g and post-norm grads.
+    OFF under gc=True is bit-identical to OFF under gc=False (same seed);
+    ON+gc=True is checked by finiteness + nontrivial grads (the forward itself
+    is not bit-comparable across gc: recompute + stochastic block internals)."""
+    x = _tokens()
+    off_gc = _model(bounded_residual=False, gradient_checkpointing=True)
+    off_no = _model(bounded_residual=False, gradient_checkpointing=False)
+    assert torch.equal(_fwd(off_gc, x), _fwd(off_no, x)), \
+        'flag-off + gc=True diverged from gc=False'
+    m = _model(bounded_residual=True, gradient_checkpointing=True)
+    # stand calibration (as in the non-gc test): the fusion head is zero-init;
+    # without it unit(fused)=0 and the gate is dead by construction.
+    with torch.no_grad():
+        _std = 1.0 / (m.cfg.D ** 0.5)
+        m.memory_bank.fusion[-1].weight.normal_(0.0, _std)
+        m.memory_bank.fusion[-1].bias.normal_(0.0, _std)
+    m._bounded_flow = []
+    torch.manual_seed(1234)
+    _ng = getattr(m.lm_head, '_noise_gen', None)
+    if _ng is not None:
+        _ng.manual_seed(1234)
+    h = m.embed_tokens(x) * 30.0
+    out, _, _, _ = m(h, step=1, tokens=x, adaptive=False)   # train-forward
+    assert torch.isfinite(out).all()
+    assert len(m._bounded_flow) == m.cfg.n_layers, \
+        'post-norm flow telemetry is empty under gc=True'
+    m.zero_grad(set_to_none=True)
+    out.pow(2).mean().backward()
+    for name, p in (('gate_W', m.memory_bank.gate_W),
+                    ('gate_b', m.memory_bank.gate_b),
+                    ('bounded_post_norm_w.0', m.bounded_post_norm_w[0])):
+        g = p.grad
+        assert g is not None, f'{name}: grad is None under gc=True'
+        assert torch.isfinite(g).all() and float(g.norm()) > 0.0, \
+            f'{name}: dead grad under gc=True (norm={float(g.norm()):.3g})'

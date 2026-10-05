@@ -250,6 +250,7 @@ class LossBalancer:
                  eval_interval: int = 1000, align_every: int = 1,
                  scale_min_ratio: float = 0.05, scale_max: float = 10.0,
                  scale_ema_decay: float = 0.99,
+                 aux_drift_cap: float = 100.0,
                  kill_terms: Optional[list] = None,
                  kill_disable: bool = False,
                  safety_aux: Optional[tuple] = None) -> None:
@@ -281,6 +282,11 @@ class LossBalancer:
         # 0.99 = tau ~100 align steps (~800 train steps at k=8) — fast enough to
         # track regime changes, slow enough to reject a single noisy align pass.
         self.scale_ema_decay: float = float(scale_ema_decay)
+        # B20/WATCHDOG (предзапуск): консервативный cap дрейфа aux-ЗНАЧЕНИЙ на
+        # cheap-шаге против их EMA (набранной на align-шагах). 100.0 = дефолт:
+        # стреляет только на x100-выбросе между align-шагами (замеренная
+        # патология: aux ×500 при s, измеренном до выброса), не на шуме.
+        self.aux_drift_cap: float = float(aux_drift_cap)
         self.ema_ce: Optional[float] = None
         self.ema_aux: Dict[str, float] = {}
         self.ema_A: Optional[float] = None
@@ -291,6 +297,8 @@ class LossBalancer:
         self.scale_ema: Optional[float] = None  # M64.4: the measured align scale
         self.n_align: int = 0                   # M64.4: telemetry counters
         self.n_balance: int = 0
+        # B20: cheap-шаги, срезанные guard'ом до CE-only (телеметрия watchdog)
+        self.n_cheap_guard: int = 0
         # M65-opt: aux terms skipped in grad_geometry because they are not
         # connected to this graph — previously an uncounted silent `continue`.
         self.n_unconnected: int = 0
@@ -543,6 +551,29 @@ class LossBalancer:
                     _s = 1.0
                 elif self.scale_ema is not None:
                     _s = float(self.scale_ema)
+                # B20/WATCHDOG (предзапуск): guard от дрейфа aux-ЗНАЧЕНИЙ между
+                # align-шагами. s измерен на прошлом align-шаге; если текущий
+                # |aux_i| перерос свою EMA в aux_drift_cap раз (дефолт 100x) —
+                # s уже не валиден, cheap-шаг идёт CE-only (s=0) + телеметрия.
+                # Нет ema_aux (первый align ещё не прошёл) — поведение прежнее.
+                # align=False (raw-sum) не трогаем: это документированный
+                # легаси-путь, guard к нему не применяется.
+                if self.align and _s > 0.0 and self.ema_aux:
+                    _worst = 0.0
+                    for _k, _v in aux_dict.items():
+                        if not isinstance(_v, torch.Tensor):
+                            continue
+                        _e = self.ema_aux.get(_k)
+                        if _e is None:
+                            continue
+                        # .abs().max() — консервативно и без формы-крашей
+                        # (aux-термы в проде 0-dim; max == |value| там)
+                        _r = _v.detach().abs().max().item() / (float(_e) + 1e-12)
+                        if _r > _worst:
+                            _worst = _r
+                    if _worst > self.aux_drift_cap:
+                        _s = 0.0
+                        self.n_cheap_guard += 1
                 _at = [v for v in aux_dict.values() if isinstance(v, torch.Tensor)]
                 total = ce_loss + (_s * sum(_at) if _at and _s > 0.0 else 0.0)
                 total.backward()
@@ -555,6 +586,18 @@ class LossBalancer:
         self.last_path = 'align'
         self.n_align += 1
         self.last_cos = None
+        # B20/WATCHDOG: reference EMA of the aux VALUES for the cheap-step guard
+        # (only align steps update it — the cheap steps are compared against
+        # it). Same decay as the balance EMAs; value-EMA is used ONLY for the
+        # drift ratio, never as a gradient multiplier (R1's 1/|v| bomb).
+        _d_aux = self._ema_decay()
+        for _k, _v in aux_dict.items():
+            if not isinstance(_v, torch.Tensor):
+                continue
+            _val = _v.detach().abs().max().item()
+            _e = self.ema_aux.get(_k)
+            self.ema_aux[_k] = (_val + 1e-8 if _e is None
+                                else _d_aux * _e + (1.0 - _d_aux) * _val)
         # B2 (audit C): (i) the single GLOBAL cosine gate zeroed every aligned
         # aux term whenever the SUM ⊥ CE (measured: final grad = pure CE, and
         # on the orthogonality toy per-term beats sum-gate 8.000 vs 2.000);
@@ -1020,4 +1063,23 @@ def training_telemetry(model) -> dict:
         sp = getattr(head, '_spike_stats', None)
         if sp:
             out.update({f'spk_{k}': v for k, v in sp.items()})
+    # Stage 3 (bounded_residual): post-norm flow telemetry (EVAStack._bounded_flow
+    # appends one post-norm norm per layer per forward, cap 4096). DRAIN the list
+    # here (pure telemetry, nobody else reads it): otherwise the cap would freeze
+    # the watchdog after the first log interval. b_flow = mean / b_flow_max over
+    # the drained window; b_drift = window mean / its EMA (decay 0.9) — the
+    # automatic falsifier: a bounded run must stay O(scale*sqrt(D)) without
+    # drift (analyze.py marks b_drift >10x as a red flag).
+    _bf = getattr(model, '_bounded_flow', None)
+    if isinstance(_bf, list) and _bf:
+        _new = [float(v) for v in _bf]
+        del _bf[:]
+        _mean = sum(_new) / len(_new)
+        _ema = getattr(model, '_b_flow_ema', None)
+        out['b_flow'] = _mean
+        out['b_flow_max'] = max(_new)
+        out['b_drift'] = (1.0 if _ema in (None, 0.0)
+                          else _mean / (float(_ema) + 1e-12))
+        model._b_flow_ema = (_mean if _ema is None
+                             else 0.9 * float(_ema) + 0.1 * _mean)
     return out

@@ -389,6 +389,14 @@ def run_health(data, nq=None):
     us = main.get('usef', [])
     if steps[-1] > 5000 and len(us) > q:
         res.append(('usef разошёлся после 5k', _stt.pstdev(us[-q:]) > 1e-3))
+    # Stage 3 (bounded_residual): the flow watchdog — the bounded post-norm must
+    # stay O(scale*sqrt(D)); a b_drift >10x against its own EMA is the red-flag
+    # falsifier (same threshold as the HTML section).
+    _bd = data.get('tele', {}).get('b_drift', [])
+    if _bd:
+        _bdmax = max(_bd)
+        res.append((f'bounded flow без дрейфа (b_drift max={_bdmax:.2f}x, red>{_B_DRIFT_RED:.0f})',
+                    _bdmax <= _B_DRIFT_RED))
     # M64.6: the usef MEAN is structurally ~0.5 (median-centered sigmoid) — the
     # collapse detector must read the STD that the notebook now logs.
     _us_std = main.get('usef_std', [])
@@ -1792,6 +1800,7 @@ _AUX_RE = _re.compile(r'aux:\s+(.*)')
 _TELE_RE = _re.compile(r'^\s*tele:\s+(.*)')   # M64.8: the telemetry batch line
 _HEAD_RE = _re.compile(r'^\s*head:\s+(.*)')   # M64.10r2: the head telemetry line
 _KS_RE = _re.compile(r'^\s*ks:\s+(.*)')       # M64.12: the kill-switch line
+_B_DRIFT_RED = 10.0                           # Stage 3: b_drift > 10x = red flag
 _AUX_KV = _re.compile(r'(\w+)=([-\d.eE+]+)')
 _EVAL_RE = _re.compile(r'EVAL step=(\d+):\s*val_loss=([-\d.eE+]+)\s*val_ppl=([-\d.eE+]+)')
 _DEPTH_RE = _re.compile(r'\[DepthController\].*?->\s*active_depth=(\d+)/(\d+)')
@@ -1993,6 +2002,43 @@ def render_log_html(data, outpath):
                 ch.append(f'<td>{v:.4g}</td>')
         ch.append('</tr>')
     ch.append('</table></div>')
+
+    # Stage 3 (bounded_residual watchdog): the tele: line carries b_flow
+    # (mean/max per-layer post-norm flow) and b_drift (current/EMA). Render
+    # them with the automatic red flag at b_drift > _B_DRIFT_RED (10x).
+    tele = data.get('tele', {})
+    if any(k in tele for k in ('b_flow', 'b_flow_max', 'b_drift')):
+        ch.append('<h2>BOUNDED RESIDUAL (Stage 3 watchdog)</h2>')
+        for k, col in (('b_flow', '#79c0ff'), ('b_flow_max', '#a5d6ff'),
+                       ('b_drift', '#ff7b72')):
+            if k in tele and len(tele[k]) >= 2:
+                ch.append(f'<h3>{k} ({len(tele[k])} точек)</h3>')
+                ch.append(_svg_spark(list(range(len(tele[k]))), tele[k], color=col))
+        _bd = tele.get('b_drift', [])
+        _red = [v for v in _bd if v > _B_DRIFT_RED]
+        if _red:
+            ch.append(f'<div class="r">RED FLAG: b_drift &gt;{_B_DRIFT_RED:.0f}x '
+                      f'в {len(_red)} точках (max={max(_bd):.2f}x) — поток '
+                      f'дрейфует, остановить/разобрать</div>')
+        elif _bd:
+            ch.append(f'<div class="g">b_drift max={max(_bd):.2f}x ≤ '
+                      f'{_B_DRIFT_RED:.0f}x — bounded-поток без дрейфа</div>')
+        ch.append('<div class="scroll"><table><tr><th>#</th><th>b_flow</th>'
+                  '<th>b_flow_max</th><th>b_drift</th><th>flag</th></tr>')
+        _n = max(len(tele.get(k, [])) for k in ('b_flow', 'b_flow_max', 'b_drift'))
+        for i in range(_n):
+            _bfv = tele.get('b_flow', [])
+            _bmv = tele.get('b_flow_max', [])
+            _bdv = _bd[i] if i < len(_bd) else None
+            _flag = ('<span class="r">RED &gt;10x</span>'
+                     if _bdv is not None and _bdv > _B_DRIFT_RED else '')
+            ch.append('<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+                i,
+                '—' if i >= len(_bfv) else f'{_bfv[i]:.4g}',
+                '—' if i >= len(_bmv) else f'{_bmv[i]:.4g}',
+                '—' if _bdv is None else f'{_bdv:.4g}',
+                _flag))
+        ch.append('</table></div>')
 
     if data['eval']:
         ch.append('<h2>VAL LOSS (EVAL)</h2>')

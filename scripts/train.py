@@ -696,6 +696,7 @@ def train(cfg=None, resume_path=None):
                 # it the A/B (align_every=8 vs 1) is indistinguishable in the log.
                 _bal = (f'bal_a={getattr(balancer, "n_align", 0)} '
                         f'bal_b={getattr(balancer, "n_balance", 0)} '
+                        f'bal_g={getattr(balancer, "n_cheap_guard", 0)} '  # B20: срезано guard'ом
                         f'bal_unc={getattr(balancer, "n_unconnected", 0)} '
                         f'bal_s={getattr(balancer, "scale_ema", None) if getattr(balancer, "scale_ema", None) is None else round(float(balancer.scale_ema), 5)} '
                         f'bal_sc={getattr(balancer, "last_scale", None) if getattr(balancer, "last_scale", None) is None else round(float(balancer.last_scale), 5)} '
@@ -717,6 +718,14 @@ def train(cfg=None, resume_path=None):
                         print('  tele: ' + ' '.join(
                             f'{k}={v:.4g}' if isinstance(v, float) else f'{k}={v}'
                             for k, v in _tt.items()))
+                    # Stage 3 bounded flow: the live red flag (same 10x
+                    # threshold as analyze.py) — the falsifier fires during the
+                    # run, not only at the post-mortem.
+                    _bd = _tt.get('b_drift')
+                    if isinstance(_bd, float) and _bd > 10.0:
+                        print(f'  [bounded] RED FLAG: b_drift={_bd:.2f}x >10x '
+                              f'(b_flow={_tt.get("b_flow", float("nan")):.4g}) '
+                              f'— поток дрейфует')
                 except Exception as _te:
                     print(f'  tele: skipped ({str(_te)[:60]})')
             
