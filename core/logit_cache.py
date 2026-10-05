@@ -566,10 +566,19 @@ class LogitAttention(nn.Module):
                           cnt)
 
     def reset_sent_acc(self) -> None:
-        """P0-5c: drop the AR sentence accumulator (new document = cold cache)."""
+        """P0-5c: drop the AR sentence accumulator (new document = cold cache).
+
+        fixrev-7 (A9): + незавершённые пулы старших шкал (_ms_acc_*). Старый
+        фикс A9 жил в LogitCache.clear() и не видел accumulators attention
+        (getattr-guard делал его no-op): на реальном пути нового документа
+        (stack.reset_cache) хвост документа A переносился в B."""
         self._sent_acc_k.zero_()
         self._sent_acc_v.zero_()
         self._sent_acc_n.zero_()
+        for _d in ('_ms_acc_k', '_ms_acc_v', '_ms_acc_n'):
+            _a = getattr(self, _d, None)
+            if _a is not None:
+                _a.clear()
 
     def forward(self, h: torch.Tensor, cache: LogitCache,
                 training: bool = True,
@@ -816,6 +825,17 @@ class LogitCacheAttention(nn.Module):
                           bias_final: float = -2.0) -> None:
         """T9.5: делегат к attention (единая точка вызова из стека)."""
         self.attention.set_gate_schedule(step, ramp=ramp, bias_final=bias_final)
+
+    def clear(self) -> None:
+        """fixrev-7 (A9): единая точка очистки модуля (новый документ).
+
+        cache.clear() чистит LogitCache, reset_sent_acc — аккумуляторы
+        attention (sentence + _ms_*). Раньше stack.reset_cache звал только
+        cache.clear(), и старшие шкалы переживали границу документа."""
+        self.cache.clear()
+        _att = getattr(self, 'attention', None)
+        if _att is not None and hasattr(_att, 'reset_sent_acc'):
+            _att.reset_sent_acc()
 
     def forward(self, h: torch.Tensor, logits: torch.Tensor,
                 training: bool = True,

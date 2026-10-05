@@ -591,16 +591,23 @@ class StreamingMemoryBank(nn.Module):
     def init_bounded_residual(self, cfg=None) -> None:
         """Create bounded_v2 gate params (Stage 3).
 
-        Вызывается EVAStack в КОНЦЕ __init__ — единственная точка, где RNG
-        ещё не тронут после сборки ядра, поэтому модель с bounded_residual
-        on/off имеет идентичные core-веса. idempotent.
+        Вызывается EVAStack в КОНЦЕ __init__. fixrev-3: init полностью
+        детерминированный (нули, без RNG), поэтому сборка bounded_residual
+        on/off больше не сдвигает глобальное RNG-состояние и даёт идентичные
+        core-веса. idempotent.
         """
         if self.gate_W is not None:
             return
         cfg = cfg if cfg is not None else self.cfg
-        w = float(getattr(cfg, 'bounded_gate_w_init', 0.01))
+        # fixrev-3 (аудит): init БЕЗ глобального RNG. Было
+        # torch.randn(D, D)·w — сборка ON-модели потребляла D² бросков и
+        # сдвигала глобальное RNG-состояние относительно OFF (core-веса равны,
+        # но последующие стохастические операции/резюм расходились). Ноль —
+        # математическое ожидание старого N(0, w²); gate = tanh(b_g) на старте.
+        # cfg.bounded_gate_w_init оставлен для обратной совместимости конфигов
+        # (не потребляется).
         b = float(getattr(cfg, 'bounded_gate_b_init', 0.5))
-        self.gate_W = nn.Parameter(torch.randn(self.D, self.D) * w)
+        self.gate_W = nn.Parameter(torch.zeros(self.D, self.D))
         self.gate_b = nn.Parameter(torch.full((self.D,), b))
         self._bounded_residual = True
 

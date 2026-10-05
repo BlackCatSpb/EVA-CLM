@@ -2773,3 +2773,28 @@ bounded_residual=True для Этапа 3 (свежий прогон) — реш
    только после прохождения watchdog на 3-5k шагах.
 ОТКРЫТАЯ ОЧЕРЕДЬ (не блокирует): cheap-дрейф балансера, 11 source-локов,
 stability-guard v4, больший стенд для профиля компонентов.
+
+
+## ГЛУБОКАЯ РЕВИЗИЯ КОДА (50c35b1..HEAD) + ФИКСЫ 7 НАХОДОК (700 passed)
+
+Ревизор: карта изменений (M65-OPT батчи 1-8, M65-OPT-2 A1-A9/B1, раунды 3-7,
+FFT-bind, bounded_residual) + независимые проверки контрактов:
+(a) OFF bounded бит-в-бит (363/363 torch.equal); (b) _FloorSTE forward=maximum
+бит-в-бит, backward identity; (c) _hrr_conv fp32 3.8e-6/fp64 7.1e-15 vs эталон;
+(d) снимок: без шаринга, типы, длины, forward после restore бит-равен;
+(e) freeze 4 буферов OK; (f) A1-A3/A5/B1 воспроизведены. pytest 691.
+НАЙДЕНО И ИСПРАВЛЕНО (все с тестами):
+1. freeze был неполон: за ним не были _pb_step/_sal_ring/_sal_ptr/_sal_q/
+   _meta_thr/phantom_basis -> закрыты целиком (embedding.py:848).
+2. A7-div: std(unbiased=False) с знаменателем max(N-1,1) завышал ×N/(N-1)
+   (N=2 ×4.33) -> знаменатель /N (population, corr=1, N=1 конечен).
+3. bounded ON потреблял randn(D,D) -> детерминированный zeros-init (RNG ON==OFF).
+4. logit_cache._ss_gen не в снимке -> добавлен (roundtrip-тест).
+5. Мёртвый код удалён (_circ_conv_idx, _snapshot/_restore_fwd_buffers);
+   n_unconnected -> телеметрия bal_unc.
+6. Warning при резюме OFF-чекпоинта в ON-модель (ckpt_io) + warning при
+   memory_bank=None с флагом.
+7. Тесты: precondition-assert вскрыл РЕАЛЬНЫЙ A9-баг — _ms_acc_* жили на
+   LogitAttention, clear() их не видел (logit_cache.py:568,829 + stack.py) —
+   исправлено; head_wall безусловный; deterministic допуск 50.
+ИТОГ: 700 passed (691+9). Деревья main==песочница. Все проверенные наработки в main.

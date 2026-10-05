@@ -54,7 +54,8 @@ def test_sentence_level_observes_pooled_units():
     x = _tokens(cfg)
     for i in range(4):
         h = m.embed(x)
-        m(h, None, step=step0 + i, tokens=x)
+        out, *_ = m(h, None, step=step0 + i, tokens=x)
+        m.lm_head(out)              # Round 7-fixrev: реальный вызов головы
         hd._pb_step.fill_(0)
     assert calls, 'observe не вызывался'
     for eshape, lshape in calls:
@@ -71,9 +72,11 @@ def test_per_position_mode_off():
     step0 = int(hd.phantom_after) + 10
     x = _tokens(cfg)
     h = m.embed(x)
-    m(h, None, step=step0, tokens=x)
+    out, *_ = m(h, None, step=step0, tokens=x)
+    m.lm_head(out)                  # Round 7-fixrev: реальный вызов головы
     hd._pb_step.fill_(0)
-    m(h, None, step=step0 + 1, tokens=x)
+    out, *_ = m(h, None, step=step0 + 1, tokens=x)
+    m.lm_head(out)
     assert any(len(es) == 3 for es, _ in calls), 'per-position режим не наблюдал'
 
 
@@ -87,13 +90,15 @@ def test_spike_sentence_observed():
     x = _tokens(cfg)
     h = m.embed(x)
     for i in range(3):
-        m(h, None, step=step0 + i, tokens=x)
+        out, *_ = m(h, None, step=step0 + i, tokens=x)
+        m.lm_head(out)              # Round 7-fixrev: реальный вызов головы
         hd._pb_step.fill_(0)
     before = int(_pb._obs.item())
     with torch.no_grad():
         hd.ell_ladder[-1].mul_(0.2)
     for i in range(4):
-        m(h, None, step=step0 + 5 + i, tokens=x)
+        out, *_ = m(h, None, step=step0 + 5 + i, tokens=x)
+        m.lm_head(out)
         hd._pb_step.fill_(0)
     assert int(_pb._obs.item()) > before, 'спайк-сегменты не наблюдались'
     assert int(_pb._obs.item()) <= 3 * 8, 'наблюдений больше, чем сегментов'

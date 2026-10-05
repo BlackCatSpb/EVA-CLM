@@ -125,11 +125,13 @@ def test_spike_above_slow_base_observes():
     x = torch.randint(3, cfg.vocab, (1, 16))
     h = m.embed(x)
     for i in range(4):
-        m(h, None, step=step0 + i, tokens=x)
+        out, *_ = m(h, None, step=step0 + i, tokens=x)
+        m.lm_head(out)                # Round 7-fixrev: реальный вызов головы
         hd._pb_step.fill_(0)
     with torch.no_grad():
         hd.ell_ladder[-1].mul_(0.2)      # база занижена ⇒ спайк
-    m(h, None, step=step0 + 5, tokens=x)
+    out, *_ = m(h, None, step=step0 + 5, tokens=x)
+    m.lm_head(out)                    # реальный вызов на спайке
     hd._pb_step.fill_(0)
     assert int(_pb._obs.item()) > 0, 'наблюдение не сработало на спайке'
     assert hd._meta_thr is not None and abs(hd._meta_thr - hd.phantom_thr) < 1e-9

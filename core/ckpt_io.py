@@ -192,3 +192,22 @@ def heal_drive_from_local(drive_path: str, local_path: str,
     except Exception as e:
         log(f'[ckpt] heal failed: {e}')
         return False
+
+
+def warn_bounded_gate_mismatch(missing, unexpected, log=None) -> list:
+    """fixrev-6 (аудит): резюм ON/OFF-чекпоинта молча рандомит bounded-гейт.
+
+    `load_state_dict(strict=False)` не считает ошибкой отсутствие
+    `memory_bank.gate_W/.gate_b` и `bounded_post_norm_w.*`: OFF-чекпоинт в
+    ON-модели оставляет гейт на init-значениях, ON-чекпоинт в OFF-модели —
+    отбрасывает обученные. Возвращает список несовпавших gate-ключей и (при
+    `log`) печатает предупреждение — вызывать сразу после load_state_dict.
+    """
+    keys = [k for k in list(missing or []) + list(unexpected or [])
+            if k.endswith(('.gate_W', '.gate_b'))
+            or 'bounded_post_norm_w' in k]
+    if keys and log is not None:
+        log(f'  [warn] bounded_residual: {len(keys)} gate-параметров не '
+            f'совпали при загрузке (резюм ON<->OFF чекпойнта) — они '
+            f'инициализированы/потеряны: {keys[:4]}')
+    return keys

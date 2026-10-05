@@ -255,6 +255,15 @@ class EVAStack(nn.Module):
                 for _ in range(cfg.n_layers)
             ])
         else:
+            if self._bounded_residual:
+                # fixrev-6 (аудит): флаг молча игнорировался при memory_bank=None
+                # (инжектить нечего) — теперь видимое предупреждение.
+                import warnings
+                warnings.warn(
+                    'bounded_residual=True, но memory_bank=None: инъекции '
+                    'некуда — флаг игнорируется (bounded-параметры не '
+                    'создаются). Включите memory_bank или выключите '
+                    'bounded_residual.', RuntimeWarning, stacklevel=2)
             self._bounded_residual = False
 
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,
@@ -1353,10 +1362,16 @@ class EVAStack(nn.Module):
     def reset_cache(self):
         """Clear the logit cache (for new sequence)."""
         if self.logit_cache is not None:
-            self.logit_cache.cache.clear()
+            # fixrev-7 (A9): модульный clear() чистит и attention-аккумуляторы
+            # старших шкал (cache.clear их не видел — фикс A9 был no-op)
+            if hasattr(self.logit_cache, 'clear'):
+                self.logit_cache.clear()
+            else:
+                self.logit_cache.cache.clear()
             # P0-5c: the AR sentence accumulator lives on the attention module
             _att = getattr(self.logit_cache, 'attention', None)
-            if _att is not None and hasattr(_att, 'reset_sent_acc'):
+            if _att is not None and hasattr(_att, 'reset_sent_acc') \
+                    and not hasattr(self.logit_cache, 'clear'):
                 _att.reset_sent_acc()
         # M58b: the block-level trajectory carry and the head's live pins
         # survive a rollback otherwise (the mirror loop below only scrubs the
@@ -1481,6 +1496,18 @@ class EVAStack(nn.Module):
                     for _k, t in _a.items()}
             else:
                 _ex[f'{_pfx}.{_an}'] = _a
+        # fixrev-4 (аудит): per-module RNG генератора scheduled sampling
+        # (seed 0) не в state_dict — на резюме его выборка начиналась с начала
+        # (replay). Кладём состояние в снимок; снимок уже уезжает в
+        # ckpt['runtime'] -> резюм продолжает последовательность.
+        _lc_mod = getattr(self, 'logit_cache', None)
+        _lc_gen = getattr(_lc_mod, '_ss_gen', None) if _lc_mod is not None else None
+        if isinstance(_lc_gen, torch.Generator):
+            _ex['lcache._ss_gen'] = _lc_gen.get_state().clone()
+            _ex['lcache._ss_dev'] = str(_lc_gen.device)
+        else:
+            _ex['lcache._ss_gen'] = None
+            _ex['lcache._ss_dev'] = None
         # M33: per-layer streaming caches ARE forward inputs (see mirror M33) —
         # they must round-trip through the eval isolation contract as well.
         for _i, _l in enumerate(self.layers):
@@ -1542,6 +1569,21 @@ class EVAStack(nn.Module):
                         # M65-opt2: свежий клон на КАЖДЫЙ restore (иначе
                         # повторный restore вернул бы уже мутированный список)
                         setattr(_tgt, _attr, self._restore_value(_v))
+                    continue
+                if _an.startswith('lcache.'):                     # fixrev-4
+                    _lc_mod = getattr(self, 'logit_cache', None)
+                    if _lc_mod is not None and _an == 'lcache._ss_gen':
+                        if _v is None:
+                            _lc_mod._ss_gen = None
+                        else:
+                            _dev = ((snap.get('__attrs__') or {})
+                                    .get('lcache._ss_dev') or 'cpu')
+                            _g = getattr(_lc_mod, '_ss_gen', None)
+                            if (not isinstance(_g, torch.Generator)
+                                    or str(_g.device) != str(_dev)):
+                                _g = torch.Generator(device=_dev)
+                                _lc_mod._ss_gen = _g
+                            _g.set_state(_v.detach().cpu().clone())
                     continue
                 _cur = getattr(self, _an, None)
                 if isinstance(_v, list) and isinstance(_cur, list) \

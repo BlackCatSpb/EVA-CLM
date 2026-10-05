@@ -838,7 +838,14 @@ class SigmoidCodedHead(nn.Module):
         self._last_lacuna = ell.detach().mean()
         self._last_lacuna_rel = ell_rel.detach().mean()
         self._last_lacuna_gate = g.detach().mean()
-        if self.training:
+        # Round 7-fixrev (аудит): флаг _stats_freeze (stack._head_frozen) должен
+        # глушить ВЕСЬ run-state наблюдения, а не только ell_ema/лестницы выше.
+        # Здесь за одним условием: банк фантомов (_pb.observe + decay), счётчик
+        # _pb_step, кольцо салиентности/квантили/порог (_sal_ring/_sal_ptr/
+        # _sal_q/_meta_thr), обновление phantom_basis, EMA режима лакуны и
+        # _last_p (он принадлежит ОБУЧАЮЩЕМУ forward'у — его читает L1-канал в
+        # losses, а не валидационный вызов).
+        if self.training and not getattr(self, '_stats_freeze', False):
             self._last_p = p                                  # live: the L1 aux
             _pb = getattr(self, 'phantom_bank', None)
             if _pb is not None and getattr(self, '_pb_active', True):

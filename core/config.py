@@ -711,13 +711,15 @@ class WideBindConfig:
     # scale). Оба множителя delta ограничены => поток O(1)-O(10), Δ/h ~1e-2
     # (калиброванный стенд scripts/bench_calibrated.py, 600 шагов).
     # Параметры создаются в КОНЦЕ EVAStack.__init__ (RNG-порядок ядра с
-    # флагом on/off одинаков); init: gate_W~N(0, 0.01²), gate_b=0.5,
-    # RMSNorm scale=0.5 (норма потока ≈ scale·sqrt(D)).
+    # флагом on/off одинаков); init: gate_W=0 (детерминированно, без RNG —
+    # fixrev-3), gate_b=0.5, RMSNorm scale=0.5 (норма потока ≈ scale·sqrt(D)).
     bounded_residual: bool = False
     bounded_residual_gate: bool = True   # True = per-position tanh(W_g·h_n+b_g)
                                          # (bounded_v2, валидирована); False =
                                          # scalar-per-dim tanh(b_g) (v1-рука A/B)
-    bounded_gate_w_init: float = 0.01    # std для W_g init
+    bounded_gate_w_init: float = 0.01    # fixrev-3: историческое std старого
+                                         # N(0,σ²)-init; не потребляется
+                                         # (детерминированный init = нули)
     bounded_gate_b_init: float = 0.5     # b_g init (gate_mean ~ tanh(0.5) ~ 0.46)
     bounded_scale_init: float = 0.5      # init per-layer RMSNorm scale
 

@@ -1113,23 +1113,6 @@ class GroupedCognitiveMirror(nn.Module):
         with torch.no_grad():
             self.mod_scale_mlp.data.fill_(float(value))
 
-    def _snapshot_fwd_buffers(self) -> None:
-        """M65-opt2 (A5): снимок ВСЕХ буферов зеркала для recompute-чистоты."""
-        self._fwd_buf_snap = {k: v.detach().clone()
-                              for k, v in self.named_buffers()}
-        self._fwd_py_snap = {'_alpha_override_py': self._alpha_override_py}
-        self._pending_fwd_snap = getattr(self, '_alpha_pending', None)
-
-    def _restore_fwd_buffers(self) -> None:
-        own = dict(self.named_buffers())
-        with torch.no_grad():
-            for k, v in self._fwd_buf_snap.items():
-                b = own.get(k)
-                if b is not None and b.shape == v.shape:
-                    b.copy_(v)
-        self._alpha_override_py = self._fwd_py_snap['_alpha_override_py']
-        self._alpha_pending = self._pending_fwd_snap
-
     def _signal_weights(self) -> torch.Tensor:
         """M65-opt: единая точка сигнальных весов.
 

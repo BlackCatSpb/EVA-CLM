@@ -107,7 +107,8 @@ def test_m55_confirmed_directions_steer_the_basis():
         pb.filled[0] = True
         b0 = m.lm_head.phantom_basis.data[0].clone()
         m.lm_head._pb_step.zero_()                # force the steering cadence
-    m(h, None, step=2001, tokens=x)
+    out, *_ = m(h, None, step=2001, tokens=x)
+    m.lm_head(out)   # Round 7-fixrev: реальный вызов головы двигает базис
     b1 = m.lm_head.phantom_basis.data[0]
     assert not torch.allclose(b0, b1), 'the confirmed direction did not steer the basis'
     assert torch.cosine_similarity(b1, d, dim=0) > torch.cosine_similarity(b0, d, dim=0)

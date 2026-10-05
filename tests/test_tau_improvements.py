@@ -574,7 +574,10 @@ class TestIntegration:
             out1, _, _, _ = model(model.embed_tokens(x))
             out2, _, _, _ = model(model.embed_tokens(x))
         assert torch.isfinite(out1).all() and torch.isfinite(out2).all()
-        assert float((out1 - out2).abs().max()) < 1e3, 'дрейф состояния неограничен'
+        # fixrev-7: замер фактического разброса на этом конфиге (CPU, сид 42
+        # теста; сиды 0/1/2/7/42/123 дали max-abs дрейф 1.1..8.7) — допуск
+        # 50 (≈6× запаса), а не прежний бессмысленный < 1e3.
+        assert float((out1 - out2).abs().max()) < 50.0, 'дрейф состояния неограничен'
 
     def test_no_nan_in_forward(self):
         cfg = EVAConfig(**SMALL, intent_bridge=True, memory_bank=True,

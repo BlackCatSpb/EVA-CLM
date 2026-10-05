@@ -80,7 +80,7 @@ def test_head_telemetry_reports_lacuna_srl_phantoms():
     with torch.no_grad():
         m.lm_head.ell_ladder[-1].mul_(0.2)  # T9.7: гейт читает середину VSA-лестницы      # M55b: a relative spike makes the bank observe
     out, st, gs, _ = m(h, None, step=2, tokens=x)
-    m.lm_head(h)   # Round 7: телеметрия SRL ставится реальным вызовом головы
+    m.lm_head(out)   # Round 7-fixrev: реальный вызов головы (фантом-банк наблюдает)
     tel = m.head_telemetry()
     assert 'lacuna' in tel and tel['lacuna'] >= 0.0
     assert 'srl_conf' in tel and 'srl_expl' in tel

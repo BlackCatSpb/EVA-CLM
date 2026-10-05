@@ -15,10 +15,10 @@ def _hrr_conv(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Циркулярная свёртка hrr[n] = Σ_t a[t]·b[(n−t)%K] через FFT.
 
     Замена gather (B,L,K,K) + einsum: замер агента B — 37.0 -> 0.74 ms/слой
-    (50x), освобождает ~18.9MB/слой графа. Индекс `_circ_conv_idx` = (n−t)%K —
-    ИМЕННО свёртка: irfft(rfft(a)·rfft(b)), max abs err 9.5e-7 (fp32),
-    8.9e-16 (fp64). ВНИМАНИЕ: прототип B (flip+roll) проверял корреляцию
-    (t+n)%K — к свёрточному сайту НЕ применим (err 9.9 — проверено)."""
+    (50x), освобождает ~18.9MB/слой графа. Индекс (n−t)%K — ИМЕННО свёртка:
+    irfft(rfft(a)·rfft(b)), max abs err 9.5e-7 (fp32), 8.9e-16 (fp64).
+    ВНИМАНИЕ: прототип B (flip+roll) проверял корреляцию (t+n)%K — к
+    свёрточному сайту НЕ применим (err 9.9 — проверено)."""
     _dt = a.dtype
     if _dt not in (torch.float32, torch.float64):
         a = a.float()
@@ -373,8 +373,6 @@ class TrajectorySpiralBind(nn.Module):
         self.W_out: nn.Parameter = nn.Parameter(torch.empty(self.n_dims * 2 * K + K, D))
         nn.init.xavier_uniform_(self.W_out, gain=0.5)
         self._tied: bool = False
-        circ_conv: torch.Tensor = torch.tensor(
-            [[(n - t) % K for n in range(K)] for t in range(K)], dtype=torch.long)
         # F6 (math audit): the correlation index must be (t + n), not (t - n).
         # With (t - n) the einsum returned the CIRCULARLY REVERSED b:
         # unbind(a, bind(a, b)) = K * b[(-n) mod K] (measured cos with
@@ -382,7 +380,6 @@ class TrajectorySpiralBind(nn.Module):
         # (TrajectoryManifoldBind) then clustered flipped transitions.
         circ_corr: torch.Tensor = torch.tensor(
             [[(t + n) % K for n in range(K)] for t in range(K)], dtype=torch.long)
-        self.register_buffer('_circ_conv_idx', circ_conv, persistent=False)
         self.register_buffer('_circ_corr_idx', circ_corr, persistent=False)
 
     def _hybrid_alpha(self) -> float:

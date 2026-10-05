@@ -137,26 +137,39 @@ def test_empty_batch_does_not_crash():
 
 
 def test_ms_accumulators_cleared_on_cache_clear():
+    # fixrev-7: precondition-assert + реальный путь нового документа.
+    # Аккумуляторы _ms_acc_* живут на LogitAttention (не на .cache);
+    # старый тест смотрел .cache и проходил пусто (guard -> return).
     m = _model(logit_cache_enabled=True)
-    lc = getattr(m.logit_cache, 'cache', m.logit_cache)
-    acc = getattr(lc, '_ms_acc_n', None)
-    if acc is None:
-        return
+    att = getattr(m.logit_cache, 'attention', None)
+    assert att is not None, 'precondition: attention не построен'
+    acc = getattr(att, '_ms_acc_n', None)
+    assert acc is not None, 'precondition: _ms_acc_n отсутствует — тест слепой'
     acc[8] = 5
-    lc.clear()
+    m.logit_cache.clear()              # граница документа (модульный clear)
     assert len(acc) == 0, 'многоразрешающие аккумуляторы пережили clear()'
+    acc[8] = 5
+    m.reset_cache()                    # путь stack.reset_cache
+    assert len(acc) == 0, 'reset_cache не почистил attention-аккумуляторы'
 
 
 def test_head_wall_not_emitted_for_micro_values():
-    m = _model().train()
+    # fixrev-7: безусловный сценарий вместо `if 'head_wall' in aux`. Wall
+    # читает _last_u в losses; в eval головной forward его НЕ перезаписывает
+    # (embedding.py: training-only), поэтому оба режима задаются явно.
+    m = _model().eval()
     x = torch.randint(1, 256, (1, 16))
-    h = m.embed_tokens(x)
-    out, *_ = m(h, None, step=5, tokens=x)
-    _ce, aux = m.compute_losses(out, x, h_emb=h)
-    # при малых u стена либо отсутствует, либо значима — не микро-мусор,
-    # покупающий третий backward (аудит B1: 1e-8..1e-6 на 7/8 шагов)
-    if 'head_wall' in aux:
-        assert float(aux['head_wall'].detach()) > 1e-6
+    with torch.no_grad():
+        h = m.embed_tokens(x)
+        out, *_ = m(h, None, step=5, tokens=x)
+        u0 = float(m.cfg.head_u_wall_u0)
+        m.lm_head._last_u = torch.full((1, 16, 4), u0 + 1e-4)
+        _ce, aux = m.compute_losses(out, x, h_emb=h)
+        assert 'head_wall' not in aux, 'микро-стена купила третий backward'
+        m.lm_head._last_u = torch.full((1, 16, 4), u0 + 6.0)
+        _ce, aux = m.compute_losses(out, x, h_emb=h)
+    assert 'head_wall' in aux, 'реальное насыщение не эмитит стену'
+    assert float(aux['head_wall'].detach()) > 1e-6
 
 
 # ── D: слепые зоны, доказанные мутационным тестированием ──

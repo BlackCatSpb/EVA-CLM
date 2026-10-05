@@ -372,6 +372,10 @@ def train(cfg=None, resume_path=None):
             else:
                 _filtered[k] = v
         missing, unexpected = model.load_state_dict(_filtered, strict=False)
+        # fixrev-6 (аудит): ON/OFF-резюм bounded_residual молча рандомит
+        # gate-параметры (strict=False их не считает ошибкой) — warning.
+        from core.ckpt_io import warn_bounded_gate_mismatch
+        warn_bounded_gate_mismatch(missing, unexpected, log=print)
         # M65-opt2 (A2): восстановить runtime-состояние (старые чекпоинты
         # без 'runtime' — тихо пропускаем, поведение как раньше)
         if ckpt.get('runtime') is not None:
@@ -692,6 +696,7 @@ def train(cfg=None, resume_path=None):
                 # it the A/B (align_every=8 vs 1) is indistinguishable in the log.
                 _bal = (f'bal_a={getattr(balancer, "n_align", 0)} '
                         f'bal_b={getattr(balancer, "n_balance", 0)} '
+                        f'bal_unc={getattr(balancer, "n_unconnected", 0)} '
                         f'bal_s={getattr(balancer, "scale_ema", None) if getattr(balancer, "scale_ema", None) is None else round(float(balancer.scale_ema), 5)} '
                         f'bal_sc={getattr(balancer, "last_scale", None) if getattr(balancer, "last_scale", None) is None else round(float(balancer.last_scale), 5)} '
                         f'bal_cos={getattr(balancer, "last_align_cos", None) if getattr(balancer, "last_align_cos", None) is None else round(float(balancer.last_align_cos), 4)}')
