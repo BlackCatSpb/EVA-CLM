@@ -2735,3 +2735,20 @@ N=8 маргинален. (v) сид-разброс доминирует; N=2/2 
 ОТКРЫТО: (a) больший стенд для профиля компонентов (компьют); (b) Этап 3 —
 масштабирование bounded на прод-конфиг и свежий прогон (GPU только после решения);
 (c) очередь аудитов (cheap-дрейф балансера, source-локи).
+
+
+## ЭТАП 3-ПОДГОТОВКА: bounded_residual внедрён в код как OPT-IN (691 passed)
+
+Изменены: core/config.py (+5 полей: bounded_residual=False, _gate=True,
+gate_w_init=0.01, gate_b_init=0.5, scale_init=0.5); core/memory_bank.py (ветка
+h+tanh(W_g*h_n+b_g)*unit(fused) + init_bounded_residual); core/stack.py
+(_bounded_rms_norm, параметры в конце __init__ RNG-нейтрально, RMSNorm перед
+_stream_cap, телеметрия _bounded_flow); tests/test_bounded_residual.py (4 теста).
+КОНТРАКТЫ: OFF = БИТ-В-БИТ старый путь (torch.equal, сдвиг 0.0; state_dict
+совместим); ON = поток 8.00/8.14/8.27 (bound scale*sqrtD=8), Δ/h 6.3e-3->8.3e-3,
+градиенты гейта живые; при zero-init fusion — no-op.
+СТЕНД (600 шагов, seed 0): CE end 7.269 vs эталон bounded_v2 7.251; cold_end
+6.788 vs 6.853; train last20 6.515 vs 6.504 — совпадение (расхождение gate_W
+0.073 vs 0.161 — иной розыгрыш init: параметры создаются до калибровки).
+pytest: 691 passed (687+4). Bootstrap: прод-конфиг может включить
+bounded_residual=True для Этапа 3 (свежий прогон) — решение о GPU за оператором.

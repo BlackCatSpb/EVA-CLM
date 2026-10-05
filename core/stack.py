@@ -20,6 +20,20 @@ from .lr_scheduler import MirrorLRScheduler
 from .losses import compute_losses as _compute_losses_fn
 from .logit_cache import LogitCacheAttention
 
+
+def _bounded_rms_norm(x: torch.Tensor, w: torch.Tensor,
+                      eps: float = 1e-7) -> torch.Tensor:
+    """Scale-safe RMSNorm of the residual stream (Stage 3 bounded residual).
+
+    Max-abs pre-normalization keeps the intermediate finite for any input
+    scale, then rsqrt(mean(xs²)+eps) makes the output norm ≈ w·sqrt(D).
+    Точная копия эталона st1b_bounded._rmsnorm (валидированная bounded_v2).
+    """
+    m = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6)
+    xs = x / m
+    return w * xs * torch.rsqrt(xs.pow(2).mean(dim=-1, keepdim=True) + eps)
+
+
 class EVAStack(nn.Module):
     """Stack of EVABlock layers with embedding and lm_head."""
     
@@ -222,7 +236,27 @@ class EVAStack(nn.Module):
                 .split(',') if _s.isdigit() and int(_s) > 0),
             ms_max=int(getattr(cfg, 'logit_cache_ms_max', 16) or 16),
         ) if getattr(cfg, 'logit_cache_enabled', True) else None
-    
+
+        # ─── Stage 3 (OPT-IN): bounded residual params ───
+        # Создаются В САМОМ КОНЦЕ __init__: все RNG-потребляющие модули уже
+        # построены, поэтому модели с bounded_residual=True/False на одном
+        # сиде имеют идентичные core-веса (и flag-off остаётся бит-в-бит).
+        # gate_W/gate_b живут на memory_bank (там точка инъекции); per-layer
+        # RMSNorm scale — здесь, в ParameterList (общий state_dict). Без банка
+        # инжектить нечего => флаг игнорируется.
+        self._bounded_residual = bool(getattr(cfg, 'bounded_residual', False))
+        self.bounded_post_norm_w = None
+        self._bounded_flow = []          # post-norm per-layer flow telemetry
+        if self._bounded_residual and self.memory_bank is not None:
+            self.memory_bank.init_bounded_residual(cfg)
+            _s = float(getattr(cfg, 'bounded_scale_init', 0.5))
+            self.bounded_post_norm_w = nn.ParameterList([
+                nn.Parameter(torch.full((cfg.D,), _s))
+                for _ in range(cfg.n_layers)
+            ])
+        else:
+            self._bounded_residual = False
+
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,
                 context_mem=None, allow_write=None, step=None,
                 reasoning_buffer=None, reasoning_count=None, intent_state=None,
@@ -700,6 +734,16 @@ class EVAStack(nn.Module):
                                   tau_s=_vsa_tau_i, step=step, intent=intent_i, salience=_sal,
                                    maturity=(mat_gate[i] if mat_gate is not None else None),
                                    sep_mask=_sep_mask)
+            # ─── Stage 3 (OPT-IN): RMSNorm потока после инъекций ───
+            # bounded_v2 'post'-нормировка (эталон wrap_layers): держит поток
+            # O(scale·sqrt(D)) независимо от взрыва ветвей. Флаг off => строка
+            # не исполняется, forward бит-в-бит прежний.
+            if self._bounded_residual and self.bounded_post_norm_w is not None:
+                h = _bounded_rms_norm(h, self.bounded_post_norm_w[i])
+                if len(self._bounded_flow) < 4096:
+                    with torch.no_grad():
+                        self._bounded_flow.append(
+                            float(h.detach().norm(dim=-1).mean()))
             h = _stream_cap(h, _STREAM_CAP)   # M50: blow-up fuse (see above)
             # ─── Unified Concept Layer (global, after first layer provides hp) ───
             # Called once after first layer to read/write concepts from expert K-space.

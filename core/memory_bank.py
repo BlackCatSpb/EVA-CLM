@@ -446,6 +446,22 @@ class StreamingMemoryBank(nn.Module):
         # U6: τ-consistent fusion: per-level importance scales with τ_norm
         self._fusion_tau_alpha = nn.Parameter(torch.zeros(3))  # learnable per-level τ-modulation
 
+        # ─── Stage 3 (OPT-IN): bounded residual (bounded_v2) ───
+        # Флаги читаются в forward. Параметры (gate_W/gate_b) НЕ создаются
+        # здесь: EVAStack вызывает init_bounded_residual() в самом конце
+        # __init__, чтобы RNG-поток ядра модели при флаге on/off был
+        # бит-в-бит одинаков (иначе torch.randn(D,D) сдвинул бы инициализацию
+        # последующих модулей). _bounded_log — телеметрия последних вызовов
+        # (h_in/delta/ratio/gate_mean), cap от роста в долгом обучении.
+        self._bounded_residual = (bool(getattr(cfg, 'bounded_residual', False))
+                                  if cfg is not None else False)
+        self._bounded_gate = (bool(getattr(cfg, 'bounded_residual_gate', True))
+                              if cfg is not None else True)
+        self.gate_W = None
+        self.gate_b = None
+        self._bounded_log = []
+        self._BOUNDED_LOG_CAP = 4096
+
         # Track sentence boundaries
 
     def forward(self, h: torch.Tensor, tokens: torch.Tensor,
@@ -541,7 +557,52 @@ class StreamingMemoryBank(nn.Module):
         if not _can_write:
             return h
 
+        # ─── Stage 3 (OPT-IN): bounded_v2 injection ───
+        # delta = tanh(W_g·h_n + b_g) ⊙ unit(fused): оба множителя ограничены
+        # (|tanh|<=1, ||unit||_2=1 per position) => приращение O(1) независимо
+        # от масштаба fused. Эталон: st1b_bounded.py::BoundedBank._delta.
+        # Флаг False => ветка не исполняется, ниже — старый путь БИТ-В-БИТ.
+        if self._bounded_residual:
+            if self.gate_W is None or self.gate_b is None:
+                raise RuntimeError(
+                    'bounded_residual=True, но gate-параметры не созданы: '
+                    'соберите модель через EVAStack (init_bounded_residual) '
+                    'или вызовите init_bounded_residual(cfg) вручную.')
+            h_n = F.normalize(h, dim=-1, eps=1e-6)       # scale-free, O(1)
+            if self._bounded_gate:
+                gate = torch.tanh(h_n @ self.gate_W.t() + self.gate_b)
+            else:
+                gate = torch.tanh(self.gate_b)           # scalar-per-dim (v1)
+            unit = F.normalize(fused, dim=-1, eps=1e-6)
+            delta = gate * unit
+            if len(self._bounded_log) < self._BOUNDED_LOG_CAP:
+                with torch.no_grad():
+                    _hi = h.detach().norm(dim=-1).mean()
+                    _dn = delta.detach().norm(dim=-1).mean()
+                self._bounded_log.append({
+                    'h_in': float(_hi), 'delta': float(_dn),
+                    'ratio': float(_dn / _hi.clamp_min(1e-12)),
+                    'gate_mean': float(gate.detach().abs().mean()),
+                })
+            return h + delta
+
         return h + scale * fused
+
+    def init_bounded_residual(self, cfg=None) -> None:
+        """Create bounded_v2 gate params (Stage 3).
+
+        Вызывается EVAStack в КОНЦЕ __init__ — единственная точка, где RNG
+        ещё не тронут после сборки ядра, поэтому модель с bounded_residual
+        on/off имеет идентичные core-веса. idempotent.
+        """
+        if self.gate_W is not None:
+            return
+        cfg = cfg if cfg is not None else self.cfg
+        w = float(getattr(cfg, 'bounded_gate_w_init', 0.01))
+        b = float(getattr(cfg, 'bounded_gate_b_init', 0.5))
+        self.gate_W = nn.Parameter(torch.randn(self.D, self.D) * w)
+        self.gate_b = nn.Parameter(torch.full((self.D,), b))
+        self._bounded_residual = True
 
     def reset(self) -> None:
         """Clear all memory (for new sequence)."""
