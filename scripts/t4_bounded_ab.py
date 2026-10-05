@@ -3,16 +3,21 @@
 Modes:
   --dry-run  Production config taken from notebooks/eva_colab.ipynb cell 4
              (D=2560, 24 layers, seq 384, B=1, bounded_residual=True) with
-             gradient_checkpointing=True and AMP fp16. Runs a few steps on CUDA
-             and reports peak VRAM, s/step, b_flow/b_drift and finiteness. The
-             point is to answer whether the production run fits a 16 GB T4 with
-             gc=True and how fast it is (s/step > 30 => not worth T4 time).
+             gradient_checkpointing=True and an AMP fp16 attempt. Runs a few
+             steps on CUDA and reports peak VRAM, s/step, b_flow/b_drift and
+             finiteness. If fp16 overflows on the first steps it auto-falls
+             back to fp32 (recorded as amp_fallback=True in JSON). The point is
+             to answer whether the production run fits a 16 GB T4 with gc=True
+             and how fast it is (s/step > 30 => not worth T4 time).
   --ab       Mid-scale A/B: D=512, 8 layers, mlp_groups=8, seq 384, B=4,
-             vocab=8192, gc=True, AMP fp16, real data (3 train files + 1
-             hold-out). Arms: bounded_residual=True vs False (baseline), same
-             data and seed, one run each. Metrics every ~200 steps: train CE,
-             eval CE (2 windows), b_flow/b_drift (bounded), s/step. Results in
-             JSON + a short txt comparison.
+             vocab=8192, gc=True, fp32 by doctrine (AMP only with explicit
+             --amp), real data (3 train files + 1 hold-out). Arms:
+             bounded_residual=True vs False (baseline), same data and seed, one
+             run each. Metrics every ~200 steps: train CE, eval CE (2 windows),
+             b_flow/b_drift (bounded), s/step. Results in JSON + a short txt
+             comparison. If loss/grad is non-finite within the first
+             NAN_EARLY_STEPS steps the arm stops immediately as status
+             failed_nan (no zero-substitution) and the next arm runs.
   --smoke    Same pipeline as --ab at D=64, 2 layers, vocab=256, 20 steps --
              the CPU end-to-end check (bounded flag, telemetry, saving).
 
@@ -22,7 +27,8 @@ with the production T0=8000 a <=1200-step run never reaches the memory-bank
 injection path, so bounded and baseline would be identical by construction.
 
 Paths default to Colab (/content/...), falling back to <repo>/wb and
-<repo>/logs/t4. CPU runs are fp32 (AMP is CUDA-only); --dry-run requires CUDA.
+<repo>/logs/t4. CPU runs are fp32 (AMP is CUDA-only, opt-in via --amp;
+--dry-run keeps its fp16 attempt). --dry-run requires CUDA.
 Nothing is committed; outputs go to --out-dir/--out.
 """
 
@@ -50,7 +56,8 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from core import EVAConfig, EVAStack
-from core.adaptation import GradientClipper, build_optimizer
+from core.adaptation import (GradientClipper, build_optimizer,
+                             nonfinite_gradient_names)
 from core.training_control import LossBalancer, apply_tau_lr, training_telemetry
 
 try:
@@ -60,6 +67,44 @@ except Exception:
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 IS_CUDA = DEVICE == 'cuda'
+
+NAN_EARLY_STEPS = 10  # non-finite loss/grad in the first N steps => failed_nan
+
+
+def fmt_num(v, nd=4, none='n/a'):
+    """Format a possibly-None/NaN/Inf number for logs without raising."""
+    if v is None:
+        return none
+    try:
+        return f'{float(v):.{nd}f}'
+    except (TypeError, ValueError):
+        return none
+
+
+def nan_advice(use_amp, dry_run=False):
+    """Human hint printed when an early non-finite loss/grad stops a run."""
+    if use_amp:
+        if dry_run:
+            return 'AMP-overflow, попробуй без --amp'
+        return 'fp16 overflow suspected: rerun with --no-amp (fp32 is the default)'
+    return 'fp32 run produced non-finite loss/grad: check data/lr/grad-clip before rerun'
+
+
+def reset_run_state(model, ctx):
+    """Drop carried state after a non-finite step or a chunk switch."""
+    ctx['state'] = None
+    ctx['gs'] = None
+    model.reset_streams()
+    if getattr(model, 'memory_bank', None) is not None:
+        model.memory_bank.reset()
+    if getattr(model, 'explicit_reasoning', False):
+        model.reset_reasoning()
+    lc = getattr(model, 'logit_cache', None)
+    if lc is not None:
+        try:
+            lc.cache.clear()
+        except Exception:
+            pass
 
 
 def resolve_data_dir(arg):
@@ -280,7 +325,8 @@ def build_optimizer_for(model, cfg):
                            optimizer=getattr(cfg, 'optimizer', 'adamw'))
 
 
-def train_step(model, opt, clip, bal, scaler, ctx, x, y, step, use_amp, cfg):
+def train_step(model, opt, clip, bal, scaler, ctx, x, y, step, use_amp, cfg,
+               check_grad_finite=False):
     model.train()
     if getattr(model, 'explicit_reasoning', False):
         model.reasoning_enabled_step = step
@@ -315,6 +361,12 @@ def train_step(model, opt, clip, bal, scaler, ctx, x, y, step, use_amp, cfg):
         return 'checkpoint_error', float(ce.detach())
     if use_amp:
         scaler.unscale_(opt)
+    if check_grad_finite:
+        bad_grads = nonfinite_gradient_names(model)
+        if bad_grads:
+            opt.zero_grad(set_to_none=True)
+            model.release_step_graph()
+            return 'nonfinite_grad', float(ce.detach())
     apply_tau_lr(model, getattr(model, 'tau_config', None), None)
     clip.clip(model.parameters())
     if hasattr(opt, 'set_trust'):
@@ -408,6 +460,9 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
     retries = 0
     stopped_early = False
     chunks = 1
+    failed_nan = False
+    nan_status = None
+    nan_step = None
     while step < steps:
         if time.time() > deadline:
             stopped_early = True
@@ -416,25 +471,14 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
             bi = int(rng.integers(0, len(bufs)))
             offset = 0
             chunks += 1
-            ctx['state'] = None
-            ctx['gs'] = None
-            model.reset_streams()
-            if getattr(model, 'memory_bank', None) is not None:
-                model.memory_bank.reset()
-            lc = getattr(model, 'logit_cache', None)
-            if lc is not None:
-                try:
-                    lc.cache.clear()
-                except Exception:
-                    pass
-            if getattr(model, 'explicit_reasoning', False):
-                model.reset_reasoning()
+            reset_run_state(model, ctx)
         ch = np.asarray(bufs[bi][offset:offset + need])
         offset += cfg.batch_size * cfg.seq_len
         x = torch.from_numpy(ch[:-1].copy()).long().view(cfg.batch_size, cfg.seq_len).to(DEVICE)
         y = torch.from_numpy(ch[1:].copy()).long().view(cfg.batch_size, cfg.seq_len).to(DEVICE)
         status, ce = train_step(model, opt, clip, bal, scaler, ctx, x, y,
-                                step, use_amp, cfg)
+                                step, use_amp, cfg,
+                                check_grad_finite=step < NAN_EARLY_STEPS)
         if status == 'checkpoint_error':
             retries += 1
             if retries > 2:
@@ -443,8 +487,18 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
             continue
         retries = 0
         status_counts[status] = status_counts.get(status, 0) + 1
+        if status in ('nonfinite_loss', 'nonfinite_grad') and step < NAN_EARLY_STEPS:
+            failed_nan = True
+            nan_status = status
+            nan_step = step
+            arm_name = 'bounded' if bounded else 'baseline'
+            print(f'[arm {arm_name}] FAILED_NAN at step {step}/{steps}: {status} '
+                  f'within the first {NAN_EARLY_STEPS} steps (no zero-substitution).',
+                  flush=True)
+            print(f'[arm {arm_name}] advice: {nan_advice(use_amp)}', flush=True)
+            break
         step += 1
-        if status in ('ok', 'amp_skip'):
+        if status in ('ok', 'amp_skip') and ce is not None:
             ce_all.append(ce)
             window_ce.append(ce)
         if step % eval_every == 0 or step == steps:
@@ -464,21 +518,33 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
             history.append(rec)
             window_ce = []
             print(f'  [arm {"B" if bounded else "A"}] step={step}/{steps} '
-                  f'train_ce={rec["train_ce"]:.4f} eval_ce={val:.4f} '
-                  f's/step={rec["s_per_step"]:.2f} '
-                  f'b_flow={rec["b_flow"] if rec["b_flow"] is None else round(rec["b_flow"], 3)} '
-                  f'b_drift={rec["b_drift"] if rec["b_drift"] is None else round(rec["b_drift"], 4)}',
+                  f'train_ce={fmt_num(rec["train_ce"])} eval_ce={fmt_num(val)} '
+                  f's/step={fmt_num(rec["s_per_step"], 2)} '
+                  f'b_flow={fmt_num(rec["b_flow"], 3)} '
+                  f'b_drift={fmt_num(rec["b_drift"], 4)}',
                   flush=True)
     wall = time.time() - t0
     del model, opt, bal, clip, scaler
     _gc.collect()
     if IS_CUDA:
         torch.cuda.empty_cache()
-    last_n = max(1, min(50, len(ce_all) // 2)) if ce_all else 0
+    ce_nums = [c for c in ce_all if c is not None]
+    last_n = max(1, min(50, len(ce_nums) // 2)) if ce_nums else 0
+    if failed_nan:
+        run_status = 'failed_nan'
+    elif stopped_early:
+        run_status = 'timeout'
+    else:
+        run_status = 'ok'
     result = {
         'bounded': bool(bounded),
         'params': params,
         'init_fp': fp,
+        'status': run_status,
+        'failed_nan': failed_nan,
+        'nan_status': nan_status,
+        'nan_step': nan_step,
+        'use_amp': bool(use_amp),
         'steps_done': step,
         'steps_target': steps,
         'stopped_early': stopped_early,
@@ -487,15 +553,15 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
         'tok_per_s': step * cfg.batch_size * cfg.seq_len / max(wall, 1e-9),
         'chunks_seen': chunks,
         'status_counts': status_counts,
-        'train_ce_first50': (sum(ce_all[:last_n]) / last_n) if last_n else None,
-        'train_ce_last50': (sum(ce_all[-last_n:]) / last_n) if last_n else None,
-        'train_ce_min': min(ce_all) if ce_all else None,
+        'train_ce_first50': (sum(ce_nums[:last_n]) / last_n) if last_n else None,
+        'train_ce_last50': (sum(ce_nums[-last_n:]) / last_n) if last_n else None,
+        'train_ce_min': min(ce_nums) if ce_nums else None,
         'history': history,
         'cfg': {
             'D': cfg.D, 'n_layers': cfg.n_layers, 'mlp_groups': cfg.mlp_groups,
             'vocab': cfg.vocab, 'seq_len': cfg.seq_len,
             'batch_size': cfg.batch_size, 'lr': cfg.lr,
-            'gradient_checkpointing': True,
+            'gradient_checkpointing': bool(cfg.gradient_checkpointing),
             'matur_T0': cfg.matur_T0, 'matur_T_delay': cfg.matur_T_delay,
             'matur_delta': cfg.matur_delta,
             'mem_min_write_mat': cfg.mem_min_write_mat,
@@ -513,7 +579,7 @@ def summarize_ab(results, args, out_txt):
     b = arms['bounded']
     a = arms['baseline']
     def _fmt(v, nd=4):
-        return 'n/a' if v is None else f'{v:.{nd}f}'
+        return fmt_num(v, nd=nd)
     lines = []
     lines.append('T4 bounded_residual A/B summary')
     lines.append(f'device={DEVICE} amp={results["use_amp"]} seed={args.seed} '
@@ -526,14 +592,16 @@ def summarize_ab(results, args, out_txt):
     lines.append(f'{"metric":<24}{"bounded":>14}{"baseline":>14}')
     lines.append(f'{"params":<24}{b["params"]:>14,}{a["params"]:>14,}')
     lines.append(f'{"steps_done":<24}{b["steps_done"]:>14}{a["steps_done"]:>14}')
+    lines.append(f'{"status":<24}{str(b.get("status", "ok")):>14}{str(a.get("status", "ok")):>14}')
     lines.append(f'{"stopped_early":<24}{str(b["stopped_early"]):>14}{str(a["stopped_early"]):>14}')
+    lines.append(f'{"use_amp":<24}{str(b.get("use_amp", results.get("use_amp"))):>14}{str(a.get("use_amp", results.get("use_amp"))):>14}')
     lines.append(f'{"s_per_step":<24}{_fmt(b["s_per_step"], 2):>14}{_fmt(a["s_per_step"], 2):>14}')
     lines.append(f'{"tok_per_s":<24}{_fmt(b["tok_per_s"], 0):>14}{_fmt(a["tok_per_s"], 0):>14}')
     lines.append(f'{"train_ce_first50":<24}{_fmt(b["train_ce_first50"]):>14}{_fmt(a["train_ce_first50"]):>14}')
     lines.append(f'{"train_ce_last50":<24}{_fmt(b["train_ce_last50"]):>14}{_fmt(a["train_ce_last50"]):>14}')
     lines.append(f'{"train_ce_min":<24}{_fmt(b["train_ce_min"]):>14}{_fmt(a["train_ce_min"]):>14}')
-    ev_b = [r['eval_ce'] for r in b['history']]
-    ev_a = [r['eval_ce'] for r in a['history']]
+    ev_b = [r['eval_ce'] for r in b['history'] if r.get('eval_ce') is not None]
+    ev_a = [r['eval_ce'] for r in a['history'] if r.get('eval_ce') is not None]
     lines.append(f'{"eval_ce_first":<24}{_fmt(ev_b[0] if ev_b else None):>14}{_fmt(ev_a[0] if ev_a else None):>14}')
     lines.append(f'{"eval_ce_last":<24}{_fmt(ev_b[-1] if ev_b else None):>14}{_fmt(ev_a[-1] if ev_a else None):>14}')
     lines.append(f'{"eval_ce_min":<24}{_fmt(min(ev_b) if ev_b else None):>14}{_fmt(min(ev_a) if ev_a else None):>14}')
@@ -562,6 +630,16 @@ def summarize_ab(results, args, out_txt):
         if b['stopped_early'] or a['stopped_early']:
             verdict += ' [STOPPED EARLY by --max-minutes]'
         lines.append(f'VERDICT: {verdict}')
+    failed = [name for name, arm in (('bounded', b), ('baseline', a))
+              if arm.get('failed_nan') or arm.get('status') == 'failed_nan']
+    if failed:
+        lines.append('')
+        lines.append(f'EARLY-NaN STOP: {", ".join(failed)} stopped in the first '
+                     f'{NAN_EARLY_STEPS} steps (non-finite loss/grad); '
+                     f'metrics are NOT zero-substituted (n/a).')
+        lines.append('advice: ' + nan_advice(results.get('use_amp', False)))
+        if not (ev_b and ev_a):
+            lines.append('VERDICT: no A/B verdict (an arm failed on early NaNs)')
     with open(out_txt, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
     return '\n'.join(lines), delta
@@ -601,6 +679,7 @@ def run_ab(args, use_amp, scale='ab'):
     results['comparison'] = {
         'init_fp_match': results['arms']['bounded']['init_fp'] == results['arms']['baseline']['init_fp'],
         'final_eval_delta_baseline_minus_bounded': delta,
+        'failed_nan_arms': [k for k, v in results['arms'].items() if v.get('failed_nan')],
     }
     save_json(out_json, results)
     print('\n' + text)
@@ -614,7 +693,7 @@ def run_dry_run(args, use_amp):
     out_json = args.out or os.path.join(out_dir, f't4_dryrun_{ts}.json')
     result = {'mode': 'dry-run', 'ok': False, 'oom': False, 'oom_step': None,
               'steps_target': args.steps, 'steps_done': 0, 'use_amp': use_amp,
-              'device': DEVICE}
+              'amp_fallback': False, 'failed_nan': False, 'device': DEVICE}
     if not IS_CUDA:
         result['error'] = 'cuda_unavailable'
         save_json(out_json, result)
@@ -669,27 +748,46 @@ def run_dry_run(args, use_amp):
         torch.cuda.reset_peak_memory_stats()
         times, ces, bflows, bdrifts = [], [], [], []
         n_skips = 0
+        amp_fallback = False
         for step in range(args.steps):
             try:
                 if offset + need > len(arr):
                     offset = 0
-                    ctx['state'] = None
-                    ctx['gs'] = None
-                    model.reset_streams()
-                    if getattr(model, 'memory_bank', None) is not None:
-                        model.memory_bank.reset()
-                    if getattr(model, 'explicit_reasoning', False):
-                        model.reset_reasoning()
+                    reset_run_state(model, ctx)
                 ch = np.asarray(arr[offset:offset + need])
                 offset += B * S
                 x = torch.from_numpy(ch[:-1].copy()).long().view(B, S).to(DEVICE)
                 y = torch.from_numpy(ch[1:].copy()).long().view(B, S).to(DEVICE)
                 t = time.time()
                 status, ce = train_step(model, opt, clip, bal, scaler, ctx, x, y,
-                                        step, use_amp, cfg)
+                                        step, use_amp, cfg,
+                                        check_grad_finite=step < NAN_EARLY_STEPS)
                 torch.cuda.synchronize()
+                if status in ('nonfinite_loss', 'nonfinite_grad'):
+                    if use_amp and not amp_fallback and step < NAN_EARLY_STEPS:
+                        amp_fallback = True
+                        use_amp = False
+                        scaler = torch.amp.GradScaler('cuda', enabled=False)
+                        reset_run_state(model, ctx)
+                        result['amp_fallback'] = True
+                        result['amp_fallback_step'] = step
+                        result['amp_fallback_reason'] = f'{status} at step {step}'
+                        result['use_amp'] = False
+                        print(f'[dry-run] AMP-overflow: {status} at step {step} -> '
+                              f'auto-fallback to fp32 ({nan_advice(True, dry_run=True)}); '
+                              f'JSON marks amp_fallback=True', flush=True)
+                        continue
+                    if step < NAN_EARLY_STEPS:
+                        result['failed_nan'] = True
+                        result['nan_status'] = status
+                        result['nan_step'] = step
+                        result['error'] = f'{status} at step {step} (early NaN stop)'
+                        print(f'[dry-run] FAILED_NAN: {status} at step {step} '
+                              f'({nan_advice(use_amp, dry_run=True)}); '
+                              f'no zero-substitution, values stay n/a', flush=True)
+                        break
                 times.append(time.time() - t)
-                if status in ('ok', 'amp_skip'):
+                if status in ('ok', 'amp_skip') and ce is not None:
                     ces.append(ce)
                 if status == 'amp_skip':
                     n_skips += 1
@@ -699,7 +797,7 @@ def run_dry_run(args, use_amp):
                 if tel.get('b_drift') is not None:
                     bdrifts.append(tel['b_drift'])
                 result['steps_done'] = step + 1
-                print(f'  step={step} ce={ce:.4f} dt={times[-1]:.2f}s '
+                print(f'  step={step} ce={fmt_num(ce)} dt={times[-1]:.2f}s '
                       f'peak={torch.cuda.max_memory_allocated()/1e9:.2f}GB '
                       f'live={torch.cuda.memory_allocated()/1e9:.2f}GB '
                       f'status={status}', flush=True)
@@ -709,7 +807,8 @@ def run_dry_run(args, use_amp):
                 result['error'] = f'OOM: {str(e)[:200]}'
                 print(f'  [OOM] step={step}: {str(e)[:160]}', flush=True)
                 break
-        result['ok'] = result['steps_done'] >= max(1, args.steps // 2) and not result['oom']
+        result['ok'] = (result['steps_done'] >= max(1, args.steps // 2)
+                        and not result['oom'] and not result.get('failed_nan'))
         result['s_per_step'] = (sum(times) / len(times)) if times else None
         result['s_per_step_min'] = min(times) if times else None
         result['final_ce'] = ces[-1] if ces else None
@@ -727,17 +826,29 @@ def run_dry_run(args, use_amp):
                 [torch.isfinite(p).all() for p in model.parameters()]).all())
         except Exception:
             result['params_finite'] = None
-        t4_budget_note = (
-            'T4 verdict: ' + ('FITS' if result['ok'] else 'DOES NOT FIT / FAILED') +
-            ('' if result['s_per_step'] is None else
-             f'; s/step={result["s_per_step"]:.1f}'))
+        if result.get('failed_nan'):
+            t4_budget_note = (
+                f'T4 verdict: FAILED (early NaN stop at step {result.get("nan_step")}, '
+                f'values not zero-substituted); '
+                f'{nan_advice(result.get("use_amp", False), dry_run=True)}')
+        else:
+            t4_budget_note = (
+                'T4 verdict: ' + ('FITS' if result['ok'] else 'DOES NOT FIT / FAILED') +
+                ('' if result['s_per_step'] is None else
+                 f'; s/step={result["s_per_step"]:.1f}'))
+        if result.get('amp_fallback'):
+            t4_budget_note += (
+                f' [AMP fp16 overflowed at step {result.get("amp_fallback_step")}; '
+                f'auto-fallback to fp32, JSON amp_fallback=True; '
+                f'rerun with --no-amp to skip the fp16 attempt]')
         result['note'] = t4_budget_note
         print(f'\n[dry-run] {t4_budget_note}')
-        print(f'[dry-run] peak_alloc={result["peak_vram_gb"]:.2f} GB '
-              f'peak_reserved={result["peak_reserved_gb"]:.2f} GB '
-              f's/step={result["s_per_step"] if result["s_per_step"] is None else round(result["s_per_step"], 2)} '
+        print(f'[dry-run] peak_alloc={fmt_num(result["peak_vram_gb"], 2)} GB '
+              f'peak_reserved={fmt_num(result["peak_reserved_gb"], 2)} GB '
+              f's/step={fmt_num(result["s_per_step"], 2)} '
               f'loss_finite={result["loss_finite"]} params_finite={result["params_finite"]} '
-              f'b_flow={result["b_flow_mean"]} b_drift={result["b_drift_mean"]}')
+              f'b_flow={fmt_num(result["b_flow_mean"], 3)} '
+              f'b_drift={fmt_num(result["b_drift_mean"], 4)}')
     except torch.cuda.OutOfMemoryError as e:
         result['oom'] = True
         result['error'] = f'OOM: {str(e)[:200]}'
@@ -780,8 +891,12 @@ def main(argv=None):
                     help='eval cadence (default: ab 200, smoke 10)')
     ap.add_argument('--max-minutes', type=float, default=None,
                     help='wall-clock budget for the whole mode (default: dry 20, ab 95, smoke 5)')
-    ap.add_argument('--no-amp', action='store_true',
-                    help='disable AMP (CUDA fp16); CPU is always fp32')
+    amp_grp = ap.add_mutually_exclusive_group()
+    amp_grp.add_argument('--amp', action='store_true',
+                         help='enable CUDA fp16 AMP for --ab/--smoke (default: off, fp32 first; '
+                              '--dry-run keeps its fp16 attempt unless --no-amp)')
+    amp_grp.add_argument('--no-amp', action='store_true',
+                         help='force fp32 everywhere, including --dry-run (skip the fp16 attempt)')
     args = ap.parse_args(argv)
 
     if args.steps is None:
@@ -792,10 +907,17 @@ def main(argv=None):
         args.max_minutes = 20.0 if args.dry_run else (5.0 if args.smoke else 95.0)
     if args.smoke:
         args.cap = min(args.cap, 400_000)
-    use_amp = bool(IS_CUDA and not args.no_amp)
+    if args.no_amp:
+        use_amp = False
+    elif args.amp:
+        use_amp = bool(IS_CUDA)
+    else:
+        use_amp = bool(IS_CUDA and args.dry_run)
+    amp_src = '--amp' if args.amp else ('--no-amp' if args.no_amp else
+                                        ('dry-run attempt' if args.dry_run else 'default fp32'))
 
     print(f'[t4] device={DEVICE} torch={torch.__version__} '
-          f'threads={torch.get_num_threads()} amp={use_amp} '
+          f'threads={torch.get_num_threads()} amp={use_amp} (amp_src={amp_src}) '
           f'mode={"dry-run" if args.dry_run else ("ab" if args.ab else "smoke")} '
           f'steps={args.steps}', flush=True)
     if args.dry_run:
