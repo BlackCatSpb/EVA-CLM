@@ -2815,3 +2815,24 @@ FFT-bind, bounded_residual) + независимые проверки контр
 ИТОГ: 704 passed. ПОСЛЕ ЭТОГО: всё готово к запуску; остаётся решение о GPU-
 бюджете (один цикл; продление после watchdog 3-5k). Не блокирует: 11 source-
 локов, stability-guard v4, больший стенд профиля, NaN-гард.
+
+
+## T4-ПЛАН (бюджет: T4, ~2ч): dry-run прода + mid-scale A/B bounded vs baseline
+
+Прод на T4: без gc ~23-26GB не влезает в 16GB; при gc=True вес+грады+Adam в fp32
+(~2.9GB на 183.14M; НЕ 723M — та цифра устарела) + активации gc ~8-12GB — вероятно
+влезает, но надо мерить. За ~2ч прод дал бы лишь ~150-300 шагов (30-60 s/step) —
+учиться нечему, поэтому прод на T4 только как dry-run.
+Раннер: scripts/t4_bounded_ab.py (CPU-safe; CLI --dry-run/--ab/--smoke,
+--max-minutes, --data-dir, --out-dir; JSON+txt).
+1) --dry-run (5-10 мин): прод-конфиг cell4 + gc=True + AMP fp16; peak VRAM,
+   s/step, b_flow/b_drift, finite. Порог: s/step>30 -> прод на T4 не тратить.
+2) --ab (~60-95 мин): mid-scale D=512, 8 слоёв, G=8, seq 384, B=4, vocab 8192,
+   реальные данные (3 train + WAR hold-out), bounded_residual=True vs False,
+   один сид, evals каждые 200 шагов; JSON + txt со сравнением кривых. Это
+   РЕАЛЬНЫЙ тест переделки на большем, чем мини, масштабе (инверсия 5.63 vs 7.82
+   была на калиброванном мини).
+3) --smoke (CPU): пройден — params ~0.52M, init_fp совпал, CE bounded 4.32->3.58
+   vs baseline 4.48->3.29 (20 шагов), b_flow 4.03, b_drift 1.002.
+НЕ проверено (нет CUDA): autocast/GradScaler, реальный VRAM/OOM, сборка полной
+модели на GPU, GPU-ветка CheckpointError.
