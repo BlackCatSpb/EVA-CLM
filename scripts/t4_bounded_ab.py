@@ -30,6 +30,11 @@ Paths default to Colab (/content/...), falling back to <repo>/wb and
 <repo>/logs/t4. CPU runs are fp32 (AMP is CUDA-only, opt-in via --amp;
 --dry-run keeps its fp16 attempt). --dry-run requires CUDA.
 Nothing is committed; outputs go to --out-dir/--out.
+
+Durability: every eval (and at least every 200 steps) atomically rewrites the
+results JSON and appends a line to <out_dir>/progress.txt; stdout is teed to
+<out_dir>/logs/ and each arm saves one final checkpoint to <out_dir>/ckpt/.
+A dead VM therefore loses at most the last few hundred steps, not the run.
 """
 
 from __future__ import annotations
@@ -428,10 +433,16 @@ def evaluate_mini(model, hold, cfg, windows, step):
     return sum(ces) / max(len(ces), 1)
 
 
-def run_arm(scale, bounded, args, data, deadline, use_amp):
+def run_arm(scale, bounded, args, data, deadline, use_amp,
+            arm_key=None, results_ref=None, out_json=None, progress_path=None,
+            out_dir=None):
     steps = args.steps
     eval_every = args.eval_every
+    arm_key = arm_key or ('bounded' if bounded else 'baseline')
     cfg = build_mini_cfg(scale, bounded, steps, eval_every)
+    if out_dir:
+        cfg.save_dir = os.path.join(out_dir, 'ckpt')
+        cfg.log_dir = os.path.join(out_dir, 'logs')
     torch.manual_seed(args.seed)
     if IS_CUDA:
         torch.cuda.manual_seed_all(args.seed)
@@ -455,6 +466,34 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
     ctx = {'state': None, 'gs': None}
     ce_all, window_ce, history = [], [], []
     status_counts = {}
+    persist_every = max(1, min(int(eval_every), 200))
+
+    def persist(rec, status='running'):
+        """Durable snapshot: atomic JSON overwrite + progress.txt line."""
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        if results_ref is not None:
+            results_ref.setdefault('arms', {})[arm_key] = {
+                'bounded': bool(bounded), 'params': params, 'init_fp': fp,
+                'status': status, 'in_progress': status == 'running',
+                'use_amp': bool(use_amp), 'steps_done': rec.get('step'),
+                'steps_target': steps, 'updated_at': stamp,
+                'history': list(history),
+            }
+            results_ref['last_update'] = stamp
+            if out_json:
+                try:
+                    atomic_write_json(out_json, results_ref)
+                except Exception as e:
+                    print(f'  [persist] JSON write failed: {e}', flush=True)
+        if progress_path:
+            try:
+                append_progress(progress_path, arm_key, rec.get('step'),
+                                rec.get('train_ce'), rec.get('eval_ce'),
+                                rec.get('s_per_step'), rec.get('b_flow'),
+                                rec.get('b_drift'), status)
+            except Exception as e:
+                print(f'  [persist] progress append failed: {e}', flush=True)
+
     t0 = time.time()
     step = 0
     retries = 0
@@ -501,7 +540,7 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
         if status in ('ok', 'amp_skip') and ce is not None:
             ce_all.append(ce)
             window_ce.append(ce)
-        if step % eval_every == 0 or step == steps:
+        if step % eval_every == 0 or step % persist_every == 0 or step == steps:
             val = evaluate_mini(model, data['hold'], cfg, args.windows, step)
             tel = training_telemetry(model)
             wall = time.time() - t0
@@ -523,7 +562,22 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
                   f'b_flow={fmt_num(rec["b_flow"], 3)} '
                   f'b_drift={fmt_num(rec["b_drift"], 4)}',
                   flush=True)
+            persist(rec, status='running')
     wall = time.time() - t0
+    ckpt_path = None
+    if out_dir:
+        ckpt_path = os.path.join(out_dir, 'ckpt', f'arm_{arm_key}.pt')
+        try:
+            from core.ckpt_io import atomic_save as _atomic_torch_save
+            _atomic_torch_save({
+                'step': step, 'scale': scale, 'bounded': bool(bounded),
+                'use_amp': bool(use_amp), 'chunks_seen': chunks,
+                'state_dict': model.state_dict(),
+            }, ckpt_path)
+            print(f'[arm {arm_key}] ckpt: {ckpt_path}', flush=True)
+        except Exception as e:
+            ckpt_path = None
+            print(f'[arm {arm_key}] ckpt save failed: {e}', flush=True)
     del model, opt, bal, clip, scaler
     _gc.collect()
     if IS_CUDA:
@@ -540,6 +594,7 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
         'bounded': bool(bounded),
         'params': params,
         'init_fp': fp,
+        'ckpt_path': ckpt_path,
         'status': run_status,
         'failed_nan': failed_nan,
         'nan_status': nan_status,
@@ -571,6 +626,24 @@ def run_arm(scale, bounded, args, data, deadline, use_amp):
                  'train_tokens': [int(len(b)) for b in data['train']],
                  'hold_tokens': int(len(data['hold']))},
     }
+    if results_ref is not None:
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        results_ref.setdefault('arms', {})[arm_key] = result
+        results_ref['last_update'] = stamp
+        if out_json:
+            try:
+                atomic_write_json(out_json, results_ref)
+            except Exception as e:
+                print(f'  [persist] JSON write failed: {e}', flush=True)
+        last = history[-1] if history else {}
+        if progress_path:
+            try:
+                append_progress(progress_path, arm_key, step,
+                                last.get('train_ce'), last.get('eval_ce'),
+                                result.get('s_per_step'), last.get('b_flow'),
+                                last.get('b_drift'), run_status)
+            except Exception as e:
+                print(f'  [persist] progress append failed: {e}', flush=True)
     return result
 
 
@@ -640,57 +713,154 @@ def summarize_ab(results, args, out_txt):
         lines.append('advice: ' + nan_advice(results.get('use_amp', False)))
         if not (ev_b and ev_a):
             lines.append('VERDICT: no A/B verdict (an arm failed on early NaNs)')
-    with open(out_txt, 'w', encoding='utf-8') as f:
+    tmp = out_txt + '.tmp'
+    os.makedirs(os.path.dirname(os.path.abspath(out_txt)), exist_ok=True)
+    with open(tmp, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
+    os.replace(tmp, out_txt)
     return '\n'.join(lines), delta
 
 
-def save_json(path, obj):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
+PROGRESS_HEADER = ('# ts\tarm\tstep\ttrain_ce\teval_ce\ts_per_step\t'
+                   'b_flow\tb_drift\tstatus\n')
+
+
+class _Tee:
+    """Best-effort stdout tee: the terminal log also lands under out_dir."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for st in self.streams:
+            try:
+                st.write(s)
+            except Exception:
+                pass
+        return len(s) if s else 0
+
+    def flush(self):
+        for st in self.streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+
+def atomic_write_json(path, obj):
+    """json.dump to path.tmp + fsync + os.replace: readers never see a torn
+    JSON even if the VM/Drive dies mid-write."""
+    path = os.path.abspath(path)
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(obj, f, ensure_ascii=False, indent=1)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, path)
     return path
+
+
+def append_progress(path, arm, step, train_ce, eval_ce, s_per_step,
+                    b_flow, b_drift, status='running'):
+    """Append one durable TSV line; None/NaN render as n/a via fmt_num."""
+    path = os.path.abspath(path)
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    status = 'n/a' if status is None else str(status).replace('\t', ' ').replace('\n', ' ')
+    line = '\t'.join([
+        stamp, str(arm), str(step), fmt_num(train_ce), fmt_num(eval_ce),
+        fmt_num(s_per_step, 2), fmt_num(b_flow, 3), fmt_num(b_drift, 4),
+        status,
+    ]) + '\n'
+    new = not os.path.exists(path)
+    with open(path, 'a', encoding='utf-8') as f:
+        if new:
+            f.write(PROGRESS_HEADER)
+        f.write(line)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    return path
+
+
+def save_json(path, obj):
+    return atomic_write_json(path, obj)
 
 
 def run_ab(args, use_amp, scale='ab'):
     data_dir = resolve_data_dir(args.data_dir)
     out_dir = resolve_out_dir(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
-    data = load_mini_data(data_dir, MINI_SHAPES[scale]['vocab'],
-                          args.train_count, args.holdout, args.cap)
-    print(f'[{scale}] data_dir={data_dir}')
-    print(f'[{scale}] train={data["train_files"]} hold={data["holdout_file"]} '
-          f'tokens={[int(len(b)) for b in data["train"]]}+{int(len(data["hold"]))}', flush=True)
-    t_end = time.time() + args.max_minutes * 60
-    results = {'mode': scale, 'seed': args.seed, 'use_amp': use_amp,
-               'config': vars(args), 'data_dir': data_dir,
-               'arms': {}}
-    arms_left = 2
-    for bounded in (True, False):
-        key = 'bounded' if bounded else 'baseline'
-        arm_deadline = time.time() + max(60.0, (t_end - time.time()) / arms_left)
-        results['arms'][key] = run_arm(scale, bounded, args, data,
-                                       arm_deadline, use_amp)
-        arms_left -= 1
+    log_dir = os.path.join(out_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
     ts = time.strftime('%Y%m%d_%H%M%S')
-    out_json = args.out or os.path.join(out_dir, f't4_{scale}_{ts}.json')
+    out_json = os.path.abspath(args.out or os.path.join(out_dir, f't4_{scale}_{ts}.json'))
     out_txt = os.path.splitext(out_json)[0] + '.txt'
-    text, delta = summarize_ab(results, args, out_txt)
-    results['comparison'] = {
-        'init_fp_match': results['arms']['bounded']['init_fp'] == results['arms']['baseline']['init_fp'],
-        'final_eval_delta_baseline_minus_bounded': delta,
-        'failed_nan_arms': [k for k, v in results['arms'].items() if v.get('failed_nan')],
-    }
-    save_json(out_json, results)
-    print('\n' + text)
-    print(f'\n[ab] JSON: {out_json}\n[ab] TXT:  {out_txt}')
+    progress_path = os.path.join(out_dir, 'progress.txt')
+    log_path = os.path.join(log_dir, f't4_{scale}_{ts}.log')
+    logf = open(log_path, 'a', encoding='utf-8', buffering=1)
+    old_stdout = sys.stdout
+    sys.stdout = _Tee(old_stdout, logf)
+    try:
+        data = load_mini_data(data_dir, MINI_SHAPES[scale]['vocab'],
+                              args.train_count, args.holdout, args.cap)
+        print(f'[{scale}] data_dir={data_dir}')
+        print(f'[{scale}] train={data["train_files"]} hold={data["holdout_file"]} '
+              f'tokens={[int(len(b)) for b in data["train"]]}+{int(len(data["hold"]))}', flush=True)
+        t_end = time.time() + args.max_minutes * 60
+        results = {'mode': scale, 'seed': args.seed, 'use_amp': use_amp,
+                   'config': vars(args), 'data_dir': data_dir,
+                   'out_dir': out_dir, 'out_json': out_json, 'out_txt': out_txt,
+                   'log_file': log_path, 'progress_txt': progress_path,
+                   'arms': {}}
+        save_json(out_json, results)
+        print(f'[{scale}] out_dir={out_dir} progress={progress_path}', flush=True)
+        arms_left = 2
+        for bounded in (True, False):
+            key = 'bounded' if bounded else 'baseline'
+            arm_deadline = time.time() + max(60.0, (t_end - time.time()) / arms_left)
+            results['arms'][key] = run_arm(scale, bounded, args, data,
+                                           arm_deadline, use_amp,
+                                           arm_key=key, results_ref=results,
+                                           out_json=out_json,
+                                           progress_path=progress_path,
+                                           out_dir=out_dir)
+            arms_left -= 1
+        text, delta = summarize_ab(results, args, out_txt)
+        results['comparison'] = {
+            'init_fp_match': results['arms']['bounded']['init_fp'] == results['arms']['baseline']['init_fp'],
+            'final_eval_delta_baseline_minus_bounded': delta,
+            'failed_nan_arms': [k for k, v in results['arms'].items() if v.get('failed_nan')],
+        }
+        save_json(out_json, results)
+        print('\n' + text)
+        print(f'\n[ab] JSON: {out_json}\n[ab] TXT:  {out_txt}\n'
+              f'[ab] progress: {progress_path}\n[ab] log: {log_path}')
+    finally:
+        sys.stdout = old_stdout
+        try:
+            logf.close()
+        except Exception:
+            pass
     return 0
 
 
 def run_dry_run(args, use_amp):
     out_dir = resolve_out_dir(args.out_dir)
+    os.makedirs(out_dir, exist_ok=True)
     ts = time.strftime('%Y%m%d_%H%M%S')
     out_json = args.out or os.path.join(out_dir, f't4_dryrun_{ts}.json')
+    progress_path = os.path.join(out_dir, 'progress.txt')
     result = {'mode': 'dry-run', 'ok': False, 'oom': False, 'oom_step': None,
               'steps_target': args.steps, 'steps_done': 0, 'use_amp': use_amp,
               'amp_fallback': False, 'failed_nan': False, 'device': DEVICE}
@@ -801,6 +971,18 @@ def run_dry_run(args, use_amp):
                       f'peak={torch.cuda.max_memory_allocated()/1e9:.2f}GB '
                       f'live={torch.cuda.memory_allocated()/1e9:.2f}GB '
                       f'status={status}', flush=True)
+                result['s_per_step'] = (sum(times) / len(times)) if times else None
+                result['last_ce'] = ce
+                result['peak_vram_gb'] = torch.cuda.max_memory_allocated() / 1e9
+                result['live_vram_gb'] = torch.cuda.memory_allocated() / 1e9
+                result['b_flow_mean'] = (sum(bflows) / len(bflows)) if bflows else None
+                result['b_drift_mean'] = (sum(bdrifts) / len(bdrifts)) if bdrifts else None
+                if ((step + 1) % max(1, min(5, args.steps)) == 0
+                        or step + 1 == args.steps):
+                    save_json(out_json, result)
+                    append_progress(progress_path, 'dry-run', step + 1, ce, None,
+                                    result['s_per_step'], tel.get('b_flow'),
+                                    tel.get('b_drift'), status)
             except torch.cuda.OutOfMemoryError as e:
                 result['oom'] = True
                 result['oom_step'] = step
@@ -857,6 +1039,21 @@ def run_dry_run(args, use_amp):
         result['error'] = f'{type(e).__name__}: {str(e)[:300]}'
         print(f'[dry-run] FAILED: {result["error"]}')
     save_json(out_json, result)
+    if result.get('failed_nan'):
+        dry_status = 'failed_nan'
+    elif result.get('oom'):
+        dry_status = 'oom'
+    elif result.get('ok'):
+        dry_status = 'ok'
+    else:
+        dry_status = 'failed'
+    try:
+        append_progress(progress_path, 'dry-run', result.get('steps_done'),
+                        result.get('final_ce', result.get('last_ce')), None,
+                        result.get('s_per_step'), result.get('b_flow_mean'),
+                        result.get('b_drift_mean'), dry_status)
+    except Exception as e:
+        print(f'[dry-run] progress append failed: {e}')
     print(f'[dry-run] JSON: {out_json}')
     return 0 if result.get('ok') else 1
 
