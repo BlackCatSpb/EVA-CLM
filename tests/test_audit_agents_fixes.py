@@ -111,9 +111,10 @@ def test_checkpoint_gradients_match_uncheckpointed():
     for k in keys:
         d = float((grads[False][k] - grads[True][k]).abs().max())
         worst = max(worst, d)
-    # gc=False (чистый путь) обязан быть точным; gc=True: остаток pen-пути
-    # 6.9e-6 (замер агента A), корневой фикс — в очереди (см. xfail ниже).
-    # Примесь ДО фикса зеркала была 5.8e-3 — замок держит её подавленной.
+    # Блок 2 (корневой recompute-фикс): gc=True реконструирует forward чисто
+    # (все мутации running-состояния пропускаются) — на этой изолированной
+    # конфигурации замер ровно 0.0. Порог оставлен консервативным (fp-люфт
+    # других платформ); жёсткий бит-лок — в tests/test_m66_recompute_purity.py.
     assert worst < 1e-4, f'градиенты gc on/off расходятся: {worst:.2e}'
 
 

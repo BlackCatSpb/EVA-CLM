@@ -103,5 +103,8 @@ class GroupedMLP(nn.Module):
         hg2: torch.Tensor = hf.permute(2, 0, 1, 3).reshape(self.G, BL, -1)
         h = torch.matmul(hg2, self.W_down)
         h = h.permute(1, 0, 2).view(B, L, self.G, self.d)
-        self._cached_group_out: torch.Tensor = h
+        if not getattr(self, '_recomp', False):
+            # Блок 2: recompute не переписывает граф-кэш (значение первого
+            # прохода бит-идентично и остаётся доступным читателям).
+            self._cached_group_out: torch.Tensor = h
         return h.reshape(B, L, D)

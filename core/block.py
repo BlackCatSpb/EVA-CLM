@@ -498,29 +498,31 @@ class EVABlock(nn.Module):
                 salience: Optional[torch.Tensor] = None, maturity: Optional[torch.Tensor] = None,
                 sep_mask: Optional[torch.Tensor] = None,
                 _ckpt_mark: object = None) -> Tuple[torch.Tensor, Tuple]:
-        # M65-opt2 (аудит A5, доказано: backward менял _signal_norm_ema на
-        # 0.32, 134 несовпадения градиентов): recompute при gradient
-        # checkpointing повторно исполняет forward. checkpoint сохраняет
-        # ТОТ ЖЕ объект h (проверено) — детектор по identity; EMA-снимок
-        # восстанавливается, апдейты затем повторяются идемпотентно.
         # M65-opt2 (A5): recompute детектится МАРКЕРОМ вызова checkpoint
         # (h-identity ловил легитимный reasoning re-entry и гасил градиенты
         # bind — доказано бисектом). Прямые вызовы (mark=None) — не recompute.
+        #
+        # Блок 2 (корневой recompute-фикс): признак «recompute» протягивается
+        # по ВСЕМУ checkpointed-пути (block -> bind/mirror/mlp) и гасит все
+        # мутации состояния: накопительные EMA/счётчики не обновляются, а
+        # чтения видят ровно те значения, что видел первый проход => сдвиг
+        # running-состояния исполняется РОВНО ОДИН раз за шаг (как gc=False),
+        # forward-выход recompute бит-идентичен чистому пути. Идемпотентные
+        # пересчитываемые set-кэши (pen/hp для следующего шага) остаются —
+        # их пропуск сломал бы перенос pen между шагами (замерено).
         _rc = (_ckpt_mark is not None
                and getattr(self, '_ckpt_mark_seen', None) is _ckpt_mark)
         if _ckpt_mark is not None:
             self._ckpt_mark_seen = _ckpt_mark
-        _mir_rc = getattr(self, 'mirror', None)
-        # M65-opt2 (A5 v4): restore _pen_ema ЗАПРЕЩЁН — он сдвигает pen и
-        # переключает дискретную ветку записи концептов, гася градиенты bind
-        # (доказано бисектом). Чистота pen-EMA — в очереди (вынести апдейты из
-        # checkpointed-региона); зеркало чинится отдельно (его EMA — узкий restore).
-        if _rc:
-            self._mlp_cnt_py = self._fwd_py_snap
-        else:
+        for _sub in (getattr(self, 'mirror', None), getattr(self, 'bind', None),
+                     getattr(self, 'mlp', None)):
+            if _sub is not None:
+                _sub._recomp = _rc
+        # python-двойник счётчика наблюдателя MLP: на recompute не трогаем
+        # вовсе (observer-блок целиком пропускается ниже), но атрибут снимка
+        # остаётся материализованным для контракта snapshot_runtime_buffers.
+        if not _rc:
             self._fwd_py_snap = self._mlp_cnt_py
-        if _mir_rc is not None:
-            _mir_rc._recomp = _rc
         mem_state = mu_state = conv_state = traj_state = pen = cov_state = None
         cov_state_out = None
         if state is not None:
@@ -644,7 +646,7 @@ class EVABlock(nn.Module):
             conv_state_out = F.pad(conv_state_out, (self._conv_pad - conv_state_out.shape[-1], 0))
         h = h + _stream_cap(h_conv, self.branch_cap)
         if _chk(h, 'conv'): return _nan_ret(h)
-        if self.training:
+        if self.training and not _rc:
             self._cache_conv_out = h_conv  # for branch_loss (with grad)
         
         if isinstance(self.bind, TrajectorySpiralBind):
@@ -663,12 +665,12 @@ class EVABlock(nn.Module):
                 traj_state = None
             bind_out, new_traj, coherence = self.bind(_ln(h), traj_state)
             if traj_state is None:
-                if self.training or getattr(self, '_stream_mode', False):
+                if (self.training or getattr(self, '_stream_mode', False)) and not _rc:
                     self._traj_state = new_traj.detach()
                 traj_state_out = None
             else:
                 traj_state_out = (0.9 * traj_state + 0.1 * new_traj).detach()
-                if getattr(self, '_stream_mode', False):
+                if getattr(self, '_stream_mode', False) and not _rc:
                     self._traj_state = traj_state_out
         else:
             bind_out = self.bind(_ln(h))
@@ -689,7 +691,7 @@ class EVABlock(nn.Module):
             _tau_safe = 0.5 * self._vsa_floor_k          # k=2 => tau_s >= 1.0
             _bound = bool((tau_s < _tau_safe).any())
             tau_s = tau_s.clamp(min=_tau_safe)
-            if self.training and _bound:
+            if self.training and _bound and not _rc:
                 self._scan_floor_bound = True
         d_s = torch.exp(-1.0 / tau_s.to(device))  # (S,) — τ-scales from learnable param
         # Surprisal-gated write: i_gate = softplus(linear + γ·||ê||₂)
@@ -734,12 +736,13 @@ class EVABlock(nn.Module):
             # tau; the dead-parameter detector caught it). w_d_pen keeps a
             # live gradient as the sensitivity around the baseline.
             with torch.no_grad():
-                # M65-opt2 (A5, финал): pen-EMA НЕ трогаем ни restore'ом, ни
-                # пропуском апдейта — оба варианта переключают дискретную ветку
-                # записи концептов и гасят градиенты bind (бисекты v3/v5).
-                # Остаточная примесь pen-пути: замер 6.9e-6 (fp-уровень);
-                # корневой фикс (вынос апдейтов из checkpointed-региона) — в очереди.
-                self._pen_ema.mul_(0.999).add_(pen.detach().mean() * 0.001)
+                # Блок 2 (корневой recompute-фикс): pen-EMA — update-then-read
+                # буфер. На recompute апдейт ПРОПУСКАЕТСЯ, чтение видит S1
+                # (значение после первого прохода) — ровно то, что читал первый
+                # проход. Restore S0 запрещён и не нужен (переключал бы
+                # дискретную ветку записи концептов, бисект A5 v3/v4).
+                if not _rc:
+                    self._pen_ema.mul_(0.999).add_(pen.detach().mean() * 0.001)
             _pc = pen - self._pen_ema
             d_pen_factor = pen_decay_factor(
                 _pc.unsqueeze(-1), self.w_d_pen.unsqueeze(0).unsqueeze(0))
@@ -836,13 +839,14 @@ class EVABlock(nn.Module):
                 _slow = (mem_all_vec[:, :, S // 2:] * _ws).sum(dim=2)
                 _valid = ((_fast.norm(dim=-1) > 1e-4) & (_slow.norm(dim=-1) > 1e-4))
                 _cfs = F.cosine_similarity(_fast, _slow, dim=-1, eps=1e-6)
-                if self.training and bool(_valid.any()):
+                if self.training and bool(_valid.any()) and not _rc:
                     self._cos_fs_ema.mul_(0.999).add_(
                         _cfs[_valid].detach().mean(), alpha=0.001)
                 _chi_t = F.relu(1.0 - _cfs / (self._cos_fs_ema + 1e-6))
-                self._chi_time = torch.where(
-                    _valid, _chi_t.clamp(0.0, 5.0),
-                    torch.zeros_like(_chi_t)).detach()
+                if not _rc:
+                    self._chi_time = torch.where(
+                        _valid, _chi_t.clamp(0.0, 5.0),
+                        torch.zeros_like(_chi_t)).detach()
         mem_leaf = (mem_leaf_vec * w.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (B, L, D) — без кросс-чанк контекста
         # Dual read: leaf = within-chunk state, ctx = CROSS-chunk state only.
         # Audit M3: the old form multiplied mem_all by both w_q and w_q_ctx —
@@ -877,7 +881,7 @@ class EVABlock(nn.Module):
         if self.cov_memory is not None:
             with torch.autocast(device_type=h.device.type, enabled=False):
                 _cov_y, cov_state_out = self.cov_memory(_ln(h).float(), cov_state)
-            if self.training:
+            if self.training and not _rc:
                 # T9 read-usage: ‖cov_y‖/‖h‖ — «градиент ≠ вклад» (T2); ratio
                 # агрегируется training_telemetry, falsifier для A/B.
                 with torch.no_grad():
@@ -898,7 +902,8 @@ class EVABlock(nn.Module):
                 salience=salience, maturity=maturity)
             mirror = mirror.to(h.dtype)
             mlp_mod = mlp_mod.to(h.dtype) if isinstance(mlp_mod, torch.Tensor) else mlp_mod
-            self._cache_mlp_mod = mlp_mod  # (B,L,G) per-expert MLP gate (gradalign)
+            if not _rc:
+                self._cache_mlp_mod = mlp_mod  # (B,L,G) per-expert MLP gate (gradalign)
             mem_mod = mem_mod.to(h.dtype) if isinstance(mem_mod, torch.Tensor) else mem_mod
         if _chk(mirror, 'mirror'): return _nan_ret(h)
         if _chk(mlp_mod, 'mlp_mod'): return _nan_ret(h)
@@ -929,7 +934,7 @@ class EVABlock(nn.Module):
                     + _stream_cap(mirror, self.branch_cap))
         # Concept layer moved to stack.py (UnifiedConceptLayer — global, after embedding)
         if _chk(enhanced, 'enhanced'): return _nan_ret(h)
-        if self.training:
+        if self.training and not _rc:
             self._cache_bind_out = enhanced_base  # for branch_loss (with grad)
             self._cache_mirror_out = mirror  # for branch_loss (with grad)
         h = h + enhanced
@@ -953,7 +958,7 @@ class EVABlock(nn.Module):
                 exact = self.exact_memory(_ln(h).float())
                 h = h + _stream_cap((precision * exact * soft_gate).to(h.dtype),
                                     self.branch_cap)
-            if self.training:
+            if self.training and not _rc:
                 self._precision_mean = precision.mean()
 
         if _chk(h, 'vpm'): return _nan_ret(h)
@@ -979,7 +984,8 @@ class EVABlock(nn.Module):
         # mirror_gate = mlp_mod (из зеркала) управляет воротами SwiGLU.
         # Старый пост-множитель h_mlp *= mlp_mod убран (двойное гейтирование).
         h_mlp = self.mlp(_ln(h), mirror_gate=mlp_mod)
-        self._cache_mlp_out = h_mlp  # raw MLP output (gradalign target source)
+        if not _rc:
+            self._cache_mlp_out = h_mlp  # raw MLP output (gradalign target source)
         if self.training and h_mlp.requires_grad:
             # gradalign target = ‖∂CE/∂mlp_out‖ per expert, captured by a
             # backward HOOK during the regular CE pass (audit M5: the loop
@@ -995,20 +1001,23 @@ class EVABlock(nn.Module):
                 _blk._gradalign_tgt = gg.pow(2).sum(dim=(0, 1, 3)).sqrt()
             h_mlp.register_hook(_ga_hook)
         if _chk(h_mlp, 'mlp_out'): return _nan_ret(h)
-        with torch.no_grad():
-            _mrms = torch.norm(h_mlp.detach().reshape(-1)).float()
-            if self._mlp_cnt_py == 0:
-                # cold-start: baseline = first observed level, not the init 1.0
-                # (else ratio is inflated while the slow EMA climbs for ~700 steps)
-                self._mlp_now_ema.copy_(_mrms)
-                self._mlp_base_ema.copy_(_mrms)
-            else:
-                self._mlp_now_ema.mul_(0.99).add_(_mrms, alpha=0.01)
-                self._mlp_base_ema.mul_(0.999).add_(_mrms, alpha=0.001)
-            self._mlp_cnt.add_(1)
-            self._mlp_cnt_py += 1
-            # (M65-opt: `_mlp_ratio` удалён — write-only атрибут, ни один
-            # читатель не найден; он тянул .item() каждый forward)
+        if not _rc:
+            # Блок 2: на recompute observer целиком пропускается — счётчики и
+            # EMAs наблюдателя не двигаются (ровно один апдейт за шаг).
+            with torch.no_grad():
+                _mrms = torch.norm(h_mlp.detach().reshape(-1)).float()
+                if self._mlp_cnt_py == 0:
+                    # cold-start: baseline = first observed level, not the init 1.0
+                    # (else ratio is inflated while the slow EMA climbs for ~700 steps)
+                    self._mlp_now_ema.copy_(_mrms)
+                    self._mlp_base_ema.copy_(_mrms)
+                else:
+                    self._mlp_now_ema.mul_(0.99).add_(_mrms, alpha=0.01)
+                    self._mlp_base_ema.mul_(0.999).add_(_mrms, alpha=0.001)
+                self._mlp_cnt.add_(1)
+                self._mlp_cnt_py += 1
+                # (M65-opt: `_mlp_ratio` удалён — write-only атрибут, ни один
+                # читатель не найден; он тянул .item() каждый forward)
         h = h + _stream_cap(h_mlp, self.branch_cap)
         if _chk(h, 'post_mlp'): return _nan_ret(h)
 

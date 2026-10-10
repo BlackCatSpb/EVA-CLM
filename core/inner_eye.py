@@ -45,7 +45,18 @@ class InnerEye(nn.Module):
         if self.training:
             # M8-доктрина: eval статистику не двигает — на eval авторитет
             # ограничен тренировочной EMA.
+            # Блок 2 (корневой recompute-фикс): буфер _o_rms_ema общий для всех
+            # слоёв; recompute слоёв идёт в обратном порядке, поэтому зеркало
+            # временно ставит pre-call значение слоя (S_i) и возвращает S_final
+            # после. Чтение update-then-read: локально считаем post-значение
+            # первого прохода БЕЗ записи буфера — forward бит-идентичен.
             with torch.no_grad():
-                self._o_rms_ema.mul_(0.99).add_(
-                    o.detach().pow(2).mean().sqrt(), alpha=0.01)
-        return (o / (self._o_rms_ema + 1e-8)).clamp(-10.0, 10.0)
+                _rms = o.detach().pow(2).mean().sqrt()
+                if getattr(self, '_recomp', False):
+                    _den = 0.99 * self._o_rms_ema + 0.01 * _rms
+                else:
+                    self._o_rms_ema.mul_(0.99).add_(_rms, alpha=0.01)
+                    _den = self._o_rms_ema
+        else:
+            _den = self._o_rms_ema
+        return (o / (_den + 1e-8)).clamp(-10.0, 10.0)

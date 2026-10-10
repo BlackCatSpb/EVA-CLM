@@ -418,6 +418,18 @@ class GroupedCognitiveMirror(nn.Module):
                 self.alpha_diag.data.clamp_(0.01, 0.99)
         self._alpha_pending = None
 
+    # Блок 2 (корневой recompute-фикс): буферы с порядком «чтение ДО записи»
+    # внутри forward. На recompute они временно возвращаются к S0 (значение до
+    # первого прохода), а S1 кладётся обратно на месте записи — иначе чтения
+    # recompute увидели бы S1 и forward разошёлся бы с чистым путём gc=False.
+    # _prev_grad_norm пишется backward-хуком (hp), а читается forward'ом
+    # (grad_mod): при нескольких autograd-проходах за шаг (балансер) каждый
+    # recompute обязан видеть S0 первого прохода; put-back не нужен — хук
+    # перепишет буфер в конце своего backward'а, финальное значение = значение
+    # последнего прохода, как в gc=False.
+    _EARLY_READ_BUFS = ('_gate_ema', '_delta_var', '_pm_coh', '_private_mem',
+                        'alpha_diag', '_prev_grad_norm')
+
     def forward(self, h: torch.Tensor, mem_all: torch.Tensor,
                 global_state: Optional[torch.Tensor] = None,
                 diff: Optional[torch.Tensor] = None,
@@ -431,21 +443,36 @@ class GroupedCognitiveMirror(nn.Module):
                 maturity: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B, L, D = h.shape
         G, d, k = self.G, self.d, self.k
-        # M65-opt2 (аудит A5): recompute-чистота EMA (флаг ставит блок —
-        # h зеркала производный, identity там не работает). Восстановить
-        # снимок, затем апдейты повторяются идентично.
-        # M65-opt2 (A5 v3): УЗКИЙ restore измеренных EMA — полный restore всех
-        # буферов ломал градиенты bind (доказано бисектом).
-        if getattr(self, '_recomp', False):
-            for _n, _v in getattr(self, '_ema_fwd_snap', {}).items():
-                getattr(self, _n).copy_(_v)
+        # ─── Блок 2 (корневой recompute-фикс) ───
+        # _recomp ставит блок (identity-маркер checkpoint'а). Рекомпьют обязан
+        # быть ЧИСТОЙ функцией входа: все накопительные мутации (EMA/счётчики/
+        # контроллеры записи) при recompute ПРОПУСКАЮТСЯ, и чтения видят ровно
+        # те значения, что видел первый проход (S1 = состояние после первого
+        # прохода; для update-then-read буферов оно и есть прочитанное).
+        # Буферы с порядком «сначала ЧТЕНИЕ, потом запись» (S0-читатели):
+        # на входе recompute временно возвращаются к S0 (снимок первого
+        # прохода), а S1 кладётся обратно на месте записи — состояние после
+        # recompute не меняется ни на бит.
+        _rc = bool(getattr(self, '_recomp', False))
+        if _rc:
+            self._rc_pre = {}
+            _snap0 = getattr(self, '_fwd_snap0', None) or {}
+            for _n in self._EARLY_READ_BUFS:
+                _t = getattr(self, _n, None)
+                if not isinstance(_t, torch.Tensor):
+                    continue
+                self._rc_pre[_n] = _t.detach().clone()
+                _s0 = _snap0.get(_n)
+                if isinstance(_s0, torch.Tensor) and _s0.shape == _t.shape:
+                    with torch.no_grad():
+                        _t.copy_(_s0)
             self._alpha_override_py = self._fwd_py_snap.get(
                 '_alpha_override_py', self._alpha_override_py)
         elif self.training:
-            self._ema_fwd_snap = {
+            self._fwd_snap0 = {
                 _n: getattr(self, _n).detach().clone()
-                for _n in ('_signal_norm_ema', '_grad_norm_ema',
-                           '_delta_var', '_residual_var_ema')}
+                for _n in self._EARLY_READ_BUFS
+                if isinstance(getattr(self, _n, None), torch.Tensor)}
             self._fwd_py_snap = {'_alpha_override_py': self._alpha_override_py}
         
         # Split into subspaces
@@ -548,7 +575,22 @@ class GroupedCognitiveMirror(nn.Module):
             with torch.no_grad():
                 # M65-opt: значение не может измениться внутри forward —
                 # переиспользуем снимок, прочитанный выше (был второй .item())
-                if override < 0.1 and not getattr(self, '_ggeo_freeze', False):
+                # Блок 2 (корневой recompute-фикс): на recompute ветка целиком
+                # пропускается (_rc) — flush/pend/EMA-апдейт исполняются РОВНО
+                # один раз за шаг; _ggeo_freeze оставлен для диагностических
+                # re-grad'ов вне checkpoint-реконструкции.
+                if override < 0.1 and not getattr(self, '_ggeo_freeze', False) \
+                        and _rc:
+                    # Блок 2: alpha_diag читается (pred_k) ДО controller-flush
+                    # в этом же forward. Первый проход видел pre-flush S0 (он
+                    # восстановлен на входе recompute), но к recompute параметр
+                    # уже post-flush — возвращаем S1, чтобы шаг не потерял
+                    # flush и следующий шаг совпал с gc=False (замерено:
+                    # 9.1e-4 расхождения alpha_eff без этого restore).
+                    if 'alpha_diag' in self._rc_pre:
+                        self.alpha_diag.data.copy_(self._rc_pre['alpha_diag'])
+                elif override < 0.1 and not getattr(self, '_ggeo_freeze', False) \
+                        and not _rc:
                     # B13 (F4-01): flush the previous step's deferred control
                     # write. The freeze flag is raised around BACKWARD (where
                     # checkpointing re-runs this forward) and around diagnostic
@@ -596,6 +638,10 @@ class GroupedCognitiveMirror(nn.Module):
             # display number with zero gradient (audit M5). The live scalar is
             # computed in-place on the undamped prediction vs a detached
             # target (hp.detach() stays — the target must not chase itself).
+            # Блок 2: recompute исполняет тот же граф-оп (checkpoint строго
+            # сверяет число saved-tensors форварда/recompute — пропуск ломает
+            # CheckpointError); значение идемпотентно, мутацией состояния
+            # не является.
             self._pred_loss_term = (
                 F.mse_loss(_pred_k_aux, hp.detach()) if _pred_k_aux is not None else None)
         else:
@@ -667,25 +713,30 @@ class GroupedCognitiveMirror(nn.Module):
                 pm_norm = pm.norm(dim=-1, keepdim=True).clamp(min=1e-10)
                 pm_n = pm / pm_norm  # safe normalize (no NaN on zero vectors)
                 concept_sim = pm_n @ pm_n.T
-                self._concept_sim_ema.mul_(0.99).add_(concept_sim, alpha=0.01)
+                if not _rc:
+                    self._concept_sim_ema.mul_(0.99).add_(concept_sim, alpha=0.01)
                 hp_avg = hp.mean(dim=(0, 1))
                 hp_n = F.normalize(hp_avg, dim=-1)
                 behavior_sim = hp_n @ hp_n.T
                 behavior_div = 1.0 - behavior_sim
-                self._behavior_div_ema.mul_(0.99).add_(behavior_div, alpha=0.01)
-                self._div_run.mul_(0.99).add_(self._behavior_div_ema.mean().detach(), alpha=0.01)
+                if not _rc:
+                    self._behavior_div_ema.mul_(0.99).add_(behavior_div, alpha=0.01)
+                    self._div_run.mul_(0.99).add_(self._behavior_div_ema.mean().detach(), alpha=0.01)
                 # M65-opt: отношение считается ДО mul_ тензорно (был .item()+max)
                 _rec_ratio = (self._behavior_div_ema.mean()
                               / self._div_run_rec.clamp(min=1e-8)).detach()
-                self._div_run_rec.mul_(0.99).add_(_rec_ratio, alpha=0.01)
+                if not _rc:
+                    self._div_run_rec.mul_(0.99).add_(_rec_ratio, alpha=0.01)
                 trust_weights = attn.mean(dim=(0, 1))
-                if self._meta_trust and self._has_private_mem:
+                if self._meta_trust and self._has_private_mem and not _rc:
                     self._prev_trust_matrix.copy_(self._trust_matrix)
-                self._trust_matrix.mul_(0.99).add_(trust_weights, alpha=0.01)
+                if not _rc:
+                    self._trust_matrix.mul_(0.99).add_(trust_weights, alpha=0.01)
                 if self._meta_trust and self._has_private_mem:
                     delta_tm = self._trust_matrix - self._prev_trust_matrix
                     instability = delta_tm.abs().mean(dim=1)
-                    self._meta_private_mem.mul_(0.9).add_(instability, alpha=0.1)
+                    if not _rc:
+                        self._meta_private_mem.mul_(0.9).add_(instability, alpha=0.1)
                 contra_g = concept_sim * behavior_div
                 self._cached_contra_graph = contra_g
                 contra_expert = contra_g.mean(dim=-1)
@@ -721,29 +772,35 @@ class GroupedCognitiveMirror(nn.Module):
                 _write_scale = torch.sigmoid((maturity - self._matur_write_thr) * 10.0)
                 _write_ok = bool(_write_scale > 0.01)
             else:
-                self._pm_step += 1
+                if not _rc:
+                    self._pm_step += 1
                 coherent = bool(self._pm_coh.item())
                 _write_ok = coherent if self._pm_write_delay <= 0 \
                     else (self._pm_step.item() >= self._pm_write_delay) or coherent
         if _write_ok:
             with torch.no_grad():
-                conf = torch.sigmoid(-pred_error.abs().mean(dim=-1, keepdim=True))
-                contra_u = contra.unsqueeze(-1)
-                contra_expert_coll = self._cached_contra_expert.to(conf.device).view(1, 1, G, 1)
-                isolation_coll = self._cached_isolation.to(conf.device).view(1, 1, G, 1)
-                social_pressure = 1.0 - 0.5 * torch.sigmoid(contra_expert_coll.clamp(min=0) + isolation_coll)
-                conf_plastic = conf * (1.0 - contra_u) * social_pressure
-                # Soft competition: temperature prevents winner-take-all monoculture
-                temp_write = 0.5  # <1 softens competition (true soft), >1 sharpens
-                conf_soft = conf_plastic ** temp_write
-                conf_bc = conf_soft * self.G / (conf_soft.sum(dim=-2, keepdim=True) + 1e-8)
-                weighted_hp = (conf_bc * hp.detach()).mean(dim=(0, 1))
-                # Adaptive decay: fast warmup when memory is nascent, slow when stable
-                pm_scale = self._private_mem.norm(dim=-1).mean().clamp(min=1e-8)
-                warmup_rate = torch.sigmoid(3.0 - pm_scale)  # ~1.0 when pm~0, ~0.0 when pm>3
-                pm_decay = 0.999 - 0.009 * warmup_rate  # [0.990, 0.999] — faster decay when memory is empty
-                self._private_mem.mul_(pm_decay).add_(weighted_hp * _write_scale, alpha=1.0 - pm_decay)
-                self._private_mem.clamp_(-10.0, 10.0)
+                if _rc:
+                    # S0->S1: private_mem читался до записи — вернуть S1.
+                    if '_private_mem' in self._rc_pre:
+                        self._private_mem.copy_(self._rc_pre['_private_mem'])
+                else:
+                    conf = torch.sigmoid(-pred_error.abs().mean(dim=-1, keepdim=True))
+                    contra_u = contra.unsqueeze(-1)
+                    contra_expert_coll = self._cached_contra_expert.to(conf.device).view(1, 1, G, 1)
+                    isolation_coll = self._cached_isolation.to(conf.device).view(1, 1, G, 1)
+                    social_pressure = 1.0 - 0.5 * torch.sigmoid(contra_expert_coll.clamp(min=0) + isolation_coll)
+                    conf_plastic = conf * (1.0 - contra_u) * social_pressure
+                    # Soft competition: temperature prevents winner-take-all monoculture
+                    temp_write = 0.5  # <1 softens competition (true soft), >1 sharpens
+                    conf_soft = conf_plastic ** temp_write
+                    conf_bc = conf_soft * self.G / (conf_soft.sum(dim=-2, keepdim=True) + 1e-8)
+                    weighted_hp = (conf_bc * hp.detach()).mean(dim=(0, 1))
+                    # Adaptive decay: fast warmup when memory is nascent, slow when stable
+                    pm_scale = self._private_mem.norm(dim=-1).mean().clamp(min=1e-8)
+                    warmup_rate = torch.sigmoid(3.0 - pm_scale)  # ~1.0 when pm~0, ~0.0 when pm>3
+                    pm_decay = 0.999 - 0.009 * warmup_rate  # [0.990, 0.999] — faster decay when memory is empty
+                    self._private_mem.mul_(pm_decay).add_(weighted_hp * _write_scale, alpha=1.0 - pm_decay)
+                    self._private_mem.clamp_(-10.0, 10.0)
         
         # ─── Fast signals (hi half of K-space) ───
         # Smoothness: local coherence in K-space (CAUSAL: pad left only)
@@ -764,7 +821,7 @@ class GroupedCognitiveMirror(nn.Module):
         signals_normed = []
         decay = 0.01  # ~100-step EMA
         for i, s in enumerate(signals):
-            if self.training:
+            if self.training and not _rc:
                 with torch.no_grad():
                     # per-EXPERT, per-dim RMS (G,k): the old global scalar
                     # (.norm over (G,k) then .squeeze) broadcast to all
@@ -798,7 +855,8 @@ class GroupedCognitiveMirror(nn.Module):
                 npairs = npairs + 1
         if npairs > 0:
             decorr = decorr / npairs
-        self._cached_decorr = decorr
+        if not _rc:
+            self._cached_decorr = decorr
         
         # ─── Merge all signals (weighted sum) ───
         delta = sum(w[i] * signals_normed[i] for i in range(n_sig))
@@ -807,25 +865,31 @@ class GroupedCognitiveMirror(nn.Module):
         delta = delta + self.tanh_bias * tanh_bias_mod
         
         # ─── Gate modulation signals (shared between gate & usefulness) ───
-        if self.training:
+        if self.training and not _rc:
             with torch.no_grad():
                 self._grad_norm_ema.mul_(0.99).add_(
                     self._prev_grad_norm.detach(), alpha=0.01)
         grad_mod = torch.exp(self.log_grad_mod_scale) * torch.tanh(
             grad_mod_input(self._prev_grad_norm, self._grad_norm_ema, self.grad_mod_bias))
         if self.training:
-            with torch.no_grad():
-                dvar = delta.var(dim=(0, 1), unbiased=False).mean(dim=-1)  # (G,)
-                if diff is not None:
-                    ema_alpha = self._delta_var_ema_min + diff * (self._delta_var_ema_max - self._delta_var_ema_min)
-                else:
-                    ema_alpha = 0.9
-                self._delta_var.mul_(ema_alpha).add_(dvar * (1.0 - ema_alpha))
+            if _rc:
+                # Блок 2: _delta_var читался ДО апдейта (pred_scale_mod) —
+                # в начале recompute восстановлен S0; здесь возвращаем S1.
+                self._delta_var.copy_(self._rc_pre['_delta_var'])
+            else:
+                with torch.no_grad():
+                    dvar = delta.var(dim=(0, 1), unbiased=False).mean(dim=-1)  # (G,)
+                    if diff is not None:
+                        ema_alpha = self._delta_var_ema_min + diff * (self._delta_var_ema_max - self._delta_var_ema_min)
+                    else:
+                        ema_alpha = 0.9
+                    self._delta_var.mul_(ema_alpha).add_(dvar * (1.0 - ema_alpha))
         dvar_mod = torch.exp(self.log_dvar_mod_scale) * torch.tanh(self._delta_var + self.dvar_mod_bias)
         
         usefulness_logits = self.usefulness_predictor(delta).squeeze(-1)
         if self.training:
-            self._fwd_count.add_(1)
+            if not _rc:
+                self._fwd_count.add_(1)
             n_eff = self._fwd_count
         else:
             # Deterministic in eval: temperature depends only on `step` (graph input),
@@ -881,12 +945,17 @@ class GroupedCognitiveMirror(nn.Module):
             mlp_mod = self.hybrid_gate(usefulness_logits) \
                 * (1.5 * torch.sigmoid(self.mod_scale_mlp)).view(1, 1, self.G)
         mem_mod = usefulness * torch.sigmoid(self.mod_scale_mem).view(1, 1, G)
-        self._last_mlp_mod = mlp_mod.detach()                      # for diagnostics (gate spread / aliveness)
+        if not _rc:
+            self._last_mlp_mod = mlp_mod.detach()                  # for diagnostics (gate spread / aliveness)
 
         # coherence tracker for the adaptive private-memory write gate (see forward write block)
         if self._has_private_mem:
             with torch.no_grad():
-                if maturity is not None:
+                # Блок 2: _pm_coh читается в write-gate ДО этого fill — на
+                # recompute в начале восстановлен S0; здесь возвращаем S1.
+                if _rc and '_pm_coh' in self._rc_pre:
+                    self._pm_coh.copy_(self._rc_pre['_pm_coh'])
+                elif maturity is not None:
                     # Unified maturation gate drives the write gate (no hard std crutch).
                     self._pm_coh.fill_(float(maturity))
                 else:
@@ -959,7 +1028,7 @@ class GroupedCognitiveMirror(nn.Module):
             ig = torch.einsum('blgk,gk->blg', hp - ik, self.w_intent) + self.b_intent
             if sal is not None:
                 ig = ig + sal * self.w_sal.view(1, 1, -1)
-            if self.training:
+            if self.training and not _rc:
                 with torch.no_grad():
                     rms = ig.pow(2).mean(dim=(0, 1)).sqrt()          # (G,)
                     self._ig_norm_ema.mul_(0.99).add_(rms, alpha=0.01)
@@ -967,12 +1036,13 @@ class GroupedCognitiveMirror(nn.Module):
             # Effective gate amplitude (measurement, not a control): ~1.0 healthy,
             # insensitive to the raw ‖w_intent‖ growth — replaces intent_w as the
             # actionable stability metric.
-            with torch.no_grad():
-                # M65-opt: храним тензор; sync происходит только при чтении
-                # (ноутбук читает _cached_ig_eff раз в log-интервал через
-                # property ниже)
-                self._cached_ig_eff_t = (ig.abs().mean().detach()
-                                         * self._intent_alpha)
+            if not _rc:
+                with torch.no_grad():
+                    # M65-opt: храним тензор; sync происходит только при чтении
+                    # (ноутбук читает _cached_ig_eff раз в log-интервал через
+                    # property ниже)
+                    self._cached_ig_eff_t = (ig.abs().mean().detach()
+                                             * self._intent_alpha)
             gate_logits = gate_logits + ig * self._intent_alpha
         # Contradiction signal: expert vs collective disagreement opens gate.
         # Same pattern as the intent bridge: running-RMS normalization + τ-authority
@@ -994,7 +1064,7 @@ class GroupedCognitiveMirror(nn.Module):
             # Overlay authority: complement of intent_alpha = 1/τ_l (v3; T8).
             # Fast (shallow) layers rely more on soft routing, mature layers on intent.
             ctr = ctr + (spec * w_spec + cons * w_cons) * self.w_contra * (1.0 - self._intent_alpha)
-            if self.training:
+            if self.training and not _rc:
                 with torch.no_grad():
                     rms = ctr.pow(2).mean(dim=(0, 1)).sqrt()      # (G,)
                     self._ctr_norm_ema.mul_(0.99).add_(rms, alpha=0.01)
@@ -1011,6 +1081,21 @@ class GroupedCognitiveMirror(nn.Module):
         # Zero-init выхода ⇒ на init добавка ровно 0 (identity).
         _ie = getattr(self, '_inner_eye', None)
         if _ie is not None:
+            _ie._recomp = _rc   # блок 2: shared-модуль — recompute его EMA не двигает
+            # Блок 2: _o_rms_ema — ОБЩИЙ буфер всех слоёв, эволюционирует внутри
+            # forward по слоям. Первый проход читает своё S_i; recompute слоёв
+            # идёт в обратном порядке, поэтому перед вызовом временно ставим
+            # сохранённый per-layer S_i, после вызова возвращаем S_final
+            # (состояние конца forward'а) — иначе градиенты inner_eye разойдутся
+            # (замерено: maxabs 1.96e-3 до этого фикса).
+            _ie_post = None
+            if _rc:
+                _ie_post = _ie._o_rms_ema.detach().clone()
+                _s0 = getattr(self, '_ie_ema_pre', None)
+                if isinstance(_s0, torch.Tensor):
+                    _ie._o_rms_ema.copy_(_s0)
+            elif self.training:
+                self._ie_ema_pre = _ie._o_rms_ema.detach().clone()
             _z = torch.zeros(B, L, G, 1, device=h.device, dtype=h.dtype)
             _dis = (disagreement.unsqueeze(-1)
                     if self._has_private_mem else _z)
@@ -1038,6 +1123,8 @@ class GroupedCognitiveMirror(nn.Module):
                 _pen, _sal, _ellf, _matf,
             ], dim=-1).detach()                                  # (B,L,G,12)
             ie_o = _ie(feats.to(h.dtype), self._tau_norm_layer)
+            if _ie_post is not None:
+                _ie._o_rms_ema.copy_(_ie_post)
             gate_logits = gate_logits + ie_o * self._intent_alpha
         # Anti-collapse governor: bump gate when log-scale flattens.
         # Amplitude = τ-authority (intent_alpha); 0.05/3.0 are degenerate-bypass
@@ -1047,7 +1134,7 @@ class GroupedCognitiveMirror(nn.Module):
         # than training gates whenever log_scale was flat (audit M4).
         ls = self.log_scale
         ls_dev = ls.mean(dim=-1) - ls.mean()
-        if self.training:
+        if self.training and not _rc:
             with torch.no_grad():
                 self._ls_var_run.mul_(0.99).add_(
                     ls.detach().var(unbiased=False), alpha=0.01)
@@ -1056,24 +1143,32 @@ class GroupedCognitiveMirror(nn.Module):
         gate_logits = gate_logits + boost.unsqueeze(0).unsqueeze(0)
         
         expert_gate = torch.sigmoid(gate_logits)  # (B, L, G)
-        # Cache gate L1 for auxiliary sparsity loss (still in graph for gradients)
-        self._cached_gate_l1 = expert_gate.mean()
-        # Cache per-expert mean gate for load balancing loss
-        self._cached_gate_usage = expert_gate.mean(dim=(0, 1))  # (G,)
+        if not _rc:
+            # Cache gate L1 for auxiliary sparsity loss (still in graph for gradients)
+            self._cached_gate_l1 = expert_gate.mean()
+            # Cache per-expert mean gate for load balancing loss
+            self._cached_gate_usage = expert_gate.mean(dim=(0, 1))  # (G,)
         # Gate EMA: self-adaptive per-expert warmup for mirror (cold → full over ~5000 steps)
         if self.training:
-            self._gate_ema.mul_(0.99).add_(self._cached_gate_usage.detach(), alpha=0.01)
-        # Cache for expert reinforcement loss (gate vs usefulness alignment)
-        self._cached_usefulness = usefulness
-        self._cached_gate = expert_gate.detach()
+            if _rc and '_gate_ema' in self._rc_pre:
+                # S0->S1: gate_ema читался InnerEye-фичами ДО апдейта —
+                # в начале recompute восстановлен S0; здесь возвращаем S1.
+                self._gate_ema.copy_(self._rc_pre['_gate_ema'])
+            elif not _rc:
+                self._gate_ema.mul_(0.99).add_(self._cached_gate_usage.detach(), alpha=0.01)
+        if not _rc:
+            # Cache for expert reinforcement loss (gate vs usefulness alignment)
+            self._cached_usefulness = usefulness
+            self._cached_gate = expert_gate.detach()
         
         mirror = mirror * expert_gate.unsqueeze(-1)
         mirror = mirror.reshape(B, L, D)
         
-        with torch.no_grad():
-            self._last_magnitude.fill_(mirror.abs().mean())
-            self._last_gates.copy_(expert_gate.detach().mean(dim=(0, 1)))
-            self._last_h_pool.copy_(h_g.detach().mean(dim=(0, 1)))
+        if not _rc:
+            with torch.no_grad():
+                self._last_magnitude.fill_(mirror.abs().mean())
+                self._last_gates.copy_(expert_gate.detach().mean(dim=(0, 1)))
+                self._last_h_pool.copy_(h_g.detach().mean(dim=(0, 1)))
         
         return mirror, mlp_mod, mem_mod, hp, pred_error_norm
     

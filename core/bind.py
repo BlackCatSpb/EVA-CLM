@@ -419,7 +419,11 @@ class TrajectorySpiralBind(nn.Module):
         # B12: under gradient_checkpointing the ggeo autograd passes RECOMPUTE
         # this forward — without the freeze the counter ticks 6-8x per logged
         # step and escapes the recompute-restore.
-        if not getattr(self, '_ggeo_freeze', False):
+        # Блок 2 (корневой recompute-фикс): recompute-проход гасит счётчик
+        # через _recomp (ставит блок); _ggeo_freeze оставлен для
+        # диагностических re-grad'ов вне checkpoint-реконструкции.
+        if not (getattr(self, '_ggeo_freeze', False)
+                or getattr(self, '_recomp', False)):
             self._step_count += 1
 
         # Build trajectory: use traj_state only if sequence length matches
@@ -614,8 +618,14 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
 
     # в”Ђв”Ђ РїРµСЂСЃРёСЃС‚-РѕР±РЅРѕРІР»РµРЅРёРµ Р»СѓС‡РµР№ (no_grad) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
-    def _push_transitions(self, hp: torch.Tensor) -> None:
-        """Записать переходы unbind(hp_t, hp_{t-1}) в кольцевой буфер."""
+    def _push_transitions(self, hp: torch.Tensor, dry: bool = False) -> None:
+        """Записать переходы unbind(hp_t, hp_{t-1}) в кольцевой буфер.
+
+        dry=True (блок 2, recompute): те же граф-опы и RNG-потребление
+        (randperm при срабатывании пересборки лучей — checkpoint восстановил
+        RNG-состояние), но НИ ОДНОЙ записи в буферы/счётчики — recompute не
+        меняет состояние; число saved-tensors графа совпадает с первым
+        проходом (требование non-reentrant checkpoint)."""
         if hp.shape[1] < 2:
             return
         hp = hp.float()  # мандолд всегда в fp32 (буферы fp32, FFT стабильна)
@@ -623,6 +633,12 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
         flat: torch.Tensor = T.reshape(-1, self.K)
         n: int = flat.shape[0]
         if n == 0:
+            return
+        if dry:
+            if int(self._total.item()) % self.rebuild_interval == 0:
+                _n_valid = min(int(self._total.item()), self.buffer_size)
+                if _n_valid >= 2:
+                    torch.randperm(_n_valid, device=flat.device)
             return
         with torch.no_grad():
             n_t = int(self._trans_idx.item())
@@ -730,7 +746,9 @@ class TrajectoryManifoldBind(TrajectorySpiralBind):
             h = h.unsqueeze(0)
         result, new_traj, coherence = super().forward(h, traj_state)
         hp: torch.Tensor = self.hp_norm(self.W_proj(h) + self.w_bind_bias)
-        self._push_transitions(hp)
+        # Блок 2: recompute воспроизводит граф-опы и RNG, но не двигает
+        # буферы/счётчики (dry-run внутри _push_transitions).
+        self._push_transitions(hp, dry=getattr(self, '_recomp', False))
         man: torch.Tensor = self._manifold_read(hp).float()
         return result + self.gain * (man @ self.W_man).clamp(-8.0, 8.0), new_traj, coherence
 

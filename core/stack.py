@@ -1707,8 +1707,18 @@ class EVAStack(nn.Module):
                              context_mem, allow_write, tau_s, step, intent=None,
                              salience=None, maturity=None, sep_mask=None, mark=None):
         """Wrapper for gradient checkpointing.
+
         Mirror cache is passed as explicit args/returns so checkpoint saves/restores it,
-        preventing stale-cache mismatch between forward and backward recomputation."""
+        preventing stale-cache mismatch between forward and backward recomputation.
+
+        Блок 2 (корневой recompute-фикс): mark — identity-маркер вызова
+        checkpoint; блок по нему отличает recompute от легитимного повторного
+        прохода и протягивает признак «recompute» в bind/mirror/mlp, где все
+        накопительные мутации состояния пропускаются, а S0-читатели зеркала
+        временно возвращаются к значению ДО первого прохода (см.
+        REVISION_NOTES_block2.md). Возвращаемые кэши — пересчитываемые
+        set-значения: recompute воспроизводит их бит-в-бит, поэтому перенос
+        pen/hp на следующий шаг не ломается (замерено)."""
         layer.mirror._cached_pred_error_norm = _cached_pred_error_norm
         layer.mirror._cached_hp = _cached_hp
         h_out, s_out = layer(h, state, global_state=global_state,

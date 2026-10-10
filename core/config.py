@@ -630,21 +630,27 @@ class WideBindConfig:
     accum_steps: int = 1  # effective batch = batch_size * seq_len * accum_steps
 
     compile: bool = False
-    # M65-opt2 (аудит A5): recompute при checkpointing повторно исполняет
-    # forward с уже сдвинутыми EMA (замер агента: 134 несовпадения градиентов,
-    # worst 5.8e-3; узкий restore зеркала снизил до 6.9e-6 — но это число
-    # верно только для изолированного конфига на step=5). Round-5 аудит в
-    # полном мини-конфиге на step=20000: gc=True vs gc=False single-step
-    # relL2 1.17e-3 (maxabs 3.8e-3), за 4 шага relL2 2.68e-2 — детерминировано,
-    # НЕ fp-шум. Это цена OOM-fallback'а (gc=True), не краш; корневой фикс
-    # (вынос state-апдейтов из checkpointed-региона) в очереди.
+    # M65-opt2 (аудит A5) → Блок 2 (корневой recompute-фикс, закрыт):
+    # recompute при checkpointing повторно исполняет forward — теперь ЧИСТО:
+    # маркер вызова (_ckpt_mark/_rc) протянут через block → bind/mirror/mlp/
+    # inner_eye, все накопительные мутации (EMA/счётчики/pen/alpha-flush/
+    # private_mem/проекции лучей) на recompute пропускаются, а S0-читатели
+    # зеркала (_gate_ema/_delta_var/_pm_coh/_private_mem/alpha_diag/
+    # _prev_grad_norm) на входе возвращаются к значению ДО первого прохода и
+    # получают S1 обратно на месте записи. Замер (мутационно-богатый
+    # мини-конфиг, D=128/2 слоя, private_mem+meta_trust+memory_bank+
+    # intent_bridge+UCL+inner_eye):
+    # gc=True vs gc=False градиенты и ВСЁ running-состояние бит-идентичны
+    # (maxabs 0.0 на 1-м и 4-м шагах; ДО фикса single-step maxabs 5.9e-3,
+    # за 4 шага 6.8e-3 и 70/149 буферов расходились, _mlp_cnt double-count).
+    # Замок: tests/test_m66_recompute_purity.py (+саботаж 4/4 RED).
     # ИСТОРИЯ bind-бага (закрыт): в чистом пути gc=False w_d/b_d/w_d_pen
     # последнего слоя получали РОВНО нулевой градиент — причина найдена
     # зондами: жёсткий clamp_min(log_a, k*log(d_s)) в _scan_chunks у медленной
     # лестницы (d_s -> 1) зажимал все входы (frac_clamped=1.0, локальный
-    # якобиан 0 против 3.8e4 у быстрого слоя). Фикс — _soft_floor (softplus-
-    # колено, T=0.01): градиент жив, forward <= 0.7% на зажатых входах.
-    # Замок: tests/test_audit_agents_fixes.py::test_bind_pen_dead_in_clean_path.
+    # якобиан 0 против 3.8e4 у быстрого слоя). Фикс — _soft_floor (STE,
+    # см. core/block.py). Замок: tests/test_audit_agents_fixes.py::
+    # test_bind_pen_dead_in_clean_path.
     gradient_checkpointing: bool = True
 
     # Training
