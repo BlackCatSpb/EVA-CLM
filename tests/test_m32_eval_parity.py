@@ -9,6 +9,8 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import EVAConfig, EVAStack  # noqa: E402
 
+import _srclock as srclock  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -58,11 +60,17 @@ def test_snapshot_restore_protects_the_train_chain():
 
 
 def test_evaluators_reset_per_document_and_carry():
-    t = open(os.path.join(ROOT, 'scripts', 'train.py'), encoding='utf-8', errors='replace').read()
-    i = t.find('def evaluate')
-    seg = t[i:i + 3200]
-    assert 'reset_reasoning()' in seg and 'global_state=ogs' in seg
+    # AST-нормализация (батч 6): раньше — срез сырого текста 3200 символов от
+    # 'def evaluate'; теперь — сам AST-узел функции (форматирование/комментарии
+    # не влияют), а требования проверяются как вызовы/аргументы, не подстроки.
+    fn = srclock.find_def(os.path.join(ROOT, 'scripts', 'train.py'), 'evaluate')
+    assert fn is not None, 'evaluate() vanished from train.py'
+    assert srclock.has_call_in(fn, 'reset_reasoning'), \
+        'evaluate() must reset the reasoning chain per hold-out document'
+    assert srclock.has_call_in(fn, 'model', kwargs={'global_state': 'ogs'}), \
+        'evaluate() must carry the cross-layer state (global_state=ogs)'
     nb = json.load(open(os.path.join(ROOT, 'notebooks', 'eva_colab.ipynb'), encoding='utf-8'))
     s10 = ''.join(''.join(c.get('source', [])) for c in nb['cells'] if 'TRAINING LOOP' in ''.join(c.get('source', [])))
-    assert 'global_state=vgs' in s10
-    assert s10.count('model.reset_reasoning()') >= 2  # per-document + boundary
+    assert srclock.has_call(s10, 'model', kwargs={'global_state': 'vgs'}), \
+        'the loop lost the global_state carry (global_state=vgs)'
+    assert srclock.calls(s10, 'model.reset_reasoning') >= 2  # per-document + boundary

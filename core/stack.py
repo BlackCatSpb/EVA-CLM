@@ -1428,7 +1428,7 @@ class EVAStack(nn.Module):
                     if hasattr(mir, 'reset_stream_bufs'):
                         mir.reset_stream_bufs()   # M41: bound diag buffers too
 
-    def snapshot_runtime_buffers(self) -> dict:
+    def snapshot_runtime_buffers(self, include_caches: bool = True) -> dict:
         """Detached copies of EVERY buffer (incl. persistent=False).
 
         Eval-isolation contract (audit M8): forward mutates streaming state
@@ -1437,7 +1437,32 @@ class EVAStack(nn.Module):
         validation sentences are consolidated into the TRAINING working
         memory (and vice versa), cross-contaminating the VSA 'document state'.
         Parameters are not touched by eval (no optimizer step) → buffers only.
+
+        Блок 1 (инвентарь ревизии, ~20 write-before-read атрибутов): снимок
+        покрывает forward-кэши и python-состояние, которые раньше жили вне
+        контракта — block._cache_mlp_out/_cache_mlp_mod/_fwd_py_snap/_tau_norm,
+        mirror._cached_gate_usage/_cached_gate_l1/_cached_decorr/_last_mlp_mod/
+        _tau_signal_used/_pred_loss_term/_fwd_py_snap, mlp._cached_group_out,
+        head._ext_phantom_dirs/_last_ph_sat/_tokens/_kp_active_py/
+        _ell_ema_ready/_pb_active/_temper_active, ucl._mature_py,
+        lcache.cache._position. Все они write-before-read (max|Δout|=0), но
+        контракт изоляции обязан быть полным.
+
+        ``include_caches=False``: forward-ГРАФ-кэши ('_cache_mlp_out',
+        '_cache_mlp_mod', '_cached_group_out', '_last_mlp_mod', '_cached_decorr',
+        '_cached_gate_l1', '_cached_gate_usage', '_tau_signal_used',
+        '_pred_loss_term', '_fwd_py_snap') НЕ кладутся в снимок: они пишутся
+        каждым forward'ом до чтения, а их размер ~(B,L,D)·H слоёв (сотни МБ в
+        прод-конфиге) — персистентность в чекпоинте раздувала бы best.pt.
+        Резюм их не теряет: первый forward пересоздаёт. Для eval-изоляции
+        (default True) кладутся.
         """
+        _CACHE_ATTRS = frozenset((
+            '_cache_mlp_out', '_cache_mlp_mod', '_cached_group_out',
+            '_last_mlp_mod', '_cached_decorr', '_cached_gate_l1',
+            '_cached_gate_usage', '_tau_signal_used', '_pred_loss_term',
+            '_fwd_py_snap'))
+
         snap = {k: v.detach().clone() for k, v in self.named_buffers()}
         _ex = {}
         for _an in ('_last_bus', '_intent_stream',            # B1: non-buffer streaming state
@@ -1478,7 +1503,16 @@ class EVAStack(nn.Module):
                                 ('head', getattr(self, 'lm_head', None), '_meta_levels'),
                                 ('head', getattr(self, 'lm_head', None), '_spike_n'),
                                 ('head', getattr(self, 'lm_head', None), '_spike_stats'),
-                                ('head', getattr(self, 'lm_head', None), '_last_p')):
+                                ('head', getattr(self, 'lm_head', None), '_last_p'),
+                                # блок 1 (инвентарь ревизии): голова/фантом/UCL-мост
+                                ('head', getattr(self, 'lm_head', None), '_ext_phantom_dirs'),
+                                ('head', getattr(self, 'lm_head', None), '_last_ph_sat'),
+                                ('head', getattr(self, 'lm_head', None), '_tokens'),
+                                ('head', getattr(self, 'lm_head', None), '_kp_active_py'),
+                                ('head', getattr(self, 'lm_head', None), '_ell_ema_ready'),
+                                ('head', getattr(self, 'lm_head', None), '_pb_active'),
+                                ('head', getattr(self, 'lm_head', None), '_temper_active'),
+                                ('ucl', getattr(self, 'concept_layer', None), '_mature_py')):
             if _mod is None:
                 continue
             _a = getattr(_mod, _an, None)
@@ -1508,6 +1542,11 @@ class EVAStack(nn.Module):
         else:
             _ex['lcache._ss_gen'] = None
             _ex['lcache._ss_dev'] = None
+        # блок 1 (инвентарь ревизии): позиция кольца кэша — python-состояние
+        # (в state_dict не входит), снимок/резюм должны её сохранять
+        _lc_cache = getattr(_lc_mod, 'cache', None) if _lc_mod is not None else None
+        if _lc_cache is not None and hasattr(_lc_cache, '_position'):
+            _ex['lcache.cache._position'] = int(_lc_cache._position)
         # M33: per-layer streaming caches ARE forward inputs (see mirror M33) —
         # they must round-trip through the eval isolation contract as well.
         for _i, _l in enumerate(self.layers):
@@ -1517,30 +1556,30 @@ class EVAStack(nn.Module):
                             '_cached_gate', '_cached_usefulness',
                             '_cached_concept_dendrogram',
                             '_alpha_override_py',      # M65-opt2 (A2): python-двойник
-                            '_alpha_pending'):         # M65-opt2 (A2): отложенный write
-                    _a = getattr(_mir, _an, None)
-                    if isinstance(_a, torch.Tensor):
-                        _ex[f'mir.{_i}.{_an}'] = _a.detach().clone()
-                    elif isinstance(_a, (list, tuple)):
-                        # M65-opt (аудит): _cached_concept_dendrogram (tuple)
-                        # хранился по ссылке — мутация была видна в снимке
-                        _ex[f'mir.{_i}.{_an}'] = type(_a)(
-                            t.detach().clone() if isinstance(t, torch.Tensor) else t
-                            for t in _a)
-                    elif isinstance(_a, dict):
-                        _ex[f'mir.{_i}.{_an}'] = {
-                            _k: (t.detach().clone() if isinstance(t, torch.Tensor) else t)
-                            for _k, t in _a.items()}
-                    else:
-                        # M45: None is STATE (document boundary reset) — a
-                        # snapshot that silently drops it cannot restore it,
-                        # and the next run inherits the previous run's cache
-                        # (probe-measured: write_mod activated on stale hp).
-                        _ex[f'mir.{_i}.{_an}'] = _a
+                            '_alpha_pending',          # M65-opt2 (A2): отложенный write
+                            # блок 1 (инвентарь ревизии): live-кэши aux-геометрии
+                            '_cached_gate_usage', '_cached_gate_l1', '_cached_decorr',
+                            '_last_mlp_mod', '_tau_signal_used', '_pred_loss_term',
+                            '_fwd_py_snap'):
+                    _ex[f'mir.{_i}.{_an}'] = self._snap_value(
+                        getattr(_mir, _an, None))
+            _mlp = getattr(_l, 'mlp', None)
+            if _mlp is not None:
+                # блок 1: diversity-loss читает mlp._cached_group_out
+                _ex[f'mlp.{_i}._cached_group_out'] = self._snap_value(
+                    getattr(_mlp, '_cached_group_out', None))
+            # блок 1: forward-граф-кэши блока + recompute-снапшот + τ-норма слоя
+            for _an in ('_cache_mlp_out', '_cache_mlp_mod', '_fwd_py_snap',
+                        '_tau_norm'):
+                _ex[f'blk.{_i}.{_an}'] = self._snap_value(
+                    getattr(_l, _an, None))
             _tr = getattr(_l, '_traj_state', None)
             if isinstance(_tr, torch.Tensor):
                 _ex[f'blk.{_i}._traj_state'] = _tr.detach().clone()
             _ex[f'blk.{_i}._mlp_cnt_py'] = getattr(_l, '_mlp_cnt_py', 0)  # M65-opt2 (A2)
+        if not include_caches:      # forward-граф-кэши — не в персистентный снимок
+            _ex = {k: v for k, v in _ex.items()
+                   if k.rsplit('.', 1)[-1] not in _CACHE_ATTRS}
         snap['__attrs__'] = _ex
         return snap
 
@@ -1554,17 +1593,20 @@ class EVAStack(nn.Module):
                 if buf is not None and buf.shape == v.shape:
                     buf.copy_(v)
             for _an, _v in (snap.get('__attrs__') or {}).items():   # B1 restore path
-                if _an.startswith(('mir.', 'blk.')):                 # M33 per-layer route
+                if _an.startswith(('mir.', 'blk.', 'mlp.')):         # M33 per-layer route
                     _pfx, _i, _attr = _an.split('.', 2)
                     _tgt = self.layers[int(_i)]
                     if _pfx == 'mir':
                         _tgt = _tgt.mirror
+                    elif _pfx == 'mlp':
+                        _tgt = _tgt.mlp
                     setattr(_tgt, _attr, self._restore_value(_v))
                     continue
-                if _an.startswith(('bank.', 'head.', 'bridge.')):    # M58b + bridge (M65-opt2)
+                if _an.startswith(('bank.', 'head.', 'bridge.', 'ucl.')):  # M58b + bridge + UCL
                     _pfx, _attr = _an.split('.', 1)
                     _tgt = getattr(self, {'bank': 'memory_bank', 'head': 'lm_head',
-                                          'bridge': 'bridge'}[_pfx], None)
+                                          'bridge': 'bridge',
+                                          'ucl': 'concept_layer'}[_pfx], None)
                     if _tgt is not None:
                         # M65-opt2: свежий клон на КАЖДЫЙ restore (иначе
                         # повторный restore вернул бы уже мутированный список)
@@ -1584,6 +1626,11 @@ class EVAStack(nn.Module):
                                 _g = torch.Generator(device=_dev)
                                 _lc_mod._ss_gen = _g
                             _g.set_state(_v.detach().cpu().clone())
+                    elif _lc_mod is not None and _an == 'lcache.cache._position':
+                        # блок 1: позиция кольца кэша — python-состояние
+                        _lc_cache = getattr(_lc_mod, 'cache', None)
+                        if _lc_cache is not None:
+                            _lc_cache._position = int(_v)
                     continue
                 _cur = getattr(self, _an, None)
                 if isinstance(_v, list) and isinstance(_cur, list) \
@@ -1605,6 +1652,23 @@ class EVAStack(nn.Module):
                     # обязаны совпадать (раньше IndexError на укороченном
                     # списке), значения клонируются свежо
                     setattr(self, _an, self._restore_value(_v))
+
+    @staticmethod
+    def _snap_value(v):
+        """Detached-клон значения для снимка (tensor/list/tuple/dict).
+
+        В отличие от `_restore_value` (restore уже detached) здешний тензор
+        может нести grad_fn: без detach снимок пинил бы граф шага.
+        """
+        if isinstance(v, torch.Tensor):
+            return v.detach().clone()
+        if isinstance(v, (list, tuple)):
+            return type(v)(t.detach().clone() if isinstance(t, torch.Tensor) else t
+                           for t in v)
+        if isinstance(v, dict):
+            return {k: (t.detach().clone() if isinstance(t, torch.Tensor) else t)
+                    for k, t in v.items()}
+        return v
 
     @staticmethod
     def _restore_value(v):

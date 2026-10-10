@@ -572,22 +572,21 @@ def test_snapshot_restore_buffers():
 
 # ── M8.2 non-finite CE forces rollback; buffers get scrubbed ────────────────
 def test_tokenstream_wrapped(tmp_path=None):
-    import importlib.util, numpy as np, tempfile, pathlib
+    import ast, numpy as np, tempfile, pathlib
     if tmp_path is None:
         tmp_path = pathlib.Path(tempfile.mkdtemp())
     # Round 7 (аудит): абсолютный Windows-путь ломал портируемость
     # (Colab/Linux) — путь относительно корня репо.
     _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    spec = importlib.util.spec_from_file_location(
-        '_train_mod', os.path.join(_repo, 'scripts', 'train.py'))
-    # import train.py for its class only: it guards side effects under __main__,
-    # but heavy top-level imports could fail — fall back to source exec of class
-    src = open(spec.origin, encoding='utf-8').read()
-    i0 = src.index('class TokenStream')
-    i1 = src.index('def evaluate', i0) if 'def evaluate' in src[i0:] else len(src)
-    seg = src[i0:src.index('\n\n\n', i0)] if '\n\n\n' in src[i0:] else src[i0:i1]
+    # Батч 6: класс берётся точным AST-узлом (ClassDef) и компилируется —
+    # срез сырого текста по индексам 'class TokenStream'/'\n\n\n' убран.
+    import _srclock as srclock
+    cls = srclock.find_def(os.path.join(_repo, 'scripts', 'train.py'), 'TokenStream')
+    assert cls is not None, 'train.py lost TokenStream'
+    mod = ast.Module(body=[cls], type_ignores=[])
+    ast.fix_missing_locations(mod)
     ns = {'np': np, 'torch': torch}
-    exec(compile(seg, 'ts', 'exec'), ns)
+    exec(compile(mod, 'ts', 'exec'), ns)
     TS = ns['TokenStream']
     f = tmp_path / 's.bin'
     arr = np.arange(64, dtype=np.uint16)

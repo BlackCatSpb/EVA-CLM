@@ -10,6 +10,10 @@ from core import EVAConfig, EVAStack                              # noqa: E402
 from core.training_control import (codebook_fingerprint,          # noqa: E402
                                    verify_identity_resume)
 
+import _srclock as srclock                                        # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _mini(**kw):
     base = dict(n_layers=1, D=128, mlp_groups=4, code_dim=16, code_sparsity=4,
@@ -45,7 +49,18 @@ def test_f2a04_embed_rope_footgun_retired():
 
 
 def test_f2a08_no_double_tanh_in_inference_profile_path():
-    import inspect
-    from core.logit_cache import LogitAttention
-    src = inspect.getsource(LogitAttention.forward)
-    assert 'torch.tanh(cached' not in src, 'outer tanh restored -> double-squash'
+    # Батч 6: inspect.getsource + подстрока -> AST-узел forward-метода класса
+    # LogitAttention: ищем вызовы torch.tanh, чей аргумент построен на кэше
+    # (double-squash). Устойчиво к переименованию/форматированию, строже
+    # текста (аргумент сравнивается по unparse всего выражения).
+    import ast
+    src = os.path.join(ROOT, 'core', 'logit_cache.py')
+    cls = srclock.find_def(src, 'LogitAttention')
+    assert cls is not None, 'LogitAttention vanished'
+    fwd = [n for n in cls.body
+           if isinstance(n, ast.FunctionDef) and n.name == 'forward']
+    assert fwd, 'LogitAttention.forward vanished'
+    for site in srclock.call_sites_in(fwd[0], 'torch.tanh'):
+        arg = srclock.unparse(site.args[0]) if site.args else ''
+        assert 'cached' not in arg, \
+            f'outer tanh restored in forward -> double-squash: {arg}'

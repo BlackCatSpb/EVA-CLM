@@ -187,16 +187,26 @@ def verify_identity_resume(model, ckpt, skipped_keys):
 class LossBalancer:
     """Combine CE with auxiliary losses WITHOUT per-loss magic weights.
 
-    ``mode='align'`` (default): spectral gradient projection (PCGrad / GradDrop,
-    Yu et al. 2020). The aux gradient added to parameters is bounded by
-    ``‖g_CE‖`` **by construction**:
+    ``mode='align'`` (default): per-parameter sign-masked gradient injection
+    (GradDrop-родственная идея; НЕ PCGrad-проекция — см. ниже). The aux
+    gradient added to parameters is bounded per parameter by ``‖g_CE‖`` **by
+    construction**:
 
-        cos  = ⟨g_CE, g_aux⟩ / (‖g_CE‖·‖g_aux‖) ∈ [-1, 1]
-        scale = max(cos, 0) · ‖g_CE‖ / (‖g_aux‖ + ε)      ≤ ‖g_CE‖ / (‖g_aux‖ + ε)
-        g_final = g_CE + scale·g_aux
+        b    = g_aux · 1[(g_CE·g_aux) > 0]        (sign-agreeing coords only)
+        s    = min(1, ‖g_CE‖ / (‖b‖ + ε))         (per-parameter norm clamp)
+        g_final = g_CE + s·b                      ⇒ ‖s·b‖ ≤ ‖g_CE‖
 
-    cos ∈ [0,1] already caps the aux projection, so no ``align_cap`` knob is
-    needed (the former cap was a leftover magic constant).
+    С bypass-термами (BYPASS_AUX, gradalign) combined-бонд ужесточён до
+    ``‖g_CE + Δaux + Δbypass‖ ≤ 2·‖g_CE‖`` per parameter: после добавления
+    bypass общий не-CE вклад Δ = g_final − g_CE рескейлится к норме ≤ ‖g_CE‖
+    (до фикса адверсариальная сумма достигала 4·‖g_CE‖: aux ≤ ‖CE‖ поверх CE,
+    затем bypass ≤ ‖p.grad‖ поверх обоих). Рескейл активен только когда
+    Δ действительно больше ‖g_CE‖; в норме множитель ровно 1.0.
+
+    NaN/Inf-гард (задача блока 1): не-конечный per-parameter вклад aux/
+    bypass/safety отбрасывается (вклад этого параметра = 0), счётчик
+    ``n_nonfinite`` — телеметрия. Раньше inf в aux травил ``p.grad`` (митигация
+    была только ниже по потоку — AGC дропал non-finite градиенты).
 
     ``mode='balance'`` (the ``loss()`` API): dimensionless per-aux
     normalisation by a running EMA of |aux_i|, scaled so the aux block tracks
@@ -225,6 +235,12 @@ class LossBalancer:
     first seeding call; default 1 = every step (historical, bit-identical).
     ``backward(align=False)`` is a DIFFERENT legacy path: the raw weighted sum
     (s=1.0, no normalization) — documented, not the ``loss()`` balance mode.
+
+    ``last_scale`` (телеметрия) сбрасывается в None на невалидном align-замере
+    (nb == 0 или nb < scale_min_ratio·na) — stale-значение больше не выдаёт
+    «последний валидный» за текущий; cos считается БЕЗ +1e-8 в nb (при
+    gau → 0 косинус не искажался бы eps-полом; вырожденный nb == 0 даёт
+    cos = 0.0 и не сидит scale).
     """
 
     BYPASS_AUX = ('gradalign',)
@@ -302,6 +318,9 @@ class LossBalancer:
         # M65-opt: aux terms skipped in grad_geometry because they are not
         # connected to this graph — previously an uncounted silent `continue`.
         self.n_unconnected: int = 0
+        # Задача блока 1 (NaN/Inf-гард): per-parameter вклады aux/bypass/safety
+        # с non-finite градиентом отброшены (вклад = 0). Телеметрия.
+        self.n_nonfinite: int = 0
         # M64.12 (M63-E §7): the optional aux kill-switch (measure-only unless
         # kill_disable is set). The caller feeds it at the log cadence via
         # `measure_kill` (it needs the LIVE graph); `backward` filters the OFF
@@ -369,6 +388,31 @@ class LossBalancer:
 
     def _ema_decay(self) -> float:
         return 1.0 - 1.0 / max(self.eval_interval, 100)
+
+    @staticmethod
+    def _finite_flags(grads) -> list:
+        """0-dim bool-тензор «градиент конечен» на каждый параметр (None→None).
+
+        Без out-of-band sync: приводить к bool вызывающий код должен сам,
+        батчем (см. `_drop_nonfinite`).
+        """
+        return [None if g is None else torch.isfinite(g).all() for g in grads]
+
+    def _drop_nonfinite(self, grads, flags) -> list:
+        """Отбросить не-конечные per-parameter вклады (None) + счётчик.
+
+        Один sync на вызов: сумма флагов — тензорная операция, и только при
+        найденных не-конечных значениях идёт per-param чтение bool.
+        """
+        bad = [f for f in flags if f is not None]
+        if not bad:
+            return grads
+        n_bad = int((~torch.stack([f.reshape(()) for f in bad])).sum().item())
+        if not n_bad:
+            return grads
+        self.n_nonfinite += n_bad
+        return [None if (f is not None and not bool(f)) else g
+                for g, f in zip(grads, flags)]
 
     def _update_balance(self, ce_loss: Any, aux_dict: Dict[str, Any]) -> None:
         d = self._ema_decay()
@@ -574,8 +618,19 @@ class LossBalancer:
                     if _worst > self.aux_drift_cap:
                         _s = 0.0
                         self.n_cheap_guard += 1
-                _at = [v for v in aux_dict.values() if isinstance(v, torch.Tensor)]
-                total = ce_loss + (_s * sum(_at) if _at and _s > 0.0 else 0.0)
+                _at = []
+                if _s > 0.0:
+                    for _v in aux_dict.values():
+                        if not isinstance(_v, torch.Tensor):
+                            continue
+                        # NaN/Inf-гард cheap-пути (задача блока 1): non-finite
+                        # aux-ЗНАЧЕНИЕ не входит в total (его градиент всё
+                        # равно non-finite), счётчик телеметрии.
+                        if torch.isfinite(_v).all():
+                            _at.append(_v)
+                        else:
+                            self.n_nonfinite += 1
+                total = ce_loss + (_s * sum(_at) if _at else 0.0)
                 total.backward()
             finally:
                 if phase_model is not None:
@@ -642,6 +697,8 @@ class LossBalancer:
                         _l._ga_record = False
                 bg = torch.autograd.grad(sum(bypass.values()), params,
                                          retain_graph=True, allow_unused=True)
+                # NaN/Inf-гард: non-finite per-parameter вклад bypass — 0
+                bg = self._drop_nonfinite(bg, self._finite_flags(bg))
                 with torch.no_grad():
                     for p, gce, gb in zip(params, ce_grads, bg):
                         if gce is None and gb is None:
@@ -667,6 +724,10 @@ class LossBalancer:
         aux_grads = torch.autograd.grad(aux_total, params,
                                         retain_graph=True,
                                         allow_unused=True)
+        # NaN/Inf-гард (задача блока 1): non-finite per-parameter aux-вклад
+        # отбрасывается (None ⇒ параметр получает только CE-градиент/0), счётчик
+        # n_nonfinite. Раньше inf/NaN в aux травил p.grad целиком.
+        aux_grads = self._drop_nonfinite(aux_grads, self._finite_flags(aux_grads))
 
         # Поток без полно-модельных flat-копий (аудит VRAM 2026-09): cos и нормы
         # накапливаются попарными dot на устройстве (0-dim, один .item() в конце).
@@ -684,10 +745,17 @@ class LossBalancer:
             den_a = da if den_a is None else den_a + da
             den_b = db if den_b is None else den_b + db
         scale = 0.0
+        # Телеметрия (задача блока 1): невалидный замер НЕ оставляет stale
+        # last_scale — иначе лог показывал бы «последнюю валидную» как текущую.
+        self.last_scale = None
         if num is not None:
             na = float(den_a.sqrt())
-            nb = float(den_b.sqrt()) + 1e-8
-            cos = float(num) / (na * nb + 1e-8)
+            # Задача блока 1 (c): +1e-8 в nb искажал cos при gau≈0 (знаменатель
+            # жил на eps-поле). Теперь nb «сырой»; nb == 0 даёт cos = 0.0 (без
+            # деления), пороги scale_min_ratio сравниваются с сырым nb, как и
+            # раньше (они и раньше отбрасывали nb ниже порога).
+            nb = float(den_b.sqrt())
+            cos = float(num) / (na * nb) if (na > 0.0 and nb > 0.0) else 0.0
             self.last_cos = cos          # raw alignment diagnostic (audit M5)
             self.last_align_cos = cos    # M64.4r3: survives the cheap steps
             # M64.4r3 (R1-verify): seed/update ONLY when the aux gradient is a
@@ -695,7 +763,7 @@ class LossBalancer:
             # ratio na/nb is noise (nb -> 0 => s -> inf; measured counterexample:
             # a single nb/na~1e-6 step seeded s=9.9e5 and a later drift gave
             # 6.98e4x the CE gradient). The scale is hard-capped at scale_max.
-            if nb >= self.scale_min_ratio * na:
+            if nb > 0.0 and nb >= self.scale_min_ratio * na:
                 scale = min(1.0, max(0.0, cos)) * na / nb
                 scale = min(scale, self.scale_max)
                 self.last_scale = scale
@@ -720,6 +788,7 @@ class LossBalancer:
             bp = torch.autograd.grad(sum(bypass.values()), params,
                                      retain_graph=retain_graph,
                                      allow_unused=True)
+            bp = self._drop_nonfinite(bp, self._finite_flags(bp))
             with torch.no_grad():
                 for p, gce, gb in zip(params, ce_grads, bp):
                     if gb is None or p.grad is None:
@@ -727,18 +796,36 @@ class LossBalancer:
                     b = gb * ((p.grad * gb) > 0)
                     _s = torch.clamp(p.grad.norm() / (b.norm() + 1e-12), max=1.0)
                     p.grad.add_(b * _s)
+            # Bypass-бонд (задача блока 1, b): combined (CE+aux+bypass)
+            # per-parameter ≤ 2·‖g_CE‖. До фикса адверсариальная сумма
+            # достигала 4·‖g_CE‖ (aux ≤ ‖CE‖ поверх CE, затем bypass ≤ ‖p.grad‖
+            # поверх обоих). Δ = g_final − g_CE рескейлится к норме ≤ ‖g_CE‖;
+            # в норме (Δ ≤ ‖g_CE‖) множитель ровно 1.0 — бит-идентично.
+            with torch.no_grad():
+                for p, gce in zip(params, ce_grads):
+                    if p.grad is None or gce is None:
+                        continue
+                    d = p.grad - gce
+                    _sc = torch.clamp(gce.norm() / (d.norm() + 1e-12), max=1.0)
+                    p.grad = gce + d * _sc
         self._add_safety(params, _safety_grads)
         if phase_model is not None:
             for _l in getattr(phase_model, 'layers', []):
                 _l._ga_record = True
 
-    @staticmethod
-    def _add_safety(params, safety_grads) -> None:
+    def _add_safety(self, params, safety_grads) -> None:
         """T9.6: добавить градиент safety-термов (стена головы) к p.grad без
         CE-маски/бонда. Профиль relu(|u|−u0)² самоограничен (≡0 ниже u0) —
-        вклад появляется только при насыщении, где CE-градиент уже мёртв."""
+        вклад появляется только при насыщении, где CE-градиент уже мёртв.
+
+        Задача блока 1 (a): non-finite safety-вклад per parameter
+        отбрасывается (0) + счётчик n_nonfinite — раньше NaN/inf в safety
+        травил p.grad (в Round 7 митигация была лишь ниже по потоку в AGC).
+        """
         if safety_grads is None:
             return
+        safety_grads = self._drop_nonfinite(safety_grads,
+                                            self._finite_flags(safety_grads))
         with torch.no_grad():
             for p, gs in zip(params, safety_grads):
                 if gs is None:

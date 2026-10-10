@@ -18,19 +18,24 @@ from core.config import EVAConfig  # noqa: E402
 from core.phantom import PhantomBank  # noqa: E402
 from core import EVAStack  # noqa: E402
 
+import ast  # noqa: E402
+import _srclock as srclock  # noqa: E402
+
 SMALL = dict(n_layers=2, D=512, mlp_groups=4, code_dim=16, code_sparsity=4, vocab=1820)
 
 
 def _pick_stream_src():
-    """Exec the sampler helper out of train.py (it guards side effects under
-    __main__, but importing the whole script pulls the training stack)."""
+    """Compile the sampler helper out of train.py from its AST node (батч 6:
+    раньше — срез сырого текста по индексам 'def _pick_stream'; теперь —
+    точный AST-узел FunctionDef, не зависящий от форматирования)."""
     p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      'scripts', 'train.py')
-    src = open(p, encoding='utf-8').read()
-    i0 = src.index('def _pick_stream')
-    i1 = src.index('\n\n\ndef train(', i0)
+    fn = srclock.find_def(p, '_pick_stream')
+    assert fn is not None, 'train.py lost the _pick_stream sampler'
+    mod = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(mod)
     ns = {'torch': torch}
-    exec(compile(src[i0:i1], 'pick', 'exec'), ns)
+    exec(compile(mod, 'pick', 'exec'), ns)
     return ns['_pick_stream']
 
 

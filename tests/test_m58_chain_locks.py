@@ -20,6 +20,8 @@ from core.config import EVAConfig  # noqa: E402
 from core.maturation import MaturationController  # noqa: E402
 from core import EVAStack  # noqa: E402
 
+import _srclock as srclock  # noqa: E402
+
 SMALL = dict(n_layers=2, D=512, mlp_groups=4, code_dim=16, code_sparsity=4, vocab=1820)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -132,37 +134,47 @@ def test_pen_init_starts_at_zero_so_readiness_measures_competence():
 
 
 def test_train_py_static_locks():
-    t = open(os.path.join(ROOT, 'scripts', 'train.py'), encoding='utf-8', errors='replace').read()
-    assert 'cfg.seq_len //= 2' not in t, 'B19 regression is back'
-    assert '_gate_missing' in t, 'B15 guard is missing'
-    assert 'p.grad.mul_(ls_m)' not in t, 'the ls_mult double application is back'
-    assert 'FailureDetector' not in t and 'watchdog' not in t
+    # AST-нормализация (батч 6): отсутствие/наличие конструкций проверяется по
+    # AST-узлам (формулировка/форматирование не влияют), НО маркерные строки
+    # ('watchdog' и т.п.) остаются строгим raw-поиском: в AST их может не быть
+    # вовсе (комментарий), и AST-проверка была бы СЛАБЕЕ исходной.
+    t = os.path.join(ROOT, 'scripts', 'train.py')
+    assert not srclock.has_augassign(t, 'cfg.seq_len', 'floordiv'), 'B19 regression is back'
+    assert srclock.has_name(t, '_gate_missing'), 'B15 guard is missing'
+    # `X.mul_(ls_m)` в любом виде — второй раз LS-LR: AST-проверка на аргумент
+    assert not srclock.has_call(t, 'mul_', args=['ls_m']), \
+        'the ls_mult double application is back'
+    raw = srclock.read(t)
+    assert 'FailureDetector' not in raw and 'watchdog' not in raw
 
 
 def test_watchdog_is_gone_everywhere():
-    tc = open(os.path.join(ROOT, 'core', 'training_control.py'),
-              encoding='utf-8', errors='replace').read()
-    assert 'class FailureDetector' not in tc and 'def hard_veto_ceiling' not in tc
+    tc = os.path.join(ROOT, 'core', 'training_control.py')
+    assert srclock.find_def(tc, 'FailureDetector') is None
+    assert not srclock.has_name(tc, 'FailureDetector')
+    assert srclock.find_def(tc, 'hard_veto_ceiling') is None
     import core.adaptation as ad
     assert not hasattr(ad, 'FailureDetector')
 
 
 def test_notebook_resume_restores_are_present():
     # The coverage gap that let the M58a watchdog removal eat two resume
-    # restores (they sat inside the deleted block): a static lock on the
-    # notebook's resume contract.
+    # restores (they sat inside the deleted block): an AST lock on the
+    # notebook's resume contract (батч 6: подстроки -> узлы вызовов/присваиваний).
     import json
     nb = json.load(open(os.path.join(ROOT, 'notebooks', 'eva_colab.ipynb'),
                         encoding='utf-8'))
     s9 = ''.join(nb['cells'][9]['source'])
-    for need in ('balancer.load_state_dict(_resume_balancer_sd)',
-                 'depth.put_state(',
-                 'if _resume_branch_var_ref is not None:'):
-        assert need in s9, f'cell 9 lost {need!r}'
+    assert srclock.has_call(s9, 'balancer.load_state_dict', args=['_resume_balancer_sd']), \
+        'cell 9 lost the balancer resume'
+    assert srclock.has_call(s9, 'depth.put_state'), 'cell 9 lost the depth resume'
+    assert srclock.has_if(s9, '_resume_branch_var_ref is not None'), \
+        'cell 9 lost the branch_var_ref guard'
     s8 = ''.join(nb['cells'][8]['source'])
-    assert "_resume_balancer_sd = ckpt.get('balancer')" in s8
-    assert "_resume_branch_var_ref = ckpt.get('branch_var_ref')" in s8
+    assert srclock.assigns(s8, '_resume_balancer_sd', "ckpt.get('balancer')")
+    assert srclock.assigns(s8, '_resume_branch_var_ref', "ckpt.get('branch_var_ref')")
     s10 = ''.join(nb['cells'][10]['source'])
-    assert "'balancer': balancer.state_dict()" in s10
-    assert "'branch_var_ref'" in s10
-    assert 'head_telemetry' in s10, 'the head telemetry row vanished from the log'
+    assert srclock.has_dict_entry(s10, 'balancer', 'balancer.state_dict()')
+    assert srclock.has_dict_entry(s10, 'branch_var_ref')
+    assert srclock.has_call(s10, 'model.head_telemetry'), \
+        'the head telemetry row vanished from the log'

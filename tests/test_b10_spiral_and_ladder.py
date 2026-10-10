@@ -8,6 +8,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import EVAConfig, EVAStack          # noqa: E402
 from core.bind import TrajectorySpiralBind    # noqa: E402
 
+import _srclock as srclock                    # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _cfg():
     cfg = EVAConfig(n_layers=2, D=256, mlp_groups=4, code_dim=16, code_sparsity=4,
@@ -57,10 +61,24 @@ def test_b10_pen_is_normalized_surprise():
     assert float(f.min()) > 0.75, f'pen_decay_factor pinned at {float(f.min()):.2f}'
 
 def test_b10_concept_layer_index_copy_is_dtype_explicit():
-    import inspect
-    from core import concept_layer as cl
-    src = inspect.getsource(cl)
-    bad = [l for l in src.splitlines() if 'index_copy(' in l and '.to(' not in l
-           and 'index_copy(0, it' in l]
+    # Батч 6: inspect.getsource(модуля) + построчный текст -> AST-вызовы
+    # `X.index_copy(0, ...)`: третий аргумент обязан содержать `.to(` (явный
+    # dtype). Строже текста: ловит и многострочные вызовы, не зависти от
+    # того, на какой строке оказался 'index_copy(0, it'.
+    import ast
+    src = os.path.join(ROOT, 'core', 'concept_layer.py')
+    checked = 0
+    bad = []
+    for site in srclock.call_sites(src, 'index_copy'):
+        if len(site.args) < 3:
+            continue
+        first = site.args[0]
+        if not (isinstance(first, ast.Constant) and first.value == 0):
+            continue
+        checked += 1
+        third = srclock.unparse(site.args[2])
+        if '.to(' not in third:
+            bad.append(srclock.unparse(site))
+    assert checked >= 4, f'index_copy(0, ...) calls vanished? checked={checked}'
     assert not bad, f'regression: dtype-less index_copy: {bad}'
 

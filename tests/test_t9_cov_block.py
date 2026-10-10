@@ -14,9 +14,11 @@ Run: python -m pytest tests/test_t9_cov_block.py -q
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import ast
 import torch
 from core.config import EVAConfig
 from core.stack import EVAStack
+import _srclock as srclock
 
 
 def _cfg(cov=False):
@@ -128,13 +130,49 @@ def test_state_threads_and_resets():
 
 
 def test_train_resume_order_not_wiped():
-    """R2-лок: восстановленный stream_state не затирается до цикла обучения."""
+    """R2-лок: восстановленный stream_state не затирается до цикла обучения.
+
+    Батч 6: index-срез сырого текста -> AST-порядок стейтментов. Проверяем:
+    (1) top-level `state = None`/`gs = None` объявлены ДО resume-блока;
+    (2) внутри resume-блока после `state = _tstate(ckpt['stream_state'], ...)`
+        нет повторного `state = None`/`gs = None`.
+    """
     p = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'train.py')
-    src = open(p, encoding='utf-8').read()
-    i_restore = src.index("_tstate(ckpt['stream_state']")
-    i_loop = src.index('# Training loop')
-    seg = src[i_restore:i_loop]
-    assert 'state = None' not in seg, 'stream_state затирается после восстановления'
-    assert 'gs = None' not in seg, 'stream_gs затирается после восстановления'
-    i_decl = src.index('state = None')
-    assert i_decl < i_restore, 'state объявляется после resume-блока'
+    fn = srclock.find_def(p, 'train')
+    assert fn is not None, 'train() vanished'
+    stmts = fn.body
+
+    def _is_none_reset(st, name):
+        return (isinstance(st, ast.Assign)
+                and len(st.targets) == 1
+                and isinstance(st.targets[0], ast.Name)
+                and st.targets[0].id == name
+                and isinstance(st.value, ast.Constant)
+                and st.value.value is None)
+
+    resume_idx = None
+    resume_if = None
+    for i, st in enumerate(stmts):
+        if isinstance(st, ast.If) and srclock.has_call_in(
+                st, '_tstate', args=["ckpt['stream_state']", 'device']):
+            resume_idx, resume_if = i, st
+            break
+    assert resume_if is not None, 'the stream_state resume block vanished'
+    decl_idx = [i for i, st in enumerate(stmts)
+                if _is_none_reset(st, 'state') or _is_none_reset(st, 'gs')]
+    assert decl_idx, 'state/gs are not declared before the resume block'
+    assert max(decl_idx) < resume_idx, \
+        'state/gs declared AFTER the resume block (warm resume would be wiped)'
+
+    restore_ln = None
+    for st in ast.walk(resume_if):
+        if srclock.has_call_in(st, '_tstate',
+                               args=["ckpt['stream_state']", 'device']):
+            restore_ln = st.lineno if restore_ln is None else min(restore_ln, st.lineno)
+    assert restore_ln is not None, 'the resume block lost the _tstate restore'
+    # любой `state = None`/`gs = None` ПОСЛЕ строки восстановления внутри
+    # resume-блока (на любой глубине вложенности) — регресс warm resume
+    for st in ast.walk(resume_if):
+        if _is_none_reset(st, 'state') or _is_none_reset(st, 'gs'):
+            assert st.lineno < restore_ln, \
+                'stream_state затирается после восстановления'

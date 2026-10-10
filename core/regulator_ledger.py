@@ -218,7 +218,8 @@ class RegulatorLedger:
         # IMPORTANT: restore between EVERY leg — the probe forward itself mutates
         # buffers (the _bus_rms EMA, _intent_stream, the mirror caches): without
         # a per-leg restore sigma_re = 0.57 nat (measured), with it — fp noise.
-        snap = model.snapshot_runtime_buffers()
+        # Блок 1: forward-граф-кэши исключены (write-before-read, сотни МБ).
+        snap = model.snapshot_runtime_buffers(include_caches=False)
         ex = self._probe_state(model)
         b0, b1 = self.batches[0], self.batches[1]
         try:

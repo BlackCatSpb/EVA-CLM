@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import EVAConfig, EVAStack                      # noqa: E402
 from core.training_control import LossBalancer            # noqa: E402
 
+import _srclock as srclock                                # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -78,19 +80,24 @@ def test_ggeo_freeze_blocks_step_count_side_effects():
     assert n2 == n1 + 1
 
 
-# source locks: train.py by-name restore + post-construction CLI overrides
+# source locks (AST-нормализация, батч 6): train.py by-name restore + CLI overrides
 def test_train_py_wiring_locks():
-    t = open(os.path.join(ROOT, 'scripts', 'train.py'), encoding='utf-8').read()
-    assert "_restore_optimizer(optimizer, model, ckpt['optimizer']," in t or \
-           "_restore_optimizer(optimizer, model, ckpt['optimizer'])" in t
-    assert "cfg.warmup_steps = args.warmup" in t
-    assert "float('nan')" in t
+    t = os.path.join(ROOT, 'scripts', 'train.py')
+    # точное сравнение AST-узла вызова: _restore_optimizer(optimizer, model,
+    # ckpt['optimizer'], ...) — наличие имени _restore_optimizer БЕЗ правильных
+    # аргументов больше не считается (усиление против подстрочного лока)
+    assert srclock.has_call(t, '_restore_optimizer',
+                            args=['optimizer', 'model', "ckpt['optimizer']"]), \
+        'by-name optimizer restore call vanished or its arguments changed'
+    assert srclock.assigns(t, 'cfg.warmup_steps', 'args.warmup')
+    assert srclock.has_call(t, 'float', args=["'nan'"])
 
 
 # F3-05: u_gate threshold rebased to the post-B10 pen scale
 def test_f305_uncertainty_threshold_rebased():
-    from core.concept_layer import UnifiedConceptLayer
-    src = open(os.path.join(ROOT, 'core', 'concept_layer.py'), encoding='utf-8').read()
-    assert 'log_tau_uncert = nn.Parameter(torch.tensor(-0.6931))' in src
+    # AST-нормализация: точный узел присваивания (имя+значение), а не подстрока
+    assert srclock.assigns(os.path.join(ROOT, 'core', 'concept_layer.py'),
+                           'self.log_tau_uncert',
+                           'nn.Parameter(torch.tensor(-0.6931))')
     import math as _m
     assert abs(_m.exp(-0.6931) - 0.5) < 1e-3     # half-open at typical surprise

@@ -2836,3 +2836,20 @@ FFT-bind, bounded_residual) + независимые проверки контр
    vs baseline 4.48->3.29 (20 шагов), b_flow 4.03, b_drift 1.002.
 НЕ проверено (нет CUDA): autocast/GradScaler, реальный VRAM/OOM, сборка полной
 модели на GPU, GPU-ветка CheckpointError.
+
+
+## ОЧЕРЕДЬ ПЕРЕД A100, БЛОК 1 (721 passed, саботаж 23/23 RED)
+
+1. SOURCE-ЛОКИ: _srclock переписан (tokenize вместо regex; алиасы; мёртвые ветки);
+   17 локов в 11 файлах мигрированы на AST, саботаж 17/17 RED; остаточные
+   ограничения задокументированы (README/absent-маркеры оставлены raw).
+2. БАЛАНСЕР: NaN/Inf per-param гард + n_nonfinite/bal_nf телеметрия; bypass-бонд
+   приведён к 2xCE (было до 4x); +1e-8 из nb убран (cos при gau~1e-12: >0.999);
+   last_scale=None на невалиде; докстринг = sign-mask; тесты test_balancer_guards (13).
+3. СНИМОК: +21 атрибут (граф-кэши, _position, _mature_py, _tau_signal_used и др.),
+   restore знает mlp./ucl., include_caches=False для best.pt (0.5GB не персистятся);
+   тесты test_snapshot_coverage (4).
+4. pytest 721 passed; суммарный саботаж 23/23 RED. Отчёт REVISION_NOTES_block1.md.
+ОСТАЛОСЬ: блок 2 — корневой recompute-фикс gc=True (вынос state-апдейтов из
+checkpointed-региона); v4 stability — не в репо (эксперимент), закрывается
+журнальной пометкой.

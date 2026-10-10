@@ -698,6 +698,7 @@ def train(cfg=None, resume_path=None):
                         f'bal_b={getattr(balancer, "n_balance", 0)} '
                         f'bal_g={getattr(balancer, "n_cheap_guard", 0)} '  # B20: срезано guard'ом
                         f'bal_unc={getattr(balancer, "n_unconnected", 0)} '
+                        f'bal_nf={getattr(balancer, "n_nonfinite", 0)} '  # блок 1: NaN/Inf-гард
                         f'bal_s={getattr(balancer, "scale_ema", None) if getattr(balancer, "scale_ema", None) is None else round(float(balancer.scale_ema), 5)} '
                         f'bal_sc={getattr(balancer, "last_scale", None) if getattr(balancer, "last_scale", None) is None else round(float(balancer.last_scale), 5)} '
                         f'bal_cos={getattr(balancer, "last_align_cos", None) if getattr(balancer, "last_align_cos", None) is None else round(float(balancer.last_align_cos), 4)}')
@@ -755,8 +756,11 @@ def train(cfg=None, resume_path=None):
                         'step': step,
                         'model': model.state_dict(), 'code_fp': codebook_fingerprint(model),
                         # M65-opt2 (A2): non-persistent runtime-состояние —
-                        # без него резюм терял 27 буферов (maxdiff 9.7e-2)
-                        'runtime': model.snapshot_runtime_buffers(),
+                        # без него резюм терял 27 буферов (maxdiff 9.7e-2).
+                        # Блок 1: forward-граф-кэши (сотни МБ в прод-конфиге)
+                        # в чекпоинт НЕ кладутся — они write-before-read и
+                        # пересоздаются первым forward'ом после резюма.
+                        'runtime': model.snapshot_runtime_buffers(include_caches=False),
                         'optimizer': optimizer.state_dict() if not args.no_save_optimizer else None,
                         'param_names': _opt_param_names(model, optimizer) if not args.no_save_optimizer else None,
                         'scheduler': scheduler.state_dict(),

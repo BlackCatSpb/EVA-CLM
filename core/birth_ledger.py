@@ -112,7 +112,9 @@ class BirthLedger:
         for e in self.entries:
             if e['retired'] or step - e['step'] < self.horizon:
                 continue
-            snap = model.snapshot_runtime_buffers()
+            # Блок 1: forward-граф-кэши не нужны для rollback пробы (они
+            # write-before-read) и их клонирование стоило бы сотни МБ/слой
+            snap = model.snapshot_runtime_buffers(include_caches=False)
             ex = _RL._probe_state(model)
             undo = None
             try:
