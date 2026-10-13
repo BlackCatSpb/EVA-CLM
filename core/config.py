@@ -729,6 +729,26 @@ class WideBindConfig:
     bounded_gate_b_init: float = 0.5     # b_g init (gate_mean ~ tanh(0.5) ~ 0.46)
     bounded_scale_init: float = 0.5      # init per-layer RMSNorm scale
 
+    # ─── Очередь A100 блок 3 (OPT-IN): memory-only read (v4) + stability-guard ───
+    # False (default) = СТАРОЕ ПОВЕДЕНИЕ БИТ-В-БИТ: ветка не исполняется,
+    # новых параметров не создаётся, forward/state_dict не меняются.
+    # True = чтение банка больше НЕ инжектится в поток h: банк возвращает h
+    # без изменений, а нормированный fused-read уходит ОТДЕЛЬНЫМ линейным путём
+    # прямо в code-пространство головы (per-bit log-odds u), минуя h.
+    # Ограничение ПО ПОСТРОЕНИЮ: delta_u = unit(mo_proj·unit(read))·tanh(mo_scale)
+    # (||delta_u||≤1), плюс мягкий норм-кап вклада в логиты относительно нормы
+    # собственных логитов головы (att = min(1, cap/||Δlogits||)) и конечность-чек
+    # (NaN/Inf вклад -> 0 + счётчик). Телеметрия: mo_norm/mo_gate/mo_guard_n.
+    # Мотивация: старый v4 (без guard) коллапсировал на s0 (eval 7.2->21.3 за
+    # ~250 шагов): неограниченный рост нормы вклада ||Δz|| 0.07->0.40 (норма
+    # mo_proj 3.7->5.16) в положительной связи со стволом (g_bind 0.5->20).
+    memory_only_read: bool = False
+    mo_scale_init: float = 0.0        # init обучаемого tanh-масштаба (0 = no-op)
+    mo_dir_std: float = 0.0           # std init направления; <=0 => 1/sqrt(D)
+    mo_cap_ratio: float = 0.25        # кап: ||Δlogits|| ≤ ratio·||logits|| + floor
+    mo_cap_floor: float = 1.0         # абсолютный пол капа (в единицах логитов)
+    mo_eps: float = 1e-6              # eps нормализации/делителей guard'а
+
     @classmethod
     def minimal(cls, **kw):
         """P2-1 (proposed patches): the bare trunk for the ablation.

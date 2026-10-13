@@ -211,3 +211,20 @@ def warn_bounded_gate_mismatch(missing, unexpected, log=None) -> list:
             f'совпали при загрузке (резюм ON<->OFF чекпойнта) — они '
             f'инициализированы/потеряны: {keys[:4]}')
     return keys
+
+
+def warn_memory_only_mismatch(missing, unexpected, log=None) -> list:
+    """Блок 3 (аудит-совместимость): резюм ON/OFF-чекпоинта memory-only read.
+
+    `load_state_dict(strict=False)` молча оставляет `lm_head.mo_proj/
+    .mo_scale` на init (OFF->ON) или отбрасывает обученные (ON->OFF).
+    Возвращает список несовпавших mo-ключей и печатает предупреждение.
+    """
+    keys = [k for k in list(missing or []) + list(unexpected or [])
+            if k.endswith(('.mo_proj', '.mo_scale'))]
+    if keys and log is not None:
+        log(f'  [warn] memory_only_read: {len(keys)} mo-параметров не '
+            f'совпали при загрузке (резюм ON<->OFF чекпойнта) — они '
+            f'инициализированы/потеряны: {keys[:4]}')
+    return keys
+

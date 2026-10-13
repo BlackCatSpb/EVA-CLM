@@ -376,6 +376,9 @@ def train(cfg=None, resume_path=None):
         # gate-параметры (strict=False их не считает ошибкой) — warning.
         from core.ckpt_io import warn_bounded_gate_mismatch
         warn_bounded_gate_mismatch(missing, unexpected, log=print)
+        # блок 3: ON/OFF-резюм memory_only_read — тот же класс предупреждения
+        from core.ckpt_io import warn_memory_only_mismatch
+        warn_memory_only_mismatch(missing, unexpected, log=print)
         # M65-opt2 (A2): восстановить runtime-состояние (старые чекпоинты
         # без 'runtime' — тихо пропускаем, поведение как раньше)
         if ckpt.get('runtime') is not None:

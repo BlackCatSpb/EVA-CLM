@@ -266,6 +266,21 @@ class EVAStack(nn.Module):
                     'bounded_residual.', RuntimeWarning, stacklevel=2)
             self._bounded_residual = False
 
+        # ─── Очередь A100 блок 3 (OPT-IN): memory-only read (v4) ───
+        # Флаг читается головой (mo-параметры создаются там, локальный RNG);
+        # стек валидирует совместимость и передаёт живой read банка голове.
+        self.memory_only_read = bool(getattr(cfg, 'memory_only_read', False))
+        if self.memory_only_read:
+            if self.memory_bank is None:
+                raise ValueError(
+                    'memory_only_read=True требует memory_bank=True (читать '
+                    'нечего).')
+            if not getattr(self.lm_head, 'mo_supported', False):
+                raise ValueError(
+                    'memory_only_read=True требует голову с поддержкой '
+                    'memory-only read (sigmoid_coded).')
+            self.lm_head.init_memory_only_read(cfg)
+
     def forward(self, h, state=None, global_state=None, pred_weight=None, adaptive=True,
                 context_mem=None, allow_write=None, step=None,
                 reasoning_buffer=None, reasoning_count=None, intent_state=None,
@@ -457,6 +472,10 @@ class EVAStack(nn.Module):
         # commits to random codes (measured: ce 11.47 -> 22.39) and every
         # residual is noise for the phantom bank — both wait for real semantics.
         _head = getattr(self, 'lm_head', None)
+        if self.memory_only_read and _head is not None:
+            # свежий forward: stale-чтение прошлого шага не должно утекать
+            # в голову, если банк на этом шаге не вызывался
+            _head._mo_read = None
         # M65-opt (аудит A1): _st читается безусловно ниже — для голов без
         # srl_on он был unbound (UnboundLocalError на каждом forward).
         _st = -1 if step is None else int(step)
@@ -708,6 +727,10 @@ class EVAStack(nn.Module):
                 _mrd = getattr(self.memory_bank, '_last_read', None)
                 if _head is not None and _mrd is not None:
                     _head._mem_dir = _mrd
+                if self.memory_only_read and _head is not None:
+                    # живой fused-read -> отдельный путь головы (v4)
+                    _head._mo_read = getattr(self.memory_bank,
+                                             '_last_read_live', None)
 
             if self.cfg.gradient_checkpointing and self.training:
                 from torch.utils.checkpoint import checkpoint as _cp
@@ -1325,6 +1348,12 @@ class EVAStack(nn.Module):
         if pb is not None:
             for k, v in pb.stats().items():
                 out[f'ph_{k}'] = v
+        # Очередь A100 блок 3: телеметрия memory-only read (только при ON)
+        if getattr(h, '_mo_on', False):
+            _mo = getattr(h, '_mo_stats', None)
+            if isinstance(_mo, dict):
+                for _k, _v in _mo.items():
+                    out[_k] = _v
         return out
 
     def flush_control_pending(self) -> None:
@@ -1385,12 +1414,14 @@ class EVAStack(nn.Module):
         if _head is not None:
             for _an in ('_mem_dir', '_last_u', '_last_p', '_last_srl',
                         '_last_lacuna', '_last_lacuna_rel', '_last_lacuna_gate',
-                        '_last_conflict', '_last_sat'):
+                        '_last_conflict', '_last_sat', '_mo_read'):
                 if hasattr(_head, _an):
                     setattr(_head, _an, None)
         _bank = getattr(self, 'memory_bank', None)
         if _bank is not None and hasattr(_bank, '_last_read'):
             _bank._last_read = None
+        if _bank is not None and hasattr(_bank, '_last_read_live'):
+            _bank._last_read_live = None
         # M64 (R1/R2): the L2 bank's per-forward effective store carries the
         # forward's graph — flush it with the rest of the runtime state.
         _l2 = getattr(_bank, 'l2', None)
@@ -1495,6 +1526,8 @@ class EVAStack(nn.Module):
         for _pfx, _mod, _an in (('bridge', getattr(self, 'bridge', None), '_preds'),
                                 ('bank', getattr(self, 'memory_bank', None), '_last_read'),
                                 ('head', getattr(self, 'lm_head', None), '_mem_dir'),
+                                # блок 3: memory-only read — живой read головы
+                                ('head', getattr(self, 'lm_head', None), '_mo_read'),
                                 ('head', getattr(self, 'lm_head', None), '_last_lacuna_rel'),
                                 ('head', getattr(self, 'lm_head', None), '_last_lacuna_gate'),
                                 ('head', getattr(self, 'lm_head', None), '_last_lacuna'),

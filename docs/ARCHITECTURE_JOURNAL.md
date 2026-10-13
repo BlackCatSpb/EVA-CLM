@@ -2872,3 +2872,20 @@ gc=False vs pristine HEAD бит-идентичен (выходы/209 гради
 ИТОГ ОЧЕРЕДИ: блок 1 (локи/балансер/снимок, 721) + блок 2 (recompute, 725).
 v4 stability-guard — не в репо (экспериментальный memory-only путь),
 закрыт журнальной пометкой. ВСЁ ГОТОВО К A100.
+
+
+## ОЧЕРЕДЬ A100 ЗАКРЫТА ПОЛНОСТЬЮ: БЛОК 3 — v4 memory-only + stability-guard (733 passed)
+
+Причина коллапса s0: опасен сам живой градиентный маршрут read->логиты (контроль
+mo_frozen свалился на 1250 БЕЗ роста нормы; ||Δz|| x5.9, g_bind 0.12->19.9).
+Реализовано в репо: memory_only_read=False (OFF бит-в-бит); unit(read)->mo_proj->
+unit*tanh(scale) (||Δu||<=1 по построению) + кап Δlogits <= 0.25*||logits||+1.0
+с мягкой аттенюацией + 3 конечность-чека; телеметрия mo_norm/mo_gate/mo_att/
+mo_guard_n/mo_nan_n; bounded_residual-путь и комбинации не тронуты.
+Стенд 600x3: bounded_v2 6.431 vs v4+guard 6.624 (+0.19 хуже); s0 расширенно до
+3000: v4+guard 5.40 (старый v4 21.30 — коллапс исчез), flow 9.1/9.7, head/bind
+0.75, Δ/h=0, guard не срабатывал (страховка). Тесты +8, саботаж 5/5 RED.
+pytest 733 passed. Отчёт REVISION_NOTES_block3.md.
+ИТОГ: ОЧЕРЕДЬ ПЕРЕД A100 ЗАКРЫТА ПОЛНОСТЬЮ (блоки 1-3). Все изменения в main и
+песочнице, запушены. Готовность: bounded_residual=True, gc=False (fallback
+gc=True чист), watchdog, 733 теста.

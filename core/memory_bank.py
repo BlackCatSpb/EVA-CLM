@@ -462,6 +462,14 @@ class StreamingMemoryBank(nn.Module):
         self._bounded_log = []
         self._BOUNDED_LOG_CAP = 4096
 
+        # ─── Очередь A100 блок 3 (OPT-IN): memory-only read (v4) ───
+        # True: fused-read не инжектится в h (банк возвращает h как есть),
+        # живой read кладётся в _last_read_live — стек передаёт его голове.
+        # False: ниже старый путь БИТ-В-БИТ (новая ветка не исполняется).
+        self._memory_only_read = (bool(getattr(cfg, 'memory_only_read', False))
+                                  if cfg is not None else False)
+        self._last_read_live = None
+
         # Track sentence boundaries
 
     def forward(self, h: torch.Tensor, tokens: torch.Tensor,
@@ -554,6 +562,12 @@ class StreamingMemoryBank(nn.Module):
         # channel — cached in BOTH modes (the eval must not hand the head a
         # stale training direction; the eval snapshot covers it either way).
         self._last_read = fused.detach()
+        if self._memory_only_read:
+            # Очередь A100 блок 3: memory-only read — инъекции в h НЕТ,
+            # живой fused уходит голове (stack -> lm_head._mo_read). Ветка
+            # исполняется только при флаге; ниже старый путь бит-в-бит.
+            self._last_read_live = fused
+            return h
         if not _can_write:
             return h
 

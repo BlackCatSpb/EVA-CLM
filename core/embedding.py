@@ -580,6 +580,125 @@ class SigmoidCodedHead(nn.Module):
                 '_pair_idx',
                 self.codes.nonzero()[:, 1].reshape(-1, int(_cw[0].item())),
                 persistent=False)
+        # ─── Очередь A100 блок 3 (OPT-IN): memory-only read (v4) + guard ───
+        # Отдельный линейный путь из нормированного чтения банка прямо в
+        # code-пространство головы (per-bit log-odds u), минуя поток h.
+        # Все атрибуты инертны при OFF; параметры создаются только при ON.
+        self.mo_supported: bool = True
+        self._mo_on: bool = False
+        self._mo_read: Optional[torch.Tensor] = None
+        self.mo_proj: Optional[nn.Parameter] = None
+        self.mo_scale: Optional[nn.Parameter] = None
+        self._mo_stats: dict = {}
+        self._mo_guard_n: int = 0
+        self._mo_nan_n: int = 0
+        self._mo_cap_ratio: float = 0.0
+        self._mo_cap_floor: float = 0.0
+        self._mo_eps: float = 1e-6
+        if bool(getattr(cfg, 'memory_only_read', False)):
+            self.init_memory_only_read(cfg)
+
+    def init_memory_only_read(self, cfg=None) -> None:
+        """Create memory-only read params (Stage 3, opt-in). Idempotent.
+
+        Детерминированный ЛОКАЛЬНЫЙ RNG (global stream не сдвигается:
+        сборка ON/OFF даёт идентичные веса ядра). mo_proj — направление в
+        K-пространстве (инициализация мала, но не ноль: градиент жив с
+        первого шага), mo_scale — обучаемый масштаб, tanh(mo_scale) = 0
+        при init=0 => вклад в точности ноль (identity-старт).
+        """
+        if self._mo_on:
+            return
+        if cfg is None:
+            cfg = object()
+        D, K = self.D, self.K
+        _std = float(getattr(cfg, 'mo_dir_std', 0.0) or 0.0)
+        if _std <= 0.0:
+            _std = 1.0 / math.sqrt(D)
+        _g = torch.Generator().manual_seed(101)
+        w = torch.randn(D, K, generator=_g) * _std
+        self.mo_proj = nn.Parameter(w)
+        self.mo_scale = nn.Parameter(torch.tensor(
+            float(getattr(cfg, 'mo_scale_init', 0.0))))
+        self._mo_cap_ratio = max(0.0, float(getattr(cfg, 'mo_cap_ratio', 0.25)))
+        self._mo_cap_floor = max(0.0, float(getattr(cfg, 'mo_cap_floor', 1.0)))
+        _eps = float(getattr(cfg, 'mo_eps', 1e-6) or 1e-6)
+        self._mo_eps = _eps if _eps > 0.0 else 1e-6
+        self._mo_on = True
+
+    def _mo_align_read(self, ref: torch.Tensor):
+        """Приводит _mo_read к форме ref[:-1]; None при несовпадении."""
+        mr = self._mo_read
+        if mr is None or not torch.is_tensor(mr) or mr.shape[-1] != self.D:
+            return None
+        if mr.dim() == 2:
+            mr = mr.unsqueeze(1)
+        if tuple(mr.shape[:-1]) != tuple(ref.shape[:-1]):
+            if mr.numel() == ref.shape[:-1].numel() * self.D:
+                mr = mr.reshape(*ref.shape[:-1], self.D)
+            else:
+                return None
+        return mr
+
+    def _mo_delta_u(self, ref: torch.Tensor):
+        """Guarded memory-only contribution in code space (per-bit log-odds).
+
+        delta_u = unit(mo_proj·unit(read)) · tanh(mo_scale): единичное
+        направление * tanh(масштаб) => ||delta_u|| ≤ 1 ПО ПОСТРОЕНИЮ.
+        NaN/Inf на любом шаге -> нулевой вклад + _mo_nan_n.
+        """
+        mr = self._mo_align_read(ref)
+        if mr is None:
+            return None
+        if not torch.isfinite(mr).all():
+            self._mo_nan_n += 1
+            return None
+        rn = F.normalize(mr, dim=-1, eps=self._mo_eps)
+        po = rn @ self.mo_proj
+        if not torch.isfinite(po).all():
+            self._mo_nan_n += 1
+            return None
+        dirv = F.normalize(po, dim=-1, eps=self._mo_eps)
+        gate = torch.tanh(self.mo_scale)
+        delta = dirv * gate
+        if not torch.isfinite(delta).all():
+            self._mo_nan_n += 1
+            return None
+        return delta
+
+    def _mo_cap_apply(self, delta: torch.Tensor, ref_norm: torch.Tensor,
+                      delta_logits: Optional[torch.Tensor] = None):
+        """Мягкий норм-кап вклада относительно нормы собственных логитов.
+
+        cap = mo_cap_ratio·ref + mo_cap_floor (per-position); att = min(1,
+        cap/||delta_logits||) — при превышении вклад аттенюируется
+        мультипликативно (градиент сохраняется), счётчик guard'а растёт.
+        """
+        if delta_logits is None:
+            delta_logits = delta
+        nrm = delta_logits.detach().norm(dim=-1, keepdim=True)
+        cap = self._mo_cap_ratio * ref_norm + self._mo_cap_floor
+        att = (cap / nrm.clamp_min(self._mo_eps)).clamp(max=1.0)
+        if bool((att < 1.0 - 1e-9).any()):
+            self._mo_guard_n += 1
+        return delta * att, att
+
+    def _mo_update_stats(self, delta: torch.Tensor, att: torch.Tensor,
+                         delta_logits: Optional[torch.Tensor] = None) -> None:
+        """Телеметрия: mo_norm — норма вклада в code-пространстве (u),
+        mo_logit_norm — норма вклада в логитах (пост-guard), mo_gate —
+        |tanh(mo_scale)|, mo_att — средняя аттенюация, счётчики guard/NaN."""
+        with torch.no_grad():
+            gate = float(torch.tanh(self.mo_scale).abs())
+            self._mo_stats = {
+                'mo_norm': float(delta.detach().norm(dim=-1).mean()),
+                'mo_gate': gate,
+                'mo_att': float(att.detach().mean()),
+                'mo_logit_norm': (float(delta_logits.detach().norm(dim=-1).mean())
+                                  if delta_logits is not None else -1.0),
+                'mo_guard_n': int(self._mo_guard_n),
+                'mo_nan_n': int(self._mo_nan_n),
+            }
 
     def _sync_readout_full_from_readout(self) -> None:
         """Identity-at-init: readout_full = блочно-диагональная копия readout."""
@@ -1072,6 +1191,18 @@ class SigmoidCodedHead(nn.Module):
         if self.pair_r > 0:
             # P1-2: the rank-r pairwise correction (identity while V2 == 0)
             logits = logits + self._pair_term(u)
+        # ─── Очередь A100 блок 3 (OPT-IN): memory-only read (v4, guarded) ───
+        # Вклад идёт в code-пространство логитов отдельным путём из чтения
+        # банка и капается относительно нормы собственных логитов. OFF =>
+        # строка не исполняется, forward бит-в-бит прежний.
+        if self._mo_on:
+            _mo_d = self._mo_delta_u(u)
+            if _mo_d is not None:
+                _mo_dl = _mo_d @ self.codes.T
+                _mo_ref = logits.detach().norm(dim=-1, keepdim=True)
+                _mo_dl, _mo_att = self._mo_cap_apply(_mo_dl, _mo_ref)
+                logits = logits + _mo_dl
+                self._mo_update_stats(_mo_d * _mo_att, _mo_att, _mo_dl)
         if self.temper_on and getattr(self, '_temper_active', True):
             _md = getattr(self, '_mem_dir', None)
             if _md is not None and _md.shape[-1] == self.D:
@@ -1141,6 +1272,17 @@ class SigmoidCodedHead(nn.Module):
                 self._last_srl = {k: v.detach().mean() for k, v in _srl_info.items()}
         if self.srl_on and getattr(self, '_srl_active', True):
             self._srl_step += 1         # M53e
+        # ─── Очередь A100 блок 3 (OPT-IN): memory-only read (v4, guarded) ───
+        # RAW-ветка (head_normalize=False): логитов как таковых нет, ссылка
+        # капа — прокси ||u||·sqrt(S) (норма u@codes.T без V-матмула).
+        if self._mo_on:
+            _mo_d = self._mo_delta_u(u)
+            if _mo_d is not None:
+                _mo_ref = (u.detach().norm(dim=-1, keepdim=True)
+                           * math.sqrt(max(1, int(self.S))))
+                _mo_d, _mo_att = self._mo_cap_apply(_mo_d, _mo_ref)
+                u = u + _mo_d
+                self._mo_update_stats(_mo_d, _mo_att)
         c: torch.Tensor = self.codes[t].to(u.dtype)
         lp: torch.Tensor = (c * F.logsigmoid(u) + (1 - c) * F.logsigmoid(-u)).sum(-1)
         return lp + self.token_bias[t]
